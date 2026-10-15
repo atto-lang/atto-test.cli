@@ -318,6 +318,8 @@ def effect_scan(root, config, filenames, strict):
         paths = filenames
     else:
         params = config.get("effects", {})
+        if not isinstance(params, dict):
+            raise UsageError("[effects] must be a TOML table")
         paths = params.get("files")
         if paths is None:
             paths = [str(p.relative_to(root)) for p in sorted(root.rglob("*.ores"))
@@ -328,13 +330,13 @@ def effect_scan(root, config, filenames, strict):
     checked = 0
     for name in paths:
         path = _relative(root, name)
-        if path.suffix != ".ores" or not path.is_file() or path.is_symlink():
+        if path.suffix != ".ores" or not path.is_file() or (root / name).is_symlink():
             raise UsageError(f"expected regular .ores source file: {name}")
         if path.stat().st_size > 262144:
             raise UsageError(f"effects source exceeds 256 KiB analysis bound: {name}")
         try:
             problems, inspected = analyze(path.read_text(encoding="utf-8"))
-        except EffectsInconclusive as exc:
+        except (EffectsInconclusive, UnicodeError) as exc:
             raise UsageError(f"EFFECTS INCONCLUSIVE {name}: {exc}") from exc
         if inspected == 0:
             raise UsageError(f"EFFECTS INCONCLUSIVE {name}: no braced named fnc/method body inspected")
