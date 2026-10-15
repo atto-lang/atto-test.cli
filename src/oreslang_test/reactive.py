@@ -25,6 +25,8 @@ def analyze_reactive_events(events: Iterable[Mapping[str, object]]) -> dict[str,
             raise ReactiveTraceError("reactive trace exceeds 100000 events")
         if not isinstance(event, Mapping):
             raise ReactiveTraceError(f"event {position}: expected record")
+        if any(not isinstance(key, str) for key in event):
+            raise ReactiveTraceError(f"event {position}: non-string field name")
         op = event.get("op")
         allowed = {
             "subscribe": {"op", "subscription", "source", "mode"},
@@ -35,7 +37,7 @@ def analyze_reactive_events(events: Iterable[Mapping[str, object]]) -> dict[str,
             "error": {"op", "subscription", "reason"},
             "dispose": {"op", "subscription"},
         }
-        if op not in allowed:
+        if not isinstance(op, str) or op not in allowed:
             raise ReactiveTraceError(f"event {position}: unknown operation {op!r}")
         extra = set(event) - allowed[op]
         if extra:
