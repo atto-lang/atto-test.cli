@@ -208,7 +208,8 @@ def run_guest(args, data, case):
                 finally:
                     for reader in readers:
                         reader.join(timeout=1)
-                    if any(reader.is_alive() for reader in readers):
+                    leaked_output = any(reader.is_alive() for reader in readers)
+                    if leaked_output:
                         # Descendants may keep inherited stdout/stderr open even
                         # after their direct parent has exited. Fence the group.
                         terminate_group(child)
@@ -216,6 +217,8 @@ def run_guest(args, data, case):
                             reader.join(timeout=1)
                 if any(reader.is_alive() for reader in readers):
                     raise EvidenceError("runner subprocess output never closed")
+                if leaked_output:
+                    raise EvidenceError("guest descendants outlived the runner")
                 if overflow.is_set():
                     raise EvidenceError("runner output exceeded the 1 MiB limit")
                 return (child.returncode, out.decode("utf-8", "replace"),
