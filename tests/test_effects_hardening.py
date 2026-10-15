@@ -2,10 +2,14 @@
 from pathlib import Path
 import random
 import sys
+import tempfile
 import unittest
+import io
+import contextlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from oreslang_test.effects import EffectsInconclusive, analyze
+from oreslang_test.cli import main
 
 
 class EffectsHardeningTests(unittest.TestCase):
@@ -95,6 +99,65 @@ class EffectsHardeningTests(unittest.TestCase):
         self.assertEqual(accepted + rejected, 5000)
         self.assertGreater(rejected, 0)
         self.assertGreater(accepted, 0)
+
+
+class EffectScannerBudgetTests(unittest.TestCase):
+    def invoke(self, root, *flags):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            status = main(["--root", str(root), "--effects", *flags])
+        return status, out.getvalue(), err.getvalue()
+
+    def test_caps_warning_output_without_losing_true_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "warnings.ores").write_text(
+                "fnc f() {\n" + "panic new Error();\n" * 150 + "}\n", encoding="utf8")
+            status, out, err = self.invoke(root, "--effects-strict", "--file", "warnings.ores")
+            self.assertEqual(status, 1, err)
+            self.assertEqual(out.count("EFFECT WARNING warnings.ores:"), 100)
+            self.assertIn("EFFECT WARNINGS TRUNCATED shown=100 total=150", out)
+            self.assertIn("warnings=150", out)
+
+    def test_rejects_large_token_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "large.ores").write_text(
+                "fnc f(){ " + "panic " * 25001 + "}", encoding="utf8")
+            status, _, err = self.invoke(root, "--file", "large.ores")
+            self.assertEqual(status, 2)
+            self.assertIn("25000-token analysis budget", err)
+
+    def test_directory_discovery_is_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for n in range(513):
+                (root / f"sample_{n}.ores").write_text("fnc f() {}\n", encoding="utf8")
+            status, _, err = self.invoke(root)
+            self.assertEqual(status, 2)
+            self.assertIn("exceeds 512 source files", err)
+
+    def test_hidden_source_is_not_included_during_discovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "valid.ores").write_text("fnc f() {}\n", encoding="utf8")
+            (root / ".hidden.ores").write_text("fnc f() { panic new Error(); }\n", encoding="utf8")
+            status, out, err = self.invoke(root)
+            self.assertEqual(status, 0, err)
+            self.assertIn("warnings=0", out)
+
+    def test_aggregate_source_bytes_are_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            src = 'fnc f() { let value = "' + ("x" * 249900) + '"; }\n'
+            file_args = []
+            for n in range(17):
+                name = f"source_{n}.ores"
+                (root / name).write_text(src, encoding="utf8")
+                file_args.extend(("--file", name))
+            status, _, err = self.invoke(root, *file_args)
+            self.assertEqual(status, 2)
+            self.assertIn("4 MB aggregate source budget", err)
 
 
 if __name__ == "__main__":
