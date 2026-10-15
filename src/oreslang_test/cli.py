@@ -322,8 +322,20 @@ def effect_scan(root, config, filenames, strict):
             raise UsageError("[effects] must be a TOML table")
         paths = params.get("files")
         if paths is None:
-            paths = [str(p.relative_to(root)) for p in sorted(root.rglob("*.ores"))
-                     if not any(part.startswith(".") for part in p.relative_to(root).parts)]
+            paths = []
+            visited_dirs = 0
+            for folder, dirs, names in os.walk(root, followlinks=False):
+                visited_dirs += 1
+                if visited_dirs > 4096:
+                    raise UsageError("effects discovery exceeds 4096 directory budget")
+                dirs[:] = sorted(name for name in dirs
+                                 if not name.startswith(".")
+                                 and not (Path(folder) / name).is_symlink())
+                for file_name in sorted(names):
+                    if file_name.endswith(".ores") and not file_name.startswith("."):
+                        paths.append(str((Path(folder) / file_name).relative_to(root)))
+                        if len(paths) > 512:
+                            raise UsageError("effects discovery exceeds 512 source files")
     if not isinstance(paths, list) or not paths or len(paths) > 512 or not all(isinstance(p, str) for p in paths):
         raise UsageError("--effects needs one or more --file paths, [effects].files, or discoverable .ores files (max 512)")
     warnings = 0
