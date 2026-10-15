@@ -7,7 +7,6 @@ import hashlib
 import os
 from pathlib import Path
 import random
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -75,7 +74,7 @@ def run_native(root, config, timeout):
             print(f"TIMEOUT {name}")
             failed += 1
             continue
-        output = _decode(result.stdout)
+        output = result.stdout.decode("utf-8", errors="replace")
         summaries = [line for line in output.splitlines() if line.startswith("ORES_TEST|SUMMARY|")]
         status_lines = [line for line in output.splitlines()
                         if line.startswith(("ORES_TEST|PASS|", "ORES_TEST|FAIL|", "ORES_TEST|SKIP|"))]
@@ -96,7 +95,7 @@ def run_native(root, config, timeout):
         if result.returncode != 0 or not valid:
             failed += 1
             print(f"FAIL {name}: exit={result.returncode}, valid_summary={valid}")
-            print(output or _decode(result.stderr))
+            print(output[:8000] or _decode(result.stderr))
         else:
             print(f"PASS {name}: {summaries[0]}")
     return 1 if failed else 0
@@ -168,6 +167,8 @@ def fuzz(root, config, seed, cases, timeout):
             dest_dir.mkdir(parents=True, exist_ok=True)
             digest = hashlib.sha256(minimized).hexdigest()[:20]
             saved = dest_dir / f"fuzz-{digest}.bin"
+            if saved.is_symlink() or (saved.exists() and not saved.is_file()):
+                raise UsageError("unsafe failure artifact destination")
             if saved.exists() and saved.read_bytes() != minimized:
                 raise UsageError("failure artifact hash collision")
             saved.write_bytes(minimized)
@@ -213,6 +214,8 @@ def race(root, config, trace, logical, model, timeout, max_schedules):
                 status = 1
             else:
                 print(f"LOGICAL PASS {name}: explored {report['schedules']} schedules (reference model only)")
+    if analyses > 0 and (logical or model) and not (trace or params.get("command")):
+        print("No instrumented memory-access trace analyzed; result is logical-model-only")
     if analyses == 0:
         raise UsageError("--race needs --trace, [race].command instrumentation, or --logical model; refusing a false PASS")
     return status
@@ -252,8 +255,11 @@ def main(argv=None):
         if not root.is_dir():
             raise UsageError("project root must be a directory")
         manifest = root / "oreslang-test.toml"
-        with manifest.open("rb") as fh:
-            config = tomllib.load(fh)
+        if manifest.is_file():
+            with manifest.open("rb") as fh:
+                config = tomllib.load(fh)
+        else:
+            config = {}
         if args.fuzz:
             return fuzz(root, config, args.seed, args.cases, args.timeout)
         if args.race:
