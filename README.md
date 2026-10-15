@@ -95,3 +95,24 @@ The hardening revision strengthens the host-only tool without claiming language-
 - `python -m unittest discover -s tests -v` covers 28 cases including race-history and synchronization adversarial examples. The local audit test result is **not** a GitHub Actions result until the complete exact Git tree has run on a CI runner.
 
 The `finish` event is an extension of the v1 JSONL trace vocabulary. Existing traces with independent root tasks remain valid; actual `fork` traces should emit corresponding task completion events. This remains host-side analysis of observed events, and runtime coverage must be separately attested before claiming race freedom.
+
+## Advisory exceptional-effect analysis (prototype)
+
+`python bin/oreslang test --effects --file path/to/module.ores` reports local
+`throw`, `raise`, and `panic` statements whose enclosing named
+`fnc` or `method` lacks an optional corresponding `throws`,
+`raises`, or `panics` annotation. Use `--effects-strict` to exit
+1 on warnings. With no `--file`, source files are selected via
+`[effects].files` in oreslang-test.toml or bounded recursive discovery.
+
+This is **syntax-only advisory analysis**, NOT proof of exceptional-control
+semantics, whole-program effects, checked exceptions, race freedom or source
+execution. It does not resolve transitive calls, dynamic dispatch, all
+bare instance-method declarations, exceptional control-flow recovery, or
+unbounded code. Unsupported input fails closed with exit 2; clean results
+list the number of braced named callables inspected. A missing clause
+does not mean a function is guaranteed not to throw, raise or panic.
+The native compiler still independently controls admissibility.
+
+The `--effects` mode cannot combine with `--race`, `--fuzz`, or
+logical-model/trace modes. Keep runtime verification separate.
