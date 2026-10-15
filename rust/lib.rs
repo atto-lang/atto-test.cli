@@ -214,6 +214,7 @@ fn scan(args: &[OsString]) -> Result<(String, i32), String> {
     let mut checked = 0;
     let mut seen = std::collections::BTreeSet::new();
     let mut source_bytes = 0;
+    let mut shown = 0;
     for name in options.files {
         let path = source_path(&root, &name)?;
         if !seen.insert(path.canonicalize().map_err(|e| e.to_string())?) {
@@ -221,8 +222,8 @@ fn scan(args: &[OsString]) -> Result<(String, i32), String> {
         }
         let source = read_bounded(&path)?;
         source_bytes += source.len();
-        if source_bytes > 8 * 1024 * 1024 {
-            return Err("aggregate source budget exceeds 8 MiB; narrow --file selection".into());
+        if source_bytes > 4 * 1024 * 1024 {
+            return Err("aggregate source budget exceeds 4 MiB; narrow --file selection".into());
         }
         let report =
             effects::analyze(&source).map_err(|e| format!("EFFECTS INCONCLUSIVE {name}: {e}"))?;
@@ -236,12 +237,20 @@ fn scan(args: &[OsString]) -> Result<(String, i32), String> {
             return Err("diagnostic budget exceeded; narrow --file selection".into());
         }
         for diagnostic in &report.diagnostics {
-            output.push_str(&format!(
-                "EFFECT WARNING {name}:{} [{}] {}\n",
-                diagnostic.line, diagnostic.code, diagnostic.message
-            ));
+            if shown < 100 {
+                output.push_str(&format!(
+                    "EFFECT WARNING {name}:{} [{}] {}\n",
+                    diagnostic.line, diagnostic.code, diagnostic.message
+                ));
+                shown += 1;
+            }
         }
         checked += report.inspected;
+    }
+    if warnings > shown {
+        output.push_str(&format!(
+            "EFFECT WARNINGS TRUNCATED shown={shown} total={warnings}\n"
+        ));
     }
     output.push_str(&format!("EFFECTS ADVISORY inspected={checked} warnings={warnings}; direct syntax only, no call-graph/catch/actor-runtime proof\n"));
     return Ok((output, i32::from(options.strict && warnings > 0)));

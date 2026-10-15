@@ -216,3 +216,40 @@ fn self_delegation_is_refused() {
     assert_eq!(result.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&result.stderr).contains("recursion refused"));
 }
+
+#[test]
+fn migrated_output_cap_keeps_true_warning_count_and_strict_failure() {
+    let root = project(&format!(
+        "fnc f() {{\n{} }}",
+        "panic new Error();\n".repeat(150)
+    ));
+    let result = cli(root.path(), &["--effects", "--effects-strict"]);
+    assert_eq!(result.status.code(), Some(1));
+    let output = String::from_utf8(result.stdout).unwrap();
+    assert_eq!(output.matches("EFFECT WARNING sample.ores:").count(), 100);
+    assert!(output.contains("EFFECT WARNINGS TRUNCATED shown=100 total=150"));
+    assert!(output.contains("warnings=150"));
+}
+
+#[test]
+fn migrated_file_discovery_and_total_source_budgets() {
+    let root = project("fnc f() {}");
+    fs::write(root.path().join(".hidden.ores"), "fnc bad() {").unwrap();
+    assert_eq!(cli(root.path(), &["--effects"]).status.code(), Some(0));
+    for i in 0..512 {
+        fs::write(root.path().join(format!("source{i}.ores")), "fnc f() {}").unwrap();
+    }
+    assert_eq!(cli(root.path(), &["--effects"]).status.code(), Some(2));
+    let root = tempfile::tempdir().unwrap();
+    let source = format!("fnc f() {{ let x = \"{}\"; }}", "x".repeat(249_900));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_oreslang-test"));
+    command.arg("--effects").arg("--root").arg(root.path());
+    for i in 0..17 {
+        let name = format!("source{i}.ores");
+        fs::write(root.path().join(&name), &source).unwrap();
+        command.arg("--file").arg(name);
+    }
+    let result = command.output().unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("4 MiB"));
+}

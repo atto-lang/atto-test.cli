@@ -135,7 +135,7 @@ Interface signatures alone are not counted as executable bodies. This is a
 bounded source scanner, not a replacement for the compiler parser.
 
 Limits: 256 KiB per source/config file, 25,000 tokens per source, 256 delimiter
-or comment levels, 512 files, 8 MiB total source and 16,384 diagnostics. Discovery
+or comment levels, 512 files, 4 MiB total source and 16,384 diagnostics. Discovery
 skips hidden paths, `target` and `node_modules`, refuses symlinks, and stops at
 20,000 directory entries or 64 directory levels. Explicit source paths must
 stay inside the project and contain no symlink components. All files are
