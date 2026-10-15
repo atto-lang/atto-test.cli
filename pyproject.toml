@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oreslang-test-cli"
+version = "0.1.0"
+requires-python = ">=3.10"
+description = "Fail-closed race and deterministic black-box fuzz orchestration for Oreslang"
+
+[project.scripts]
+oreslang-test = "oreslang_test.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["oreslang_test*"]
