@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from bisect import bisect_right
 import re
 
-WORDS = re.compile(r"[A-Za-z_][A-Za-z_0-9]*|->|=>|[{}();,.]")
+WORDS = re.compile(r"[A-Za-z_][A-Za-z_0-9]*|->|=>|[{}();,.\[\]]")
 EFFECTS = {"throw": "throws", "raise": "raises", "panic": "panics"}
 ANNOTATIONS = frozenset(EFFECTS.values())
 
@@ -84,9 +84,9 @@ def tokenize(source: str) -> list[Token]:
     text = "".join(masked)
     # Do not claim a clean result for unbalanced nonliteral source.
     nesting = []
-    pairs = {")": "(", "}": "{"}
+    pairs = {")": "(", "}": "{", "]": "["}
     for char in text:
-        if char in ("(", "{"):
+        if char in ("(", "{", "["):
             nesting.append(char)
         elif char in pairs:
             if not nesting or nesting.pop() != pairs[char]:
@@ -94,8 +94,11 @@ def tokenize(source: str) -> list[Token]:
     if nesting:
         raise EffectsInconclusive("unbalanced source delimiters")
     newlines = [i for i, char in enumerate(text) if char == "\n"]
+    matches = list(WORDS.finditer(text))
+    if len(matches) > 25000:
+        raise EffectsInconclusive("source exceeds 25000-token analysis budget")
     return [Token(m.group(), bisect_right(newlines, m.start()) + 1)
-            for m in WORDS.finditer(text)]
+            for m in matches]
 
 
 def _matching(tokens: list[Token], start: int, opening: str, closing: str) -> int:
