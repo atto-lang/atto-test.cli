@@ -144,7 +144,7 @@ def analyze(source: str) -> tuple[list[Diagnostic], int]:
         if tokens[i].value not in ("fnc", "method"):
             i += 1
             continue
-        if i > 0 and tokens[i - 1].value == ".":
+        if i > 0 and tokens[i - 1].value in (".", "import"):
             i += 1
             continue
         name, declared, first, last, issues = _signature(tokens, i)
