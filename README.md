@@ -2,11 +2,18 @@
 
 The new test command runner for the Oreslang language.
 
-**Status: working host-side prototype, not yet a fully instrumented language feature.** Python 3.11+ (standard library only). The Java/GraalVM and LLVM runtimes do not yet emit comprehensive memory-access traces, and actual guest schedule control is still to be implemented. Tests here are conformance tests of the tool and synthetic reference models.
+**Status: working host-side prototype, not yet a fully instrumented language feature.** Rust 1.85+ owns the public launchers and exceptional-effect hints. Native tests, race traces, logical models and fuzzing currently delegate to the existing Python 3.11+ runner; those engines remain migration debt. The Java/GraalVM and LLVM runtimes do not yet emit comprehensive memory-access traces, and actual guest schedule control is still to be implemented. Tests here are conformance tests of the tool and synthetic reference models.
 
 ## Install and try it
 
 Put the repository's bin directory on PATH, with ORESLANG_BIN pointing to your *existing* Oreslang launcher (not to the shim itself). Non-test commands delegate to that launcher. The alternative executable oreslang-test accepts the test options directly.
+
+The checkout's shell launchers build/run the Rust binaries through Cargo. For
+native startup without Cargo on each invocation, use `cargo install --path . --locked`.
+`--effects` needs no Python runtime. Legacy modes locate the preserved runner
+in this checkout; keep the checkout available after installation, or set
+`ORESLANG_TEST_LEGACY` to the absolute path of its `bin/legacy-oreslang-test`.
+Python 3.11+ must be available as `python3` on PATH for those legacy modes.
 
     export PATH=/path/to/oreslang-test.cli/bin:$PATH
     export ORESLANG_BIN=/path/to/real/oreslang
@@ -21,9 +28,11 @@ A project must contain oreslang-test.toml. Native tests are automatically discov
 
 Run the included test suite with:
 
+    cargo test --locked
+    cargo clippy --locked --all-targets -- -D warnings
     python3 -m unittest discover -s tests -v
-    python3 bin/oreslang test --race --trace tests/traces/racy.jsonl
-    python3 bin/oreslang test --race --logical --model tests/models/lost-update.json
+    bin/oreslang test --race --trace tests/traces/racy.jsonl
+    bin/oreslang test --race --logical --model tests/models/lost-update.json
 
 The two example invocations deliberately report detected defects.
 
@@ -98,17 +107,17 @@ The `finish` event is an extension of the v1 JSONL trace vocabulary. Existing tr
 
 ## Advisory exceptional-effect analysis (prototype)
 
-`python bin/oreslang test --effects --file path/to/module.ores` reports local
+`oreslang test --effects --file path/to/module.ores` reports local
 `throw`, `raise`, and `panic` statements whose enclosing named
-`fnc` or `method` lacks an optional corresponding `throws`,
+`fnc`, `routine`, or method lacks an optional corresponding `throws`,
 `raises`, or `panics` annotation. Use `--effects-strict` to exit
 1 on warnings. With no `--file`, source files are selected via
 `[effects].files` in oreslang-test.toml or bounded recursive discovery.
 
 This is **syntax-only advisory analysis**, NOT proof of exceptional-control
 semantics, whole-program effects, checked exceptions, race freedom or source
-execution. It does not resolve transitive calls, dynamic dispatch, all
-bare instance-method declarations, exceptional control-flow recovery, or
+execution. It does not resolve transitive calls, dynamic dispatch, nominal
+Error ancestry, exceptional control-flow recovery, or
 unbounded code. Unsupported input fails closed with exit 2; clean results
 list the number of braced named callables inspected. A missing clause
 does not mean a function is guaranteed not to throw, raise or panic.
@@ -116,3 +125,25 @@ The native compiler still independently controls admissibility.
 
 The `--effects` mode cannot combine with `--race`, `--fuzz`, or
 logical-model/trace modes. Keep runtime verification separate.
+
+The Rust scanner covers explicit and bare named class methods, explicit
+receivers, generic named declarations and named pipe declarations. It rejects
+anonymous/pipe expressions, interpolated literals, record return types and
+uninspected exceptional-effect scopes as inconclusive. Ordinary comments,
+nested block comments, literals and Symbol names do not introduce effects.
+Interface signatures alone are not counted as executable bodies. This is a
+bounded source scanner, not a replacement for the compiler parser.
+
+Limits: 256 KiB per source/config file, 25,000 tokens per source, 256 delimiter
+or comment levels, 512 files, 8 MiB total source and 16,384 diagnostics. Discovery
+skips hidden paths, `target` and `node_modules`, refuses symlinks, and stops at
+20,000 directory entries or 64 directory levels. Explicit source paths must
+stay inside the project and contain no symlink components. All files are
+analyzed before printing a completed advisory report; an invalid later file
+cannot leave an earlier apparent success on stdout.
+
+Static-mode exits: **0** means advisory analysis completed, **1** means strict
+mode found warnings, and **2** means invalid or inconclusive input. Exit 0,
+including with every marker present, never certifies effect freedom or runtime
+admission. The requested [effect semantics and remaining compiler/runtime
+gates](docs/exception-effects.md) are tracked separately.
