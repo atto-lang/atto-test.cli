@@ -25,7 +25,10 @@ def _value(spec, local):
 
 
 def explore(path, max_schedules=10000):
-    model = json.loads(Path(path).read_text(encoding="utf-8"))
+    path = Path(path)
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > 2_000_000:
+        raise ModelError("model missing, symlinked, or exceeds 2 MB")
+    model = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(model, dict):
         raise ModelError("model must be an object")
     initial, actors, expected = model.get("initial"), model.get("actors"), model.get("expected")
@@ -39,7 +42,11 @@ def explore(path, max_schedules=10000):
         _int(v)
     if len(actors) > 16 or not all(isinstance(a, dict) for a in actors):
         raise ModelError("models support at most 16 well-formed actors")
+    if len(initial) > 256 or len(expected) > 256:
+        raise ModelError("models support at most 256 state keys")
     names = [a.get("name") for a in actors]
+    if not all(type(n) is str and 0 < len(n) <= 128 for n in names):
+        raise ModelError("actor names must be nonempty strings <=128 characters")
     if len(names) != len(set(names)) or not all(isinstance(n, str) and n for n in names):
         raise ModelError("actor names must be nonempty and unique")
     for actor in actors:
@@ -47,6 +54,37 @@ def explore(path, max_schedules=10000):
             raise ModelError("each actor needs nonempty turns")
         if any(not isinstance(t, list) or not t for t in actor["turns"]):
             raise ModelError("turns must be nonempty arrays of operations")
+    if sum(sum(len(turn) for turn in actor["turns"]) for actor in actors) > 4096:
+        raise ModelError("at most 4096 operations per model")
+    for actor in actors:
+        declared_locals = set()
+        for turn in actor["turns"]:
+            for operation in turn:
+                if not isinstance(operation, dict):
+                    raise ModelError("operations must be objects")
+                kind = operation.get("op")
+                key = operation.get("key")
+                if type(key) is not str or key not in initial:
+                    raise ModelError("every operation must reference an existing state key")
+                if kind == "read":
+                    if set(operation) != {"op", "key", "as"} or type(operation["as"]) is not str or not operation["as"]:
+                        raise ModelError("read must specify a local name")
+                    declared_locals.add(operation["as"])
+                elif kind == "write":
+                    if set(operation) != {"op", "key", "value"}:
+                        raise ModelError("write must specify exactly op/key/value")
+                    value = operation["value"]
+                    if type(value) is int:
+                        pass
+                    elif type(value) is dict and set(value) in ({"local"}, {"local", "add"}) and type(value.get("local")) is str and value["local"] in declared_locals and type(value.get("add", 0)) is int:
+                        pass
+                    else:
+                        raise ModelError("write requires integer or prior local expression")
+                elif kind == "atomic_add":
+                    if set(operation) != {"op", "key", "value"} or type(operation["value"]) is not int:
+                        raise ModelError("atomic_add requires integer value")
+                else:
+                    raise ModelError("unknown operation")
     if sum(len(a["turns"]) for a in actors) > 64:
         raise ModelError("at most 64 actor turns may be modeled")
     if type(max_schedules) is not int or not 1 <= max_schedules <= 1_000_000:

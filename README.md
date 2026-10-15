@@ -82,3 +82,16 @@ models = ["tests/models/atomic-update.json"]
 The native language testing API remains in oreslang-source.java/stdlib/testing.ores. The shared ACTOR_LOGICAL_RACE_V1 contract in Java and LLVM currently certifies the VersionedActorCell *host-side foundation only*, not guest-level enforcement.
 
 Before promoting these flags as general automatic detectors, integrate compiler/runtime memory-access hooks, actor mailbox/lock/suspend happens-before edges, coverage accounting, real guest controlled scheduling, cancellation/continuation generation checks, Java native-image parity, LLVM sanitizer builds, and cross-backend reproducible regression tests. The CLI must continue to fail closed in the absence of such instrumentation.
+
+
+## Audit hardening (2026-10-15)
+
+The hardening revision strengthens the host-only tool without claiming language-level instrumentation:
+
+- The vector-clock checker **retains all per-task, per-access-mode histories** (bounded to the last event in each task/mode), rather than silently dropping unordered reads/writes when another task writes. It caps printed conflict examples at 100 while retaining the total count.
+- The trace grammar adds `{"op":"finish","task":"..."}`. A `join` now requires a finished, directly forked child that has not already been joined. Any forked child left unfinished at trace termination, post-finish access, duplicate JSON key, or invalid encoding is a hard error.
+- Model files are limited to 2 MB, 16 actors, 64 turns, 4096 operations, and 256 state keys. Operation schemas and local references are validated before exploring interleavings.
+- Each test subprocess captures no more than 4 MB per stdout/stderr stream in memory; larger outputs fail. Timed-out process groups are terminated on POSIX hosts. A fuzz counterexample is re-executed twice before minimization and the reduced input is also checked twice; flaky first failures become an explicit non-success status.
+- `python -m unittest discover -s tests -v` covers 28 cases including race-history and synchronization adversarial examples. The local audit test result is **not** a GitHub Actions result until the complete exact Git tree has run on a CI runner.
+
+The `finish` event is an extension of the v1 JSONL trace vocabulary. Existing traces with independent root tasks remain valid; actual `fork` traces should emit corresponding task completion events. This remains host-side analysis of observed events, and runtime coverage must be separately attested before claiming race freedom.

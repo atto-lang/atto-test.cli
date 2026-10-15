@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import random
+import signal
 import subprocess
 import sys
 import tempfile
@@ -40,13 +41,31 @@ def _command(value, label):
 
 
 def _run(command, root, timeout, data=None, env=None):
-    try:
-        return subprocess.run(command, cwd=root, env=env, input=data,
-                              capture_output=True, timeout=timeout, check=False)
-    except FileNotFoundError as exc:
-        raise UsageError(f"executable not found: {command[0]}") from exc
-    except subprocess.TimeoutExpired:
-        return None
+    # Redirect guest output to bounded files instead of keeping an arbitrary
+    # process's stdout/stderr in memory. The 4 MB cap is an admission check.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        try:
+            process = subprocess.Popen(command, cwd=root, env=env,
+                                       stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+                                       stdout=stdout, stderr=stderr,
+                                       start_new_session=(os.name == "posix"))
+        except FileNotFoundError as exc:
+            raise UsageError(f"executable not found: {command[0]}") from exc
+        try:
+            process.communicate(input=data, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+            process.communicate()
+            return None
+        if stdout.tell() > 4_000_000 or stderr.tell() > 4_000_000:
+            raise UsageError("test process emitted more than 4 MB stdout or stderr")
+        stdout.seek(0)
+        stderr.seek(0)
+        return subprocess.CompletedProcess(command, process.returncode,
+                                           stdout.read(), stderr.read())
 
 
 def _decode(output):
@@ -144,6 +163,11 @@ def fuzz(root, config, seed, cases, timeout):
         result = _run(cmd, root, timeout, data=case)
         failure = _failure(result)
         if failure:
+            # A reproducible counterexample must fail more than once. Do not
+            # minimize a flaky invocation or silently treat it as success.
+            if any(_failure(_run(cmd, root, timeout, data=case)) != failure for _ in range(2)):
+                print(f"FUZZ FLAKY seed={seed} iteration={i} reason={failure}; cannot minimize")
+                return 2
             print(f"FUZZ FAILURE seed={seed} iteration={i} reason={failure} size={len(case)}")
             # Deterministic delta debugging. Never accept a shrink with a different failure class.
             minimized, budget, granularity = case, 200, 2
@@ -163,6 +187,9 @@ def fuzz(root, config, seed, cases, timeout):
                     if granularity >= len(minimized):
                         break
                     granularity = min(len(minimized), granularity * 2)
+            if any(_failure(_run(cmd, root, timeout, data=minimized)) != failure for _ in range(2)):
+                print("FUZZ FLAKY minimized case changed behavior; retaining original counterexample")
+                minimized = case
             dest_dir = _relative(root, ".oreslang-test/failures")
             dest_dir.mkdir(parents=True, exist_ok=True)
             digest = hashlib.sha256(minimized).hexdigest()[:20]
@@ -222,10 +249,10 @@ def race(root, config, trace, logical, model, timeout, max_schedules):
 
 
 def _show_races(report):
-    if report["races"]:
+    if report["race_count"]:
         for conflict in report["races"][:20]:
             print(f"DATA RACE: {conflict}")
-        print(f"{len(report['races'])} conflicts in {report['events']} observed events")
+        print(f"{report['race_count']} conflicts in {report['events']} observed events (first 100 shown)")
         return 1
     print(f"TRACE PASS: {report['events']} observed events on {report['backend']} (no conflicts in observed trace; not a full-race-freedom proof)")
     return 0

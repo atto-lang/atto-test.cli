@@ -1,7 +1,7 @@
-"""Happens-before checker for instrumented Oreslang event traces, protocol v1.
+"""Happens-before analyzer for *observed* Oreslang accesses (not a runtime proof).
 
-This *analyzes observed accesses*. A trace cannot certify that a compiler/runtime
-instrumented all accesses; instrumentation coverage is an independent gate.
+The producer must serialize events in causal per-task order. An independent
+runtime attestation is required to claim complete instrumentation coverage.
 """
 import json
 from pathlib import Path
@@ -11,112 +11,139 @@ class TraceError(ValueError):
     pass
 
 
-def _require(ok, message):
-    if not ok:
+def _require(condition, message):
+    if not condition:
         raise TraceError(message)
 
 
-def _string(value, name):
-    _require(isinstance(value, str) and 0 < len(value) <= 512, f"invalid {name}")
+def _identifier(value, label):
+    _require(type(value) is str and 0 < len(value) <= 512 and
+             all(ord(ch) >= 32 for ch in value), f"invalid {label}")
     return value
 
 
-def _leq(left, right):
-    return all(v <= right.get(k, 0) for k, v in left.items())
+def _ordered(earlier, later):
+    return all(v <= later.get(k, 0) for k, v in earlier.items())
 
 
-def _merge(dst, src):
-    for k, v in src.items():
-        dst[k] = max(dst.get(k, 0), v)
+def _merge(target, source):
+    for key, value in source.items():
+        target[key] = max(target.get(key, 0), value)
+
+
+def _unique_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        _require(key not in result, f"duplicate JSON property {key!r}")
+        result[key] = value
+    return result
 
 
 def analyze_trace(path, expected_run_id=None):
     path = Path(path)
-    _require(path.is_file() and path.stat().st_size <= 10_000_000, "trace missing or exceeds 10 MB")
-    with path.open(encoding="utf-8") as handle:
-        lines = handle.readlines()
-    _require(2 <= len(lines) <= 100_002, "trace must contain begin/end and <=100000 events")
+    _require(path.is_file() and not path.is_symlink() and
+             path.stat().st_size <= 10_000_000,
+             "trace missing, symlinked, or exceeds 10 MB")
     try:
-        records = [json.loads(line) for line in lines]
+        with path.open(encoding="utf-8") as stream:
+            records = [json.loads(line, object_pairs_hook=_unique_keys) for line in stream]
     except (ValueError, UnicodeError) as exc:
         raise TraceError(f"invalid JSONL trace: {exc}") from exc
-    _require(all(isinstance(r, dict) for r in records), "all trace records must be objects")
-    first, last = records[0], records[-1]
-    _require(first.get("op") == "begin" and first.get("version") == 1, "missing ORES_RACE_V1 begin")
-    _require(last.get("op") == "end", "missing trace end")
-    run_id = _string(first.get("run_id"), "run_id")
-    _require(last.get("run_id") == run_id, "trace end run_id differs")
+    _require(2 <= len(records) <= 100_002, "trace must have begin/end and <=100000 events")
+    _require(all(type(record) is dict for record in records), "trace records must be JSON objects")
+    begin, end = records[0], records[-1]
+    _require(begin.get("op") == "begin" and type(begin.get("version")) is int and
+             begin["version"] == 1, "missing ORES_RACE_V1 begin")
+    _require(end.get("op") == "end", "missing trace end")
+    run_id = _identifier(begin.get("run_id"), "run ID")
+    backend = _identifier(begin.get("backend"), "backend")
+    _require(end.get("run_id") == run_id, "end run ID differs")
     if expected_run_id is not None:
-        _require(run_id == expected_run_id, "trace is stale or not from this invocation")
-    _require(type(last.get("events")) is int and last["events"] == len(records) - 2,
+        _require(run_id == expected_run_id, "trace is stale or foreign to invocation")
+    _require(type(end.get("events")) is int and end["events"] == len(records) - 2,
              "incorrect trace event count")
-    _string(first.get("backend"), "backend")
+
     clocks = {}
-    locks = {}  # lock -> (owner, released vector clock)
-    messages = {}
-    accesses = {}  # location -> {'read': task/vc, 'write': task/vc}
-    races = []
-    race_count = 0
-    access_count = 0
-    for index, event in enumerate(records[1:-1], 2):
+    finished = set()
+    parents = {}
+    joined = set()
+    locks = {}      # name => (owner, last_release_vector)
+    messages = {}   # message-id => send_vector
+    history = {}    # location => {"R": task=>vector, "W": task=>vector}
+    reported = []
+    total_races = 0
+    reads_writes = 0
+
+    for index, event in enumerate(records[1:-1], start=2):
         op = event.get("op")
-        task = _string(event.get("task"), f"event {index} task")
+        task = _identifier(event.get("task"), f"event {index} task")
         if op == "task":
-            _require(task not in clocks, f"duplicate task {task}")
+            _require(task not in clocks and len(clocks) < 256, "duplicate task or >256 tasks")
             clocks[task] = {task: 1}
             continue
-        _require(task in clocks, f"unregistered task {task} at event {index}")
+        _require(task in clocks and task not in finished,
+                 f"event {index} from unregistered or completed task {task}")
         clock = clocks[task]
         if op == "fork":
-            child = _string(event.get("child"), "child")
-            _require(child not in clocks, "duplicate child")
+            child = _identifier(event.get("child"), "fork child")
+            _require(child not in clocks and len(clocks) < 256, "duplicate child or >256 tasks")
             clocks[child] = dict(clock)
             clocks[child][child] = 1
+            parents[child] = task
+        elif op == "finish":
+            _require(all(owner != task for owner, _ in locks.values()),
+                     "cannot finish while holding a lock")
+            finished.add(task)
         elif op == "join":
-            child = _string(event.get("child"), "child")
-            _require(child in clocks and child != task, "join requires another registered task")
+            child = _identifier(event.get("child"), "join child")
+            _require(parents.get(child) == task and child in finished and child not in joined,
+                     "join requires a finished, unjoined, directly forked child")
             _merge(clock, clocks[child])
+            joined.add(child)
         elif op == "lock":
-            name = _string(event.get("name"), "lock name")
-            owner, release = locks.get(name, (None, {}))
+            name = _identifier(event.get("name"), "lock")
+            owner, released = locks.get(name, (None, {}))
             _require(owner is None, f"lock {name} acquired while owned")
-            _merge(clock, release)
-            locks[name] = (task, release)
+            _merge(clock, released)
+            locks[name] = (task, released)
         elif op == "unlock":
-            name = _string(event.get("name"), "lock name")
+            name = _identifier(event.get("name"), "lock")
             owner, _ = locks.get(name, (None, {}))
             _require(owner == task, f"unlock of unowned lock {name}")
             locks[name] = (None, dict(clock))
         elif op == "send":
-            name = _string(event.get("message"), "message")
-            _require(name not in messages, "message identity reused")
-            messages[name] = dict(clock)
+            message = _identifier(event.get("message"), "message")
+            _require(message not in messages, "outstanding message identity reused")
+            messages[message] = dict(clock)
         elif op == "recv":
-            name = _string(event.get("message"), "message")
-            _require(name in messages, "receive without send")
-            _merge(clock, messages.pop(name))
+            message = _identifier(event.get("message"), "message")
+            _require(message in messages, "receive without send")
+            _merge(clock, messages.pop(message))
         elif op == "access":
-            access_count += 1
-            location = _string(event.get("location"), "location")
+            location = _identifier(event.get("location"), "location")
             mode = event.get("mode")
             _require(mode in ("R", "W"), "access mode must be R or W")
-            previous = accesses.setdefault(location, {"R": {}, "W": {}})
-            checks = [("W", t, v) for t, v in previous["W"].items()]
+            reads_writes += 1
+            past = history.setdefault(location, {"R": {}, "W": {}})
+            candidates = [("W", t, vc) for t, vc in past["W"].items()]
             if mode == "W":
-                checks += [("R", t, v) for t, v in previous["R"].items()]
-            for prior_mode, other, prior_clock in checks:
-                if other != task and not _leq(prior_clock, clock):
-                    race_count += 1
-                    if len(races) < 100:
-                        races.append({"location": location, "first": other,
-                                  "second": task, "first_mode": prior_mode,
-                                  "second_mode": mode, "event": index})
-            # Preserve both read and write histories: a later task can race
-            # with an older write even if an intervening access was ordered.
-            previous[mode][task] = dict(clock)
+                candidates.extend(("R", t, vc) for t, vc in past["R"].items())
+            for prior_mode, previous_task, prior_clock in candidates:
+                if previous_task != task and not _ordered(prior_clock, clock):
+                    total_races += 1
+                    if len(reported) < 100:
+                        reported.append({"location": location, "first": previous_task,
+                                         "second": task, "first_mode": prior_mode,
+                                         "second_mode": mode, "event": index})
+            # Do not erase other tasks' accesses. An earlier write may race
+            # with a third task even when an intervening write is ordered.
+            past[mode][task] = dict(clock)
         else:
-            raise TraceError(f"unsupported trace op {op!r} at event {index}")
+            raise TraceError(f"unsupported op {op!r} at event {index}")
         clock[task] = clock.get(task, 0) + 1
-    _require(access_count > 0, "trace contains no observed memory accesses; refusing false PASS")
+
+    _require(reads_writes > 0, "trace contains no memory accesses; refusing false PASS")
     _require(all(owner is None for owner, _ in locks.values()), "trace ends with held locks")
-    return {"events": len(records)-2, "races": races, "race_count": race_count, "backend": first["backend"]}
+    _require(all(child in finished for child in parents), "trace ends with unfinished forked task")
+    return {"events": len(records) - 2, "accesses": reads_writes,
+            "race_count": total_races, "races": reported, "backend": backend}
