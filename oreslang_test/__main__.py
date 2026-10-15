@@ -160,7 +160,7 @@ def run_guest(args, data, case):
         elif child.poll() is None:
             child.kill()
 
-    def drain(stream, data_out, exceeded, child):
+    def drain(stream, data_out, exceeded, errors, child):
         try:
             while True:
                 chunk = stream.read(65536)
@@ -171,6 +171,9 @@ def run_guest(args, data, case):
                     terminate_group(child)
                     break
                 data_out.extend(chunk)
+        except (OSError, ValueError) as exc:
+            errors.append(str(exc))
+            terminate_group(child)
         finally:
             stream.close()
 
@@ -190,11 +193,12 @@ def run_guest(args, data, case):
             ) as child:
                 out, err = bytearray(), bytearray()
                 overflow = threading.Event()
+                reader_errors = []
                 readers = (
                     threading.Thread(target=drain,
-                        args=(child.stdout, out, overflow, child), daemon=True),
+                        args=(child.stdout, out, overflow, reader_errors, child), daemon=True),
                     threading.Thread(target=drain,
-                        args=(child.stderr, err, overflow, child), daemon=True),
+                        args=(child.stderr, err, overflow, reader_errors, child), daemon=True),
                 )
                 for reader in readers:
                     reader.start()
@@ -219,6 +223,8 @@ def run_guest(args, data, case):
                     raise EvidenceError("runner subprocess output never closed")
                 if leaked_output:
                     raise EvidenceError("guest descendants outlived the runner")
+                if reader_errors:
+                    raise EvidenceError("guest output reader failed: " + reader_errors[0])
                 if overflow.is_set():
                     raise EvidenceError("runner output exceeded the 1 MiB limit")
                 return (child.returncode, out.decode("utf-8", "replace"),
