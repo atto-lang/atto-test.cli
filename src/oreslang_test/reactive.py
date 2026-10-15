@@ -26,6 +26,20 @@ def analyze_reactive_events(events: Iterable[Mapping[str, object]]) -> dict[str,
         if not isinstance(event, Mapping):
             raise ReactiveTraceError(f"event {position}: expected record")
         op = event.get("op")
+        allowed = {
+            "subscribe": {"op", "subscription", "source", "mode"},
+            "request": {"op", "subscription", "count"},
+            "next": {"op", "subscription", "payload"},
+            "complete": {"op", "subscription"},
+            "cancel": {"op", "subscription"},
+            "error": {"op", "subscription", "reason"},
+            "dispose": {"op", "subscription"},
+        }
+        if op not in allowed:
+            raise ReactiveTraceError(f"event {position}: unknown operation {op!r}")
+        extra = set(event) - allowed[op]
+        if extra:
+            raise ReactiveTraceError(f"event {position}: unexpected fields {sorted(extra)!r}")
         sub = event.get("subscription")
         if not isinstance(sub, str) or not sub or len(sub) > 256:
             raise ReactiveTraceError(f"event {position}: invalid subscription")
@@ -72,7 +86,7 @@ def analyze_reactive_events(events: Iterable[Mapping[str, object]]) -> dict[str,
             state["requested"] -= 1
             next_count += 1
         elif op in ("complete", "cancel", "error"):
-            if op == "error" and not (isinstance(event.get("reason"), str) and event["reason"]):
+            if op == "error" and not (isinstance(event.get("reason"), str) and 0 < len(event["reason"]) <= 4096):
                 raise ReactiveTraceError("error terminal needs nonempty reason")
             state["terminal"] = op
             terminal_count += 1
