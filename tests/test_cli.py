@@ -71,10 +71,10 @@ class ProcessTests(unittest.TestCase):
     def test_secret_environment_is_not_inherited_without_opt_in(self):
         import os
         from unittest.mock import patch
-        guest = ("import os\\n"
+        guest = ("import os\n"
                  "print('ORES_TEST|SUMMARY|total=1|passed=0|failed=1|skipped=0|filtered=0'"
                  " if os.environ.get('ORESLANG_TEST_CANARY_SECRET') else "
-                 "'ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\\n")
+                 "'ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\n")
         with patch.dict(os.environ, {"ORESLANG_TEST_CANARY_SECRET": "private-value"}):
             status, _ = self._run(guest, ["--fuzz", "--runs", "1"])
             self.assertEqual(0, status)
