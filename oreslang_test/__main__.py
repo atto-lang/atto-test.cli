@@ -4,6 +4,7 @@ import argparse
 import os
 from pathlib import Path
 import random
+import signal
 import subprocess
 import sys
 import tempfile
@@ -153,16 +154,29 @@ def run_guest(args, data, case):
         # Bounded reading prevents a noisy guest from exhausting CLI memory.
         # OS-backed temporary files hold subprocess output outside Python heap.
         with tempfile.TemporaryFile(mode="w+b") as out, tempfile.TemporaryFile(mode="w+b") as err:
-            result = subprocess.run(command, input=data, stdout=out, stderr=err,
-                                    env=environment, timeout=args.timeout, check=False)
-            if out.tell() > MAX_OUTPUT or err.tell() > MAX_OUTPUT:
-                raise EvidenceError("runner output exceeded the 1 MiB limit")
-            out.seek(0)
-            err.seek(0)
-            return (result.returncode, out.read().decode("utf-8", "replace"),
-                    err.read().decode("utf-8", "replace"))
-    except subprocess.TimeoutExpired as exc:
-        raise GuestTimeoutError(f"case {case} timed out after {args.timeout}s") from exc
+            # Own a new POSIX session so a timeout can terminate guest-spawned
+            # workers rather than leaving them running after the case fails.
+            with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err,
+                                  env=environment, start_new_session=(os.name == "posix")) as child:
+                try:
+                    child.communicate(input=data, timeout=args.timeout)
+                except subprocess.TimeoutExpired as exc:
+                    if os.name == "posix":
+                        try:
+                            os.killpg(child.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    else:
+                        child.kill()
+                    child.wait()
+                    raise GuestTimeoutError(
+                        f"case {case} timed out after {args.timeout}s") from exc
+                if out.tell() > MAX_OUTPUT or err.tell() > MAX_OUTPUT:
+                    raise EvidenceError("runner output exceeded the 1 MiB limit")
+                out.seek(0)
+                err.seek(0)
+                return (child.returncode, out.read().decode("utf-8", "replace"),
+                        err.read().decode("utf-8", "replace"))
     except OSError as exc:
         raise EvidenceError(f"unable to start runner {args.runner!r}: {exc}") from exc
 
