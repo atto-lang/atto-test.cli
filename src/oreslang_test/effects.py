@@ -56,6 +56,8 @@ def tokenize(source: str) -> list[Token]:
                 continue
         elif mode in ("'", '"', chr(96)):
             masked[i] = " "
+            if c == "$" and n == "{":
+                raise EffectsInconclusive(f"interpolated string requires compiler analysis at line {line}")
             if c == "\\" and n:
                 masked[i + 1] = " "
                 if n == "\n":
@@ -80,6 +82,17 @@ def tokenize(source: str) -> list[Token]:
         kind = "block comment" if mode == "block" else "string"
         raise EffectsInconclusive(f"unterminated {kind} at line {start_line}")
     text = "".join(masked)
+    # Do not claim a clean result for unbalanced nonliteral source.
+    nesting = []
+    pairs = {")": "(", "}": "{"}
+    for char in text:
+        if char in ("(", "{"):
+            nesting.append(char)
+        elif char in pairs:
+            if not nesting or nesting.pop() != pairs[char]:
+                raise EffectsInconclusive("unbalanced source delimiters")
+    if nesting:
+        raise EffectsInconclusive("unbalanced source delimiters")
     newlines = [i for i, char in enumerate(text) if char == "\n"]
     return [Token(m.group(), bisect_right(newlines, m.start()) + 1)
             for m in WORDS.finditer(text)]
@@ -156,7 +169,7 @@ def analyze(source: str) -> tuple[list[Diagnostic], int]:
             j = first + 1
             while j < last:
                 word = tokens[j].value
-                if word in ("fnc", "method"):
+                if word in ("fnc", "method") and tokens[j - 1].value != ".":
                     _, _, nested_first, nested_last, _ = _signature(tokens, j)
                     if nested_first is not None:
                         j = nested_last + 1
