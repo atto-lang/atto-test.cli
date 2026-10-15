@@ -162,13 +162,15 @@ def analyze(source: str) -> tuple[list[Diagnostic], int]:
                         j = nested_last + 1
                         continue
                 effect = EFFECTS.get(word)
-                if effect and effect not in declared:
+                if effect and (j == 0 or tokens[j - 1].value != ".") and effect not in declared:
                     diagnostics.append(Diagnostic(
                         tokens[j].line, "undeclared-effect",
                         f"{name} contains {word}; consider annotating {effect}"
                         f" (catch/trap handles only throw, not raise/panic)"))
                 j += 1
-            i = last + 1
+            # Inspect nested named callables independently; never silently
+            # omit them from the reported coverage count.
+            i = first + 1
         else:
             i += 1
     return diagnostics, inspected
