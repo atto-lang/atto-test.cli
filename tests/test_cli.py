@@ -120,6 +120,22 @@ class ProcessTests(unittest.TestCase):
             ["--fuzz", "--runs", "1"])
         self.assertEqual(2, status)
 
+    def test_stderr_flood_is_inconclusive_without_unbounded_capture(self):
+        status, _ = self._run(
+            "import sys\nsys.stderr.write('x' * 1048577)\n",
+            ["--fuzz", "--runs", "1"])
+        self.assertEqual(2, status)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires POSIX guest process groups")
+    def test_orphan_guest_with_inherited_output_is_not_a_clean_pass(self):
+        guest = (
+            "import subprocess,sys\n"
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'])\n"
+            "print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\n"
+        )
+        status, _ = self._run(guest, ["--fuzz", "--runs", "1"])
+        self.assertEqual(2, status)
+
 
 if __name__ == "__main__":
     unittest.main()
