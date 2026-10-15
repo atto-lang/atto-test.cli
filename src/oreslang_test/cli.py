@@ -328,12 +328,18 @@ def effect_scan(root, config, filenames, strict):
         raise UsageError("--effects needs one or more --file paths, [effects].files, or discoverable .ores files (max 512)")
     warnings = 0
     checked = 0
+    cumulative_bytes = 0
+    max_reported_warnings = 100
     for name in paths:
         path = _relative(root, name)
         if path.suffix != ".ores" or not path.is_file() or (root / name).is_symlink():
             raise UsageError(f"expected regular .ores source file: {name}")
-        if path.stat().st_size > 262144:
+        source_size = path.stat().st_size
+        if source_size > 262144:
             raise UsageError(f"effects source exceeds 256 KiB analysis bound: {name}")
+        cumulative_bytes += source_size
+        if cumulative_bytes > 4_000_000:
+            raise UsageError("effects scan exceeds 4 MB aggregate source budget")
         try:
             problems, inspected = analyze(path.read_text(encoding="utf-8"))
         except (EffectsInconclusive, UnicodeError) as exc:
@@ -341,9 +347,12 @@ def effect_scan(root, config, filenames, strict):
         if inspected == 0:
             raise UsageError(f"EFFECTS INCONCLUSIVE {name}: no braced named fnc/method body inspected")
         for problem in problems:
-            print(f"EFFECT WARNING {name}:{problem.line} [{problem.code}] {problem.message}")
-        warnings += len(problems)
+            if warnings < max_reported_warnings:
+                print(f"EFFECT WARNING {name}:{problem.line} [{problem.code}] {problem.message}")
+            warnings += 1
         checked += inspected
+    if warnings > max_reported_warnings:
+        print(f"EFFECT WARNINGS TRUNCATED shown={max_reported_warnings} total={warnings}")
     print(f"EFFECTS ADVISORY inspected={checked} warnings={warnings}; "
           "direct syntax only, no call-graph/catch/actor-runtime proof")
     return 1 if strict and warnings else 0
