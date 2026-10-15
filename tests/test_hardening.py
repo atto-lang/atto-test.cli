@@ -191,5 +191,26 @@ class ModelAndFuzzTests(unittest.TestCase):
                 _run([sys.executable, "-c", "import sys; sys.stdout.write('X'*4000001)"], Path(d), 5)
 
 
+class ProcessBudgetTests(unittest.TestCase):
+    def test_stderr_flood_is_stopped_before_timeout(self):
+        import time
+        from oreslang_test.cli import _run, UsageError
+        with tempfile.TemporaryDirectory() as d:
+            started = time.monotonic()
+            with self.assertRaisesRegex(UsageError, "4 MB"):
+                _run([sys.executable, "-c",
+                      "import os; b=b'x'*65536\nwhile True: os.write(2,b)"], Path(d), 10)
+            self.assertLess(time.monotonic() - started, 5)
+
+    @unittest.skipUnless(__import__("os").name == "posix", "requires POSIX process groups")
+    def test_orphan_output_cannot_report_success(self):
+        from oreslang_test.cli import _run, UsageError
+        command = [sys.executable, "-c", "import subprocess,sys; "
+                   "subprocess.Popen([sys.executable,'-c','import time; time.sleep(20)'])"]
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(UsageError, "descendants outlived"):
+                _run(command, Path(d), 10)
+
+
 if __name__ == "__main__":
     unittest.main()

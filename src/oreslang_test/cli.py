@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 import uuid
 
@@ -41,31 +42,83 @@ def _command(value, label):
 
 
 def _run(command, root, timeout, data=None, env=None):
-    # Redirect guest output to bounded files instead of keeping an arbitrary
-    # process's stdout/stderr in memory. The 4 MB cap is an admission check.
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+    # Drain each output pipe into bounded memory while the guest is running.
+    # Post-exit file-size checks permit unlimited disk growth before admission.
+    limit = 4_000_000
+
+    def terminate(process):
         try:
-            process = subprocess.Popen(command, cwd=root, env=env,
-                                       stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
-                                       stdout=stdout, stderr=stderr,
-                                       start_new_session=(os.name == "posix"))
-        except FileNotFoundError as exc:
-            raise UsageError(f"executable not found: {command[0]}") from exc
-        try:
-            process.communicate(input=data, timeout=timeout)
-        except subprocess.TimeoutExpired:
             if os.name == "posix":
                 os.killpg(process.pid, signal.SIGKILL)
-            else:
+            elif process.poll() is None:
                 process.kill()
-            process.communicate()
-            return None
-        if stdout.tell() > 4_000_000 or stderr.tell() > 4_000_000:
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            # Darwin may return EPERM once wait() has reaped the sole group
+            # member. A live process still requires successful termination.
+            if process.poll() is None:
+                raise
+
+    exceeded = threading.Event()
+    reader_errors = []
+
+    def drain(stream, output, process):
+        try:
+            while chunk := stream.read(65536):
+                if len(output) + len(chunk) > limit:
+                    exceeded.set()
+                    terminate(process)
+                    break
+                output.extend(chunk)
+        except (OSError, ValueError) as error:
+            reader_errors.append(error)
+            terminate(process)
+        finally:
+            stream.close()
+
+    # A guest that never reads stdin cannot block an input-writer thread.
+    with tempfile.TemporaryFile() as stdin:
+        if data is not None:
+            stdin.write(data)
+            stdin.seek(0)
+        try:
+            process = subprocess.Popen(command, cwd=root, env=env, stdin=stdin,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       start_new_session=(os.name == "posix"))
+        except OSError as exc:
+            raise UsageError(f"cannot start executable {command[0]}: {exc}") from exc
+        stdout, stderr = bytearray(), bytearray()
+        readers = [threading.Thread(target=drain, args=(stream, output, process), daemon=True)
+                   for stream, output in ((process.stdout, stdout), (process.stderr, stderr))]
+        for reader in readers:
+            reader.start()
+        timed_out = False
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            terminate(process)
+            process.wait()
+        finally:
+            for reader in readers:
+                reader.join(timeout=1)
+            leaked_output = any(reader.is_alive() for reader in readers)
+            if leaked_output:
+                terminate(process)
+                for reader in readers:
+                    reader.join(timeout=1)
+        if any(reader.is_alive() for reader in readers):
+            raise UsageError("test process output never closed")
+        if reader_errors:
+            raise UsageError(f"test process output reader failed: {reader_errors[0]}")
+        if exceeded.is_set():
             raise UsageError("test process emitted more than 4 MB stdout or stderr")
-        stdout.seek(0)
-        stderr.seek(0)
-        return subprocess.CompletedProcess(command, process.returncode,
-                                           stdout.read(), stderr.read())
+        if timed_out:
+            return None
+        if leaked_output:
+            raise UsageError("test process descendants outlived the runner")
+        return subprocess.CompletedProcess(command, process.returncode, bytes(stdout), bytes(stderr))
 
 
 def _decode(output):
