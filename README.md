@@ -116,3 +116,17 @@ The native compiler still independently controls admissibility.
 
 The `--effects` mode cannot combine with `--race`, `--fuzz`, or
 logical-model/trace modes. Keep runtime verification separate.
+
+For CI safety the scanner limits selected source to 512 files and 4 MB
+aggregate data, with 256 KiB and 25,000 tokens per file. Automatic
+discovery ignores hidden directories and refuses more than 4,096 visited
+directories. At most 100 warning lines are printed, but the true warning
+count is retained in the summary and strict exit status. Unbalanced
+parentheses/braces/brackets, unterminated literals/comments, interpolated
+strings, and unsupported input return an inconclusive status instead of
+a false clean result. These are scanner resource/safety bounds, not
+full Oreslang syntax validation.
+
+Use the production compiler and native differential tests for actual
+exception control flow, actor supervision, and transitive effect types.
+
