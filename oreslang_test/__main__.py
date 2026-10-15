@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 
 MAX_RUNS = 100_000
@@ -150,36 +151,77 @@ def run_guest(args, data, case):
         environment["ORES_RACE_SCHEDULE_SEED"] = str((args.seed + case) % (1 << 64))
     else:
         environment["ORES_FUZZ_INPUT_STDIN"] = "1"
+    def terminate_group(child):
+        if os.name == "posix":
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        elif child.poll() is None:
+            child.kill()
+
+    def drain(stream, data_out, exceeded, child):
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                if len(data_out) + len(chunk) > MAX_OUTPUT:
+                    exceeded.set()
+                    terminate_group(child)
+                    break
+                data_out.extend(chunk)
+        finally:
+            stream.close()
+
     try:
-        # Bounded reading prevents a noisy guest from exhausting CLI memory.
-        # OS-backed temporary files hold subprocess output outside Python heap.
-        with tempfile.TemporaryFile(mode="w+b") as out, tempfile.TemporaryFile(mode="w+b") as err:
-            # Own a new POSIX session so a timeout can terminate guest-spawned
-            # workers rather than leaving them running after the case fails.
-            with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err,
-                                  env=environment, start_new_session=(os.name == "posix")) as child:
+        # stdin is a pre-filled bounded regular file. A guest that ignores input
+        # cannot block a Python producer thread writing into a pipe.
+        with tempfile.TemporaryFile(mode="w+b") as stdin:
+            stdin.write(data)
+            stdin.seek(0)
+            # Independently drained pipes prevent unbounded disk output AND
+            # unbounded memory capture. Kill the whole POSIX process group once
+            # either stream exceeds the output budget.
+            with subprocess.Popen(
+                command, stdin=stdin, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=environment,
+                start_new_session=(os.name == "posix")
+            ) as child:
+                out, err = bytearray(), bytearray()
+                overflow = threading.Event()
+                readers = (
+                    threading.Thread(target=drain,
+                        args=(child.stdout, out, overflow, child), daemon=True),
+                    threading.Thread(target=drain,
+                        args=(child.stderr, err, overflow, child), daemon=True),
+                )
+                for reader in readers:
+                    reader.start()
                 try:
-                    child.communicate(input=data, timeout=args.timeout)
+                    child.wait(timeout=args.timeout)
                 except subprocess.TimeoutExpired as exc:
-                    if os.name == "posix":
-                        try:
-                            os.killpg(child.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                    else:
-                        child.kill()
+                    terminate_group(child)
                     child.wait()
                     raise GuestTimeoutError(
                         f"case {case} timed out after {args.timeout}s") from exc
-                if out.tell() > MAX_OUTPUT or err.tell() > MAX_OUTPUT:
+                finally:
+                    for reader in readers:
+                        reader.join(timeout=1)
+                    if any(reader.is_alive() for reader in readers):
+                        # Descendants may keep inherited stdout/stderr open even
+                        # after their direct parent has exited. Fence the group.
+                        terminate_group(child)
+                        for reader in readers:
+                            reader.join(timeout=1)
+                if any(reader.is_alive() for reader in readers):
+                    raise EvidenceError("runner subprocess output never closed")
+                if overflow.is_set():
                     raise EvidenceError("runner output exceeded the 1 MiB limit")
-                out.seek(0)
-                err.seek(0)
-                return (child.returncode, out.read().decode("utf-8", "replace"),
-                        err.read().decode("utf-8", "replace"))
+                return (child.returncode, out.decode("utf-8", "replace"),
+                        err.decode("utf-8", "replace"))
     except OSError as exc:
         raise EvidenceError(f"unable to start runner {args.runner!r}: {exc}") from exc
-
 
 def save_failing_case(args, case, payload, reason):
     root = Path(args.artifacts)
