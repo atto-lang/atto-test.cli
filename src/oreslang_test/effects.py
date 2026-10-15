@@ -4,6 +4,7 @@ Scans named braced fnc/method bodies. It cannot prove transitive effects,
 overload resolution, catch coverage, or actor supervisor execution.
 """
 from dataclasses import dataclass
+from bisect import bisect_right
 import re
 
 WORDS = re.compile(r"[A-Za-z_][A-Za-z_0-9]*|->|=>|[{}();,.]")
@@ -79,7 +80,8 @@ def tokenize(source: str) -> list[Token]:
         kind = "block comment" if mode == "block" else "string"
         raise EffectsInconclusive(f"unterminated {kind} at line {start_line}")
     text = "".join(masked)
-    return [Token(m.group(), text.count("\n", 0, m.start()) + 1)
+    newlines = [i for i, char in enumerate(text) if char == "\n"]
+    return [Token(m.group(), bisect_right(newlines, m.start()) + 1)
             for m in WORDS.finditer(text)]
 
 
