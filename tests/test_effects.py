@@ -68,8 +68,14 @@ fnc real() {
                 with self.assertRaises(EffectsInconclusive):
                     analyze(source)
 
-    def test_nested_callables_do_not_inherit_direct_effects(self):
+    def test_nested_callables_have_separate_effect_scope(self):
         source = "fnc outer() { fnc inner() throws { throw new Error(); } return; }"
+        diagnostics, count = analyze(source)
+        self.assertEqual(count, 2)
+        self.assertEqual(diagnostics, [])
+
+    def test_qualified_raise_and_panic_calls_are_not_effect_keywords(self):
+        source = "fnc f() { obj.raise(); obj.panic(); obj.throw(); }"
         diagnostics, count = analyze(source)
         self.assertEqual(count, 1)
         self.assertEqual(diagnostics, [])
