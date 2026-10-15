@@ -79,6 +79,15 @@ class ReactiveContractTests(unittest.TestCase):
             analyze_reactive_events([
                 sub(), event("error", reason="x" * 4097), event("dispose")])
 
+
+    def test_malformed_operation_and_event_keys_reject_without_type_error(self):
+        for bad in ([1, 2], {"unhashable": []}):
+            with self.subTest(bad=bad), self.assertRaises(ReactiveTraceError):
+                analyze_reactive_events([{"op": bad, "subscription": "s"}])
+        with self.assertRaisesRegex(ReactiveTraceError, "non-string field name"):
+            analyze_reactive_events([{"op": "subscribe", "subscription": "s",
+                                      "source": "pipe", "mode": "hot_single", 5: "bad"}])
+
     def test_result_err_payload_is_data_not_automatic_stream_error(self):
         trace = [sub(), event("request", count=1),
                  event("next", payload={"Err": "bad"}),
