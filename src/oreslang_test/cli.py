@@ -17,6 +17,7 @@ import uuid
 
 from .race import TraceError, analyze_trace
 from .logical import ModelError, explore
+from .effects import EffectsInconclusive, analyze
 
 
 class UsageError(ValueError):
@@ -311,10 +312,48 @@ def _show_races(report):
     return 0
 
 
+def effect_scan(root, config, filenames, strict):
+    """Advisory source analysis; never claims executable effect parity."""
+    if filenames:
+        paths = filenames
+    else:
+        params = config.get("effects", {})
+        paths = params.get("files")
+        if paths is None:
+            paths = [str(p.relative_to(root)) for p in sorted(root.rglob("*.ores"))
+                     if not any(part.startswith(".") for part in p.relative_to(root).parts)]
+    if not isinstance(paths, list) or not paths or len(paths) > 512 or not all(isinstance(p, str) for p in paths):
+        raise UsageError("--effects needs one or more --file paths, [effects].files, or discoverable .ores files (max 512)")
+    warnings = 0
+    checked = 0
+    for name in paths:
+        path = _relative(root, name)
+        if path.suffix != ".ores" or not path.is_file() or path.is_symlink():
+            raise UsageError(f"expected regular .ores source file: {name}")
+        if path.stat().st_size > 262144:
+            raise UsageError(f"effects source exceeds 256 KiB analysis bound: {name}")
+        try:
+            problems, inspected = analyze(path.read_text(encoding="utf-8"))
+        except EffectsInconclusive as exc:
+            raise UsageError(f"EFFECTS INCONCLUSIVE {name}: {exc}") from exc
+        if inspected == 0:
+            raise UsageError(f"EFFECTS INCONCLUSIVE {name}: no braced named fnc/method body inspected")
+        for problem in problems:
+            print(f"EFFECT WARNING {name}:{problem.line} [{problem.code}] {problem.message}")
+        warnings += len(problems)
+        checked += inspected
+    print(f"EFFECTS ADVISORY inspected={checked} warnings={warnings}; "
+          "direct syntax only, no call-graph/catch/actor-runtime proof")
+    return 1 if strict and warnings else 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="oreslang test")
     parser.add_argument("--root", default=".")
     parser.add_argument("--fuzz", action="store_true")
+    parser.add_argument("--effects", action="store_true", help="advisory exceptional-effect hints")
+    parser.add_argument("--effects-strict", action="store_true", help="nonzero for effect warnings")
+    parser.add_argument("--file", action="append", help="source .ores file for --effects; repeatable")
     parser.add_argument("--race", action="store_true")
     parser.add_argument("--logical", action="store_true")
     parser.add_argument("--trace", help="offline ORES_RACE_V1 JSONL trace (project-relative)")
@@ -325,6 +364,12 @@ def main(argv=None):
     parser.add_argument("--max-schedules", type=int, default=10000)
     args = parser.parse_args(argv)
     try:
+        if args.effects_strict and not args.effects:
+            raise UsageError("--effects-strict requires --effects")
+        if args.file and not args.effects:
+            raise UsageError("--file requires --effects")
+        if args.effects and (args.fuzz or args.race or args.logical or args.model or args.trace):
+            raise UsageError("--effects is a separate static mode, not a runtime race/fuzz certificate")
         if args.fuzz and (args.race or args.logical or args.model or args.trace):
             raise UsageError("--fuzz and --race/--logical cannot be combined")
         if (args.logical or args.model or args.trace) and not args.race:
@@ -340,6 +385,8 @@ def main(argv=None):
                 config = tomllib.load(fh)
         else:
             config = {}
+        if args.effects:
+            return effect_scan(root, config, args.file, args.effects_strict)
         if args.fuzz:
             return fuzz(root, config, args.seed, args.cases, args.timeout)
         if args.race:
