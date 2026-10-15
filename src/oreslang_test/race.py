@@ -56,6 +56,7 @@ def analyze_trace(path, expected_run_id=None):
     messages = {}
     accesses = {}  # location -> {'read': task/vc, 'write': task/vc}
     races = []
+    race_count = 0
     access_count = 0
     for index, event in enumerate(records[1:-1], 2):
         op = event.get("op")
@@ -105,17 +106,17 @@ def analyze_trace(path, expected_run_id=None):
                 checks += [("R", t, v) for t, v in previous["R"].items()]
             for prior_mode, other, prior_clock in checks:
                 if other != task and not _leq(prior_clock, clock):
-                    races.append({"location": location, "first": other,
+                    race_count += 1
+                    if len(races) < 100:
+                        races.append({"location": location, "first": other,
                                   "second": task, "first_mode": prior_mode,
                                   "second_mode": mode, "event": index})
-            if mode == "W":
-                previous["W"] = {task: dict(clock)}
-                previous["R"] = {}
-            else:
-                previous["R"][task] = dict(clock)
+            # Preserve both read and write histories: a later task can race
+            # with an older write even if an intervening access was ordered.
+            previous[mode][task] = dict(clock)
         else:
             raise TraceError(f"unsupported trace op {op!r} at event {index}")
         clock[task] = clock.get(task, 0) + 1
     _require(access_count > 0, "trace contains no observed memory accesses; refusing false PASS")
     _require(all(owner is None for owner, _ in locks.values()), "trace ends with held locks")
-    return {"events": len(records)-2, "races": races, "backend": first["backend"]}
+    return {"events": len(records)-2, "races": races, "race_count": race_count, "backend": first["backend"]}
