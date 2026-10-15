@@ -12,6 +12,12 @@ from dataclasses import dataclass
 MAX_RUNS = 100_000
 MAX_INPUT = 1_048_576
 MAX_OUTPUT = 1_048_576
+MAX_CORPUS_BYTES = 16 * 1_048_576
+# Preserve only host essentials by default; do not leak arbitrary CI secrets.
+HOST_ENV_ALLOWLIST = frozenset((
+    "PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE",
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "USERPROFILE", "JAVA_HOME", "GRAALVM_HOME",
+))
 
 
 class GuestTimeoutError(RuntimeError):
@@ -110,10 +116,18 @@ def load_corpus(directory, max_input):
     if not files or len(files) > 10_000:
         raise EvidenceError("corpus must contain 1..10000 regular files")
     corpus = []
+    total_bytes = 0
     for path in files:
-        if path.stat().st_size > max_input:
+        size = path.stat().st_size
+        if size > max_input:
             raise EvidenceError(f"corpus input exceeds max size: {path}")
-        corpus.append(path.read_bytes())
+        total_bytes += size
+        if total_bytes > MAX_CORPUS_BYTES:
+            raise EvidenceError("corpus exceeds total 16 MiB memory budget")
+        data = path.read_bytes()
+        if len(data) > max_input:
+            raise EvidenceError(f"corpus input changed size while reading: {path}")
+        corpus.append(data)
     return corpus
 
 
@@ -123,7 +137,9 @@ def run_guest(args, data, case):
         command.append("run")
     command.extend(args.runner_arg)
     command.append(str(args.file))
-    environment = os.environ.copy()
+    environment = (os.environ.copy() if args.inherit_env
+                   else {key: value for key, value in os.environ.items()
+                         if key in HOST_ENV_ALLOWLIST})
     environment["ORES_TEST_MACHINE"] = "1"
     environment["ORES_TEST_MODE"] = "race" if args.race else "fuzz"
     environment["ORES_TEST_SEED"] = str(args.seed)
@@ -185,6 +201,8 @@ def make_parser():
     parser.add_argument("--max-input", type=int, default=4096, help="maximum fuzz payload bytes")
     parser.add_argument("--artifacts", type=Path, default=Path("target/oreslang-fuzz-failures"),
                         help="directory for failing fuzz inputs")
+    parser.add_argument("--inherit-env", action="store_true",
+                        help="explicitly pass all host environment variables to test guests (may expose secrets)")
     return parser
 
 
