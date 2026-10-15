@@ -65,5 +65,28 @@ class ReactiveContractTests(unittest.TestCase):
         self.assertEqual(result["active"], 1)
 
 
+    def test_throw_raise_and_panic_never_masquerade_as_normal_completion(self):
+        for op in ("throw", "raise", "panic"):
+            with self.subTest(op=op), self.assertRaisesRegex(
+                    ReactiveTraceError, "unknown operation"):
+                analyze_reactive_events([sub(), event(op)])
+
+    def test_error_identity_must_not_be_hidden_in_completion_metadata(self):
+        with self.assertRaisesRegex(ReactiveTraceError, "unexpected fields"):
+            analyze_reactive_events([
+                sub(), event("complete", reason="panic")])
+        with self.assertRaises(ReactiveTraceError):
+            analyze_reactive_events([
+                sub(), event("error", reason="x" * 4097), event("dispose")])
+
+    def test_result_err_payload_is_data_not_automatic_stream_error(self):
+        trace = [sub(), event("request", count=1),
+                 event("next", payload={"Err": "bad"}),
+                 event("complete"), event("dispose")]
+        outcome = analyze_reactive_events(trace)
+        self.assertEqual(outcome["next"], 1)
+        self.assertEqual(outcome["terminals"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
