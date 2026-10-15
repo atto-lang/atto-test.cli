@@ -6,10 +6,16 @@ from pathlib import Path
 import random
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 
 MAX_RUNS = 100_000
 MAX_INPUT = 1_048_576
+MAX_OUTPUT = 1_048_576
+
+
+class GuestTimeoutError(RuntimeError):
+    """A fuzzed child exceeded its configured execution budget."""
 
 
 class EvidenceError(ValueError):
@@ -128,13 +134,21 @@ def run_guest(args, data, case):
     else:
         environment["ORES_FUZZ_INPUT_STDIN"] = "1"
     try:
-        result = subprocess.run(command, input=data, capture_output=True, env=environment,
-                                timeout=args.timeout, check=False)
+        # Bounded reading prevents a noisy guest from exhausting CLI memory.
+        # OS-backed temporary files hold subprocess output outside Python heap.
+        with tempfile.TemporaryFile(mode="w+b") as out, tempfile.TemporaryFile(mode="w+b") as err:
+            result = subprocess.run(command, input=data, stdout=out, stderr=err,
+                                    env=environment, timeout=args.timeout, check=False)
+            if out.tell() > MAX_OUTPUT or err.tell() > MAX_OUTPUT:
+                raise EvidenceError("runner output exceeded the 1 MiB limit")
+            out.seek(0)
+            err.seek(0)
+            return (result.returncode, out.read().decode("utf-8", "replace"),
+                    err.read().decode("utf-8", "replace"))
     except subprocess.TimeoutExpired as exc:
-        raise EvidenceError(f"case {case} timed out after {args.timeout}s") from exc
+        raise GuestTimeoutError(f"case {case} timed out after {args.timeout}s") from exc
     except OSError as exc:
         raise EvidenceError(f"unable to start runner {args.runner!r}: {exc}") from exc
-    return result.returncode, result.stdout.decode("utf-8", "replace"), result.stderr.decode("utf-8", "replace")
 
 
 def save_failing_case(args, case, payload, reason):
@@ -142,9 +156,13 @@ def save_failing_case(args, case, payload, reason):
     root.mkdir(parents=True, exist_ok=True)
     name = f"seed-{args.seed}-case-{case}"
     (root / f"{name}.bin").write_bytes(payload)
+    corpus_arg = f" --corpus {args.corpus}" if args.corpus is not None else ""
     (root / f"{name}.txt").write_text(
         f"seed={args.seed}\ncase={case}\nreason={reason}\n"
-        f"replay: oreslang test --fuzz {args.file} --seed {args.seed} --runs {case+1}\n",
+        f"runner={args.runner}\n"
+        f"replay: oreslang test --fuzz {args.file} --seed {args.seed} "
+        f"--runs {case+1} --max-input {args.max_input}{corpus_arg}\n"
+        "The original corpus, runner binary and CLI version must be retained for replay.\n",
         encoding="utf-8")
     print(f"saved failing input: {root / (name + '.bin')}", file=sys.stderr)
 
@@ -201,6 +219,18 @@ def main(argv=None):
                 return 1
             summary = parse_test_summary(stdout)
             evidence = parse_race_evidence(stdout) if args.race else None
+            if args.race:
+                # NEVER treat a guest-printed ORES_RACE line as trusted instrumentation:
+                # a guest can forge perfect counters. The future backend-owned
+                # reporting channel must authenticate observations independently.
+                raise EvidenceError(
+                    "no trusted backend race attestation is configured; "
+                    "guest stdout reports do not prove absence of races")
+        except GuestTimeoutError as exc:
+            if args.fuzz:
+                save_failing_case(args, case, payload, str(exc))
+            print(f"oreslang test: failing case {case}: {exc}", file=sys.stderr)
+            return 1
         except EvidenceError as exc:
             if args.fuzz:
                 save_failing_case(args, case, payload, str(exc))
@@ -213,13 +243,13 @@ def main(argv=None):
             if stderr:
                 print(stderr[-4096:], file=sys.stderr)
             return 1
-        if evidence is not None and (evidence["memory_races"] or evidence["logical_violations"]):
-            print(f"oreslang test: race detected in case {case}: {evidence}", file=sys.stderr)
-            return 1
+        # evidence is deliberately not promoted to a race-clean result until
+        # the Java/LLVM backends add an authenticated, runner-owned channel.
     if args.race:
-        print(f"race validation passed: {args.runs} instrumented run(s); no reported violations")
+        raise AssertionError("race mode must remain fail-closed until trusted instrumentation")
     else:
-        print(f"black-box fuzz passed: {args.runs} cases, seed={args.seed}; not coverage-guided")
+        print(f"black-box fuzz passed: {args.runs} cases, seed={args.seed}; "
+              "not coverage-guided; guest input consumption not verified")
     return 0
 
 
