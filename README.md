@@ -28,7 +28,8 @@ python -m oreslang_test --race tests/my_actor_suite.ores
 
 `--fuzz` currently implements reproducible **black-box crash/property fuzzing**
 with optional corpus directory, maximum input size, per-process timeout, and
-failure inputs saved under `target/oreslang-fuzz-failures`. Guest fuzz
+failure inputs saved under `target/oreslang-fuzz-failures`. Fuzz timeouts are failures;
+replay metadata retains the seed, input size and corpus location. Guest fuzz
 programs must consume their binary input from stdin and emit
 `ORES_TEST|SUMMARY|...` via the native test framework. This is **not yet
 coverage-guided**.
@@ -36,8 +37,8 @@ coverage-guided**.
 `--race` is an **evidence gate, not a finished race detector**. It will
 report *inconclusive* (exit 2) until a trusted backend emits the defined
 `ORES_RACE|BEGIN` and `ORES_RACE|SUMMARY` records with real memory-access
-and logical-invariant instrumentation. It never prints a fake green result
-when backend instrumentation is absent.
+and logical-invariant instrumentation. It never prints a fake green result: **even forged green guest reports return
+inconclusive** until a trusted backend-owned race report channel is implemented.
 
 Exit codes: `0` = observed tests passed, `1` = failure/race detected,
 `2` = insufficient evidence or runner/configuration error.
