@@ -68,6 +68,29 @@ class ProcessTests(unittest.TestCase):
         status, _ = self._run(f"print({(TEST_OK + RACE_OK)!r})", ["--race", "--runs", "2"])
         self.assertEqual(2, status)
 
+    def test_secret_environment_is_not_inherited_without_opt_in(self):
+        import os
+        from unittest.mock import patch
+        guest = ("import os\\n"
+                 "print('ORES_TEST|SUMMARY|total=1|passed=0|failed=1|skipped=0|filtered=0'"
+                 " if os.environ.get('ORESLANG_TEST_CANARY_SECRET') else "
+                 "'ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\\n")
+        with patch.dict(os.environ, {"ORESLANG_TEST_CANARY_SECRET": "private-value"}):
+            status, _ = self._run(guest, ["--fuzz", "--runs", "1"])
+            self.assertEqual(0, status)
+            inherited, _ = self._run(guest, ["--fuzz", "--runs", "1", "--inherit-env"])
+            self.assertEqual(1, inherited)
+
+    def test_corpus_total_memory_cap(self):
+        from unittest.mock import patch
+        from oreslang_test.__main__ import load_corpus
+        with tempfile.TemporaryDirectory() as directory:
+            for i in range(3):
+                (Path(directory) / f"seed-{i}").write_bytes(b"abcde")
+            with patch("oreslang_test.__main__.MAX_CORPUS_BYTES", 10):
+                with self.assertRaisesRegex(EvidenceError, "total 16 MiB"):
+                    load_corpus(directory, 100)
+
     def test_fuzz_crash_saves_replay_artifact(self):
         script = ("import sys\n"
                   "payload=sys.stdin.buffer.read()\n"
