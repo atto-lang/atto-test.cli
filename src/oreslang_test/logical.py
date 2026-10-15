@@ -37,6 +37,8 @@ def explore(path, max_schedules=10000):
         raise ModelError("invalid state key")
     for v in list(initial.values()) + list(expected.values()):
         _int(v)
+    if len(actors) > 16 or not all(isinstance(a, dict) for a in actors):
+        raise ModelError("models support at most 16 well-formed actors")
     names = [a.get("name") for a in actors]
     if len(names) != len(set(names)) or not all(isinstance(n, str) and n for n in names):
         raise ModelError("actor names must be nonempty and unique")
@@ -45,9 +47,11 @@ def explore(path, max_schedules=10000):
             raise ModelError("each actor needs nonempty turns")
         if any(not isinstance(t, list) or not t for t in actor["turns"]):
             raise ModelError("turns must be nonempty arrays of operations")
+    if sum(len(a["turns"]) for a in actors) > 64:
+        raise ModelError("at most 64 actor turns may be modeled")
     if type(max_schedules) is not int or not 1 <= max_schedules <= 1_000_000:
         raise ModelError("invalid schedule limit")
-    result = {"schedules": 0, "violation": None}
+    result = {"schedules": 0, "violation": None, "truncated": False}
 
     def apply(turn, state, local):
         for operation in turn:
@@ -74,7 +78,10 @@ def explore(path, max_schedules=10000):
             if any(state[k] != v for k, v in expected.items()) and result["violation"] is None:
                 result["violation"] = {"schedule": list(schedule), "final": dict(state), "expected": expected}
             return
-        if result["schedules"] >= max_schedules or result["violation"] is not None:
+        if result["schedules"] >= max_schedules:
+            result["truncated"] = True
+            return
+        if result["violation"] is not None:
             return
         for j, actor in enumerate(actors):
             if indices[j] >= len(actor["turns"]):
@@ -89,6 +96,6 @@ def explore(path, max_schedules=10000):
                 return
 
     dfs([0] * len(actors), dict(initial), [{} for _ in actors], [])
-    if result["schedules"] >= max_schedules and result["violation"] is None:
+    if result["truncated"] and result["violation"] is None:
         raise ModelError(f"inconclusive: reached schedule limit {max_schedules}")
     return result
