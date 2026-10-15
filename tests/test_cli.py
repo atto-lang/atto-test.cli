@@ -58,14 +58,15 @@ class ProcessTests(unittest.TestCase):
         status, _ = self._run(f"print({TEST_OK!r})", ["--race"])
         self.assertEqual(2, status)
 
-    def test_reported_memory_race_fails(self):
-        data = (TEST_OK + RACE_OK).replace("memory_races=0", "memory_races=1")
-        status, _ = self._run(f"print({data!r})", ["--race"])
-        self.assertEqual(1, status)
+    def test_guest_printed_race_counters_never_prove_memory_safety(self):
+        # A guest could forge an apparently perfect report; zero races is NOT proof.
+        for report in (RACE_OK, RACE_OK.replace("memory_races=0", "memory_races=1")):
+            status, _ = self._run(f"print({(TEST_OK + report)!r})", ["--race"])
+            self.assertEqual(2, status)
 
-    def test_instrumented_race_run_can_pass(self):
+    def test_backend_race_attestation_is_still_required_for_multiple_runs(self):
         status, _ = self._run(f"print({(TEST_OK + RACE_OK)!r})", ["--race", "--runs", "2"])
-        self.assertEqual(0, status)
+        self.assertEqual(2, status)
 
     def test_fuzz_crash_saves_replay_artifact(self):
         script = ("import sys\n"
@@ -82,6 +83,19 @@ class ProcessTests(unittest.TestCase):
         status, saved = self._run(f"print({TEST_OK!r})", ["--fuzz", "--runs", "8"])
         self.assertEqual(0, status)
         self.assertEqual(0, saved)
+
+    def test_fuzz_timeout_is_failure_and_saves_seed(self):
+        status, saved = self._run(
+            "import time\ntime.sleep(2)\n",
+            ["--fuzz", "--timeout", "0.01", "--runs", "1"])
+        self.assertEqual(1, status)
+        self.assertEqual(1, saved)
+
+    def test_unbounded_guest_output_is_inconclusive(self):
+        status, _ = self._run(
+            "print('x' * 1048577)\n",
+            ["--fuzz", "--runs", "1"])
+        self.assertEqual(2, status)
 
 
 if __name__ == "__main__":
