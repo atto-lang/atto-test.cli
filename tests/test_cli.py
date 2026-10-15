@@ -86,7 +86,7 @@ class CommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
             script = p / "harness.py"
-            script.write_text("import sys\ns=sys.stdin.buffer.read()\nsys.exit(7 if b'\xff' in s else 0)\n", encoding="utf-8")
+            script.write_text("import sys\ns=sys.stdin.buffer.read()\nsys.exit(7 if b'\\xff' in s else 0)\n", encoding="utf-8")
             (p / "oreslang-test.toml").write_text(
                 '[fuzz]\ncommand = ["' + sys.executable + '", "harness.py"]\nmax_bytes=16\n', encoding="utf-8")
             status, output, _ = self.call("--root", d, "--fuzz", "--seed", "5", "--cases", "4")
