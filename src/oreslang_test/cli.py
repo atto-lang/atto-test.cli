@@ -338,14 +338,14 @@ def deadlock(root, config, trace, timeout):
 
 def schedule(root, config, seed, iterations, timeout, replay, trace_output):
     """Delegate schedule perturbation/replay to the explicitly configured runtime."""
-    params = config.get("schedule", {})
-    cmd = _command(params.get("command"), "schedule")
     if not 1 <= iterations <= 1_000:
         raise UsageError("--iterations must be between 1 and 1000")
     if replay is not None and iterations != 1:
         raise UsageError("--replay requires --iterations=1")
     if trace_output is not None and iterations != 1:
         raise UsageError("--trace-output requires --iterations=1")
+    params = config.get("schedule", {})
+    cmd = _command(params.get("command"), "schedule")
     if replay is not None:
         args = ["--replay=" + str(_relative(root, replay))]
     else:
