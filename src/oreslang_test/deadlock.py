@@ -6,6 +6,7 @@ are observed at trace end, not proof that timeouts/cancellation cannot resolve.
 No instrumentation-coverage assertion is inferred from an empty trace.
 """
 import json
+from collections import deque
 from pathlib import Path
 
 from .race import TraceError, _identifier, _unique_keys
@@ -22,37 +23,36 @@ def _require(condition, reason):
 
 
 def _cycles(graph):
-    """Report bounded, canonical cycle witnesses from a directed graph."""
+    """Report one shortest cycle per origin, with bounded iterative search.
+
+    Exhausting the traversal budget is inconclusive, never a clean result.
+    """
     found = set()
     witnesses = []
-
-    def walk(origin, here, path, visiting):
-        if len(witnesses) >= MAX_FINDINGS:
-            return
-        for next_node in sorted(graph.get(here, ())):
-            if next_node == origin:
-                if len(path) == 1:
-                    cycle = path
-                else:
-                    cycle = path
-                rotations = [tuple(cycle[i:] + cycle[:i]) for i in range(len(cycle))]
-                canonical = min(rotations)
-                if canonical not in found:
-                    found.add(canonical)
-                    witnesses.append(list(canonical) + [canonical[0]])
-            elif next_node not in visiting and len(path) < MAX_LOCKS:
-                walk(origin, next_node, path + [next_node], visiting | {next_node})
-                if len(witnesses) >= MAX_FINDINGS:
+    budget = 250_000
+    for origin in sorted(graph):
+        frontier = deque([(origin, [origin])])
+        seen = {origin}
+        while frontier:
+            budget -= 1
+            if budget < 0:
+                raise TraceError("inconclusive: lock graph traversal budget exceeded")
+            here, path = frontier.popleft()
+            for next_node in sorted(graph.get(here, ())):
+                if next_node == origin:
+                    canonical = min(tuple(path[i:] + path[:i])
+                                    for i in range(len(path)))
+                    if canonical not in found:
+                        found.add(canonical)
+                        witnesses.append(list(canonical) + [canonical[0]])
+                    frontier.clear()
                     break
-
-    # A large dense graph must not cause exponential search; incremental
-    # bounded per-origin DFS only reports first MAX_FINDINGS.
-    for root in sorted(graph):
-        walk(root, root, [root], {root})
-        if len(witnesses) >= MAX_FINDINGS:
-            break
+                if next_node not in seen:
+                    seen.add(next_node)
+                    frontier.append((next_node, path + [next_node]))
+            if len(witnesses) == MAX_FINDINGS:
+                return witnesses
     return witnesses
-
 
 def analyze_deadlocks(path, expected_run_id=None):
     """Analyze a complete bounded trace; do not claim whole-program liveness."""
