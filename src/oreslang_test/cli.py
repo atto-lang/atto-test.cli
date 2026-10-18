@@ -17,6 +17,7 @@ import uuid
 
 from .race import TraceError, analyze_trace
 from .logical import ModelError, explore
+from .deadlock import analyze_deadlocks
 
 
 class UsageError(ValueError):
@@ -301,6 +302,79 @@ def race(root, config, trace, logical, model, timeout, max_schedules):
     return status
 
 
+def deadlock(root, config, trace, timeout):
+    """Analyze lock order risk and unresolved wait cycles in actual trace events."""
+    if trace:
+        report = analyze_deadlocks(_relative(root, trace))
+    else:
+        params = config.get("deadlock", {})
+        command = params.get("command") or config.get("race", {}).get("command")
+        if command is None:
+            raise UsageError("--deadlock requires --trace or [deadlock].command "
+                             "instrumentation; refusing false PASS")
+        cmd = _command(command, "deadlock")
+        run_id = uuid.uuid4().hex
+        with tempfile.TemporaryDirectory(prefix="oreslang-deadlock-") as d:
+            path = Path(d) / "events.jsonl"
+            env = dict(os.environ, ORESLANG_RACE_TRACE=str(path),
+                       ORESLANG_RACE_RUN_ID=run_id)
+            result = _run(cmd, root, timeout, env=env)
+            if result is None or result.returncode != 0:
+                raise UsageError("instrumented deadlock test failed or timed out")
+            report = analyze_deadlocks(path, expected_run_id=run_id)
+    for cycle in report["observed_wait_cycles"][:20]:
+        print("OBSERVED WAIT CYCLE: " + " -> ".join(cycle))
+    for cycle in report["potential_lock_order_cycles"][:20]:
+        print("POTENTIAL LOCK-ORDER CYCLE: " + " -> ".join(cycle))
+    if report["observed_wait_cycles"] or report["potential_lock_order_cycles"]:
+        print("DEADLOCK FINDINGS: "
+              f"{len(report['observed_wait_cycles'])} observed wait cycles, "
+              f"{len(report['potential_lock_order_cycles'])} potential lock-order cycles")
+        return 1
+    print(f"DEADLOCK TRACE PASS: {report['lock_events']} observed lock events "
+          "(no cycles in observed lock graph; no whole-program liveness proof)")
+    return 0
+
+
+def schedule(root, config, seed, iterations, timeout, replay, trace_output):
+    """Delegate schedule perturbation/replay to the explicitly configured runtime."""
+    params = config.get("schedule", {})
+    cmd = _command(params.get("command"), "schedule")
+    if not 1 <= iterations <= 1_000:
+        raise UsageError("--iterations must be between 1 and 1000")
+    if replay is not None and iterations != 1:
+        raise UsageError("--replay requires --iterations=1")
+    if trace_output is not None and iterations != 1:
+        raise UsageError("--trace-output requires --iterations=1")
+    if replay is not None:
+        args = ["--replay=" + str(_relative(root, replay))]
+    else:
+        args = ["--schedule-fuzz", "--seed=" + str(seed),
+                "--iterations=" + str(iterations)]
+    if trace_output is not None:
+        args += ["--trace-output=" + str(_relative(root, trace_output))]
+    result = _run(cmd + args, root, timeout)
+    if result is None:
+        print("SCHEDULE TIMEOUT")
+        return 1
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    stderr = result.stderr.decode("utf-8", errors="replace")
+    summaries = [line for line in stdout.splitlines()
+                 if line.startswith("ORES_TEST|SUMMARY|")]
+    receipts = [line for line in stdout.splitlines()
+                if line.startswith("ORES_CONCURRENCY|RUN|")]
+    valid = (result.returncode == 0 and len(summaries) == iterations
+             and len(receipts) == iterations
+             and all("|failed=0|" in line for line in summaries))
+    if not valid:
+        print("SCHEDULE FAIL: backend did not provide complete native suite receipts")
+        print((stdout + stderr)[:8000])
+        return 1
+    print(f"SCHEDULE PASS: {iterations} backend perturbation/replay runs "
+          "(carrier interleavings are not deterministic)")
+    return 0
+
+
 def _show_races(report):
     if report["race_count"]:
         for conflict in report["races"][:20]:
@@ -316,6 +390,11 @@ def main(argv=None):
     parser.add_argument("--root", default=".")
     parser.add_argument("--fuzz", action="store_true")
     parser.add_argument("--race", action="store_true")
+    parser.add_argument("--deadlock", action="store_true")
+    parser.add_argument("--schedule-fuzz", action="store_true")
+    parser.add_argument("--replay", help="project-relative backend schedule replay trace")
+    parser.add_argument("--trace-output", help="project-relative schedule trace output")
+    parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--logical", action="store_true")
     parser.add_argument("--trace", help="offline ORES_RACE_V1 JSONL trace (project-relative)")
     parser.add_argument("--model", help="bounded actor model JSON (project-relative)")
@@ -325,10 +404,19 @@ def main(argv=None):
     parser.add_argument("--max-schedules", type=int, default=10000)
     args = parser.parse_args(argv)
     try:
-        if args.fuzz and (args.race or args.logical or args.model or args.trace):
-            raise UsageError("--fuzz and --race/--logical cannot be combined")
-        if (args.logical or args.model or args.trace) and not args.race:
-            raise UsageError("--logical/--model/--trace requires --race")
+        if args.fuzz and (args.race or args.deadlock or args.logical
+                          or args.model or args.trace or args.schedule_fuzz):
+            raise UsageError("--fuzz cannot combine with other testing modes")
+        if (args.logical or args.model) and not args.race:
+            raise UsageError("--logical/--model requires --race")
+        if args.trace and not (args.race or args.deadlock):
+            raise UsageError("--trace requires --race or --deadlock")
+        if args.replay and args.schedule_fuzz:
+            raise UsageError("--replay and --schedule-fuzz are mutually exclusive")
+        if (args.replay or args.trace_output or args.iterations != 1) and not (args.schedule_fuzz or args.replay):
+            raise UsageError("schedule options require --schedule-fuzz or --replay")
+        if (args.schedule_fuzz or args.replay) and (args.race or args.deadlock or args.fuzz):
+            raise UsageError("schedule runner is a separate backend test mode")
         if not 0.01 <= args.timeout <= 600:
             raise UsageError("--timeout must be between 0.01 and 600 seconds")
         root = Path(args.root).resolve(strict=True)
@@ -340,11 +428,19 @@ def main(argv=None):
                 config = tomllib.load(fh)
         else:
             config = {}
+        if args.schedule_fuzz or args.replay:
+            return schedule(root, config, args.seed, args.iterations,
+                            args.timeout, args.replay, args.trace_output)
         if args.fuzz:
             return fuzz(root, config, args.seed, args.cases, args.timeout)
+        status = 0
         if args.race:
-            return race(root, config, args.trace, args.logical, args.model,
-                        args.timeout, args.max_schedules)
+            status |= race(root, config, args.trace, args.logical, args.model,
+                           args.timeout, args.max_schedules)
+        if args.deadlock:
+            status |= deadlock(root, config, args.trace, args.timeout)
+        if args.race or args.deadlock:
+            return status
         return run_native(root, config, args.timeout)
     except (UsageError, TraceError, ModelError, OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         print(f"oreslang test: {exc}", file=sys.stderr)
