@@ -84,6 +84,65 @@ The native language testing API remains in oreslang-source.java/stdlib/testing.o
 Before promoting these flags as general automatic detectors, integrate compiler/runtime memory-access hooks, actor mailbox/lock/suspend happens-before edges, coverage accounting, real guest controlled scheduling, cancellation/continuation generation checks, Java native-image parity, LLVM sanitizer builds, and cross-backend reproducible regression tests. The CLI must continue to fail closed in the absence of such instrumentation.
 
 
+
+## Experimental deadlock and schedule diagnostics (October 18, 2026)
+
+The canonical `oreslang test` wrapper now adds **opt-in**, bounded analysis
+without pretending that guest instrumentation is complete.
+
+```sh
+# Version-one JSONL trace from an instrumented runtime:
+oreslang test --deadlock --trace tests/traces/lock-orders.jsonl
+oreslang test --race --deadlock --trace tests/traces/instrumented.jsonl
+
+# Or run a configured instrumented target automatically:
+oreslang test --deadlock
+```
+
+A `[deadlock].command` (or existing `[race].command`) must emit a **fresh**
+ORES_RACE_V1 JSONL trace at `ORESLANG_RACE_TRACE`, echoing the random
+`ORESLANG_RACE_RUN_ID` in the begin/end records. A missing trace or no observed
+lock acquisitions/waits is *inconclusive* (status 2), not a PASS. The detector:
+
+- Recognizes potential lock-order inversion (successful nested acquisition
+  establishes A-before-B; another task establishes B-before-A).
+- Recognizes observed unresolved task wait cycles from `wait` records of the
+  form `{"op":"wait","task":"a","name":"lock-b"}`, discharged by
+  `{"op":"unwait","task":"a","name":"lock-b"}`. These are optional extensions
+  of the version-one trace vocabulary, for this analysis only.
+- Refuses inconsistent ownership, forged lock waits, malformed or stale runs,
+  and unbounded event/graph work. Lock-order cycles indicate **risk**; wait
+  cycles observed at trace end do not establish that cancellation or timeouts
+  can never resolve them. The analysis does not cover arbitrary remote RPC
+  waits, actor mailbox starvation, or all future program schedules.
+
+The Java/Graal compiler branch also offers experimental scheduler-turn
+perturbation and trace replay. To delegate to its new test launcher, configure
+the **actual** backend command rather than pretending the wrapper owns the
+language scheduler:
+
+```toml
+[schedule]
+command = ["/path/to/oreslang-compiler", "test", "tests/concurrency.ores"]
+```
+
+```sh
+oreslang test --schedule-fuzz --seed 42 --iterations 20 --timeout 60
+oreslang test --schedule-fuzz --seed 42 --trace-output evidence.trace
+oreslang test --replay evidence.trace --timeout 60
+```
+
+The wrapper requires native Oreslang `ORES_TEST|SUMMARY` and
+`ORES_CONCURRENCY|RUN` receipts for every schedule run. It does **not**
+synthesize successful receipts, does not claim deterministic physical carrier
+ordering, and does not infer data-race freedom from scheduler perturbations.
+
+These modes complement the existing **actual** byte-corpus mutation fuzzing
+(`--fuzz`) and host-side vector-clock race analyzer (`--race`).
+Java/Graal `--race` still refuses an uninstrumented memory-safety verdict;
+LLVM guest memory hooks and complete source-level scheduling remain future
+work. Analyzed traces are evidence only for the accesses and waits recorded.
+
 ## Audit hardening (2026-10-15)
 
 The hardening revision strengthens the host-only tool without claiming language-level instrumentation:
