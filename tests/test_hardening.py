@@ -170,6 +170,13 @@ class RaceHistoryTests(unittest.TestCase):
             with self.assertRaises(TraceError):
                 analyze_trace(p)
 
+    def test_trace_read_budget_rejects_oversized_jsonl(self):
+        with tempfile.TemporaryDirectory() as d:
+            trace = Path(d) / "too-big.jsonl"
+            trace.write_bytes(b"x" * 10_000_001)
+            with self.assertRaisesRegex(TraceError, "10 MB"):
+                analyze_trace(trace)
+
     def test_boolean_version_refused(self):
         events = [{"op": "task", "task": "a"}, {"op": "access", "task": "a", "location": "x", "mode": "R"}]
         with tempfile.TemporaryDirectory() as d:
