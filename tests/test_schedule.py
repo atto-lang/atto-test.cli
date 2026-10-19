@@ -109,6 +109,35 @@ for i in range(count):
             self.assertEqual(status, 2)
             self.assertIn("do not combine", err)
 
+    def test_replay_accepts_only_workspace_bound_v3_metadata(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            script = root / "replay_backend.py"
+            script.write_text(
+                "print('ORES_TEST|PASS|suite/case|')\n"
+                "print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\n"
+                "print('ORES_CONCURRENCY|RUN|seed=15|events=1|deadlocks=0|schedule=normal|race_coverage=none')\n",
+                encoding="utf-8")
+            (root / "oreslang-test.toml").write_text(
+                '[schedule]\ncommand = ["' + sys.executable + '", "replay_backend.py"]\n',
+                encoding="utf-8")
+            trace = root / "recorded.trace"
+            trace.write_text(
+                "ORES_CONCURRENCY_TRACE_V2|seed=15|entry-sha256="
+                + "a" * 64 + "|backend=jit-server|probe=1\n"
+                + "task-turn|0\n", encoding="utf-8")
+            status, output, error = self.invoke(root, "--replay", "recorded.trace")
+            self.assertEqual(status, 2)
+            self.assertIn("workspace-bound V3", error)
+            trace.write_text(
+                "ORES_CONCURRENCY_TRACE_V3|seed=15|entry-sha256="
+                + "a" * 64 + "|workspace-sha256=" + "b" * 64
+                + "|backend=jit-server|probe=3\n"
+                + "task-turn|0\n", encoding="utf-8")
+            status, output, error = self.invoke(root, "--replay", "recorded.trace")
+            self.assertEqual(status, 0, error)
+            self.assertIn("SCHEDULE PASS", output)
+
     def test_replay_requires_single_iteration(self):
         with tempfile.TemporaryDirectory() as d:
             status, _, err = self.invoke(Path(d), "--replay", "events.trace",
