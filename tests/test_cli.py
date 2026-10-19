@@ -123,6 +123,13 @@ class CommandTests(unittest.TestCase):
                 status, output, _ = self.call("--root", d)
                 self.assertEqual(status, 1)
                 self.assertIn("FAIL tests/test_skipped.ores", output)
+                runner.write_text("#!" + sys.executable + "\n"
+                                  + "print('ORES_TEST|PASS|suite/case|')\n"
+                                  + "print('ORES_TEST|SUMMARY|total=1|passed=1|passed=1|failed=0|skipped=0|filtered=0')\n",
+                                  encoding="utf-8")
+                status, output, _ = self.call("--root", d)
+                self.assertEqual(status, 1)
+                self.assertIn("FAIL tests/test_skipped.ores", output)
             finally:
                 if prior is None:
                     os.environ.pop("ORESLANG_BIN", None)
