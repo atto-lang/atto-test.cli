@@ -25,6 +25,7 @@ class ScheduleDelegationTests(unittest.TestCase):
 count = next((int(x.split('=', 1)[1]) for x in sys.argv
               if x.startswith('--iterations=')), 1)
 for i in range(count):
+    print('ORES_TEST|PASS|suite/case|')
     print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')
     print(f'ORES_CONCURRENCY|RUN|seed={7+i}|events=2|deadlocks=0|schedule=perturbed|race_coverage=none')
 """, encoding="utf-8")
@@ -35,6 +36,37 @@ for i in range(count):
                                            "--seed", "7", "--iterations", "3")
             self.assertEqual(status, 0, err)
             self.assertIn("SCHEDULE PASS: 3", out)
+
+    def test_fabricated_suite_summary_without_case_events_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            script = root / "empty_case.py"
+            script.write_text(
+                "print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\\n"
+                "print('ORES_CONCURRENCY|RUN|seed=7|events=0|deadlocks=0|schedule=perturbed|race_coverage=none')\\n",
+                encoding="utf-8")
+            (root / "oreslang-test.toml").write_text(
+                '[schedule]\\ncommand = ["' + sys.executable + '", "empty_case.py"]\\n',
+                encoding="utf-8")
+            status, output, error = self.invoke(root, "--schedule-fuzz", "--seed", "7")
+            self.assertEqual(status, 1, error)
+            self.assertIn("SCHEDULE FAIL", output)
+
+    def test_all_skipped_schedule_never_passes(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            script = root / "skipped.py"
+            script.write_text(
+                "print('ORES_TEST|SKIP|suite/case|')\\n"
+                "print('ORES_TEST|SUMMARY|total=1|passed=0|failed=0|skipped=1|filtered=0')\\n"
+                "print('ORES_CONCURRENCY|RUN|seed=7|events=0|deadlocks=0|schedule=perturbed|race_coverage=none')\\n",
+                encoding="utf-8")
+            (root / "oreslang-test.toml").write_text(
+                '[schedule]\\ncommand = ["' + sys.executable + '", "skipped.py"]\\n',
+                encoding="utf-8")
+            status, output, error = self.invoke(root, "--schedule-fuzz", "--seed", "7")
+            self.assertEqual(status, 1, error)
+            self.assertIn("SCHEDULE FAIL", output)
 
     def test_deadlock_or_forged_seed_receipt_is_never_success(self):
         with tempfile.TemporaryDirectory() as d:
