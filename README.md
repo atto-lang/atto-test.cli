@@ -147,8 +147,12 @@ The wrapper requires native Oreslang `ORES_TEST|SUMMARY` and
 lines must precede each summary, match its counts, and include at least one
 actual PASS; fabricated summaries, duplicate metadata fields, and all-skipped
 runs fail closed. It checks
-per-iteration seeds, well-formed and consistent summary counts, and zero
-observed deadlocks, and passes `--deadlock` to the Java runtime. `--replay`
+per-iteration seeds, well-formed and consistent summary counts, nonzero
+checkpoint coverage, and zero observed deadlocks, and passes `--deadlock`
+to the Java runtime. Replay traces must be bounded and fully well-formed;
+when `--trace-output` is requested, its newly created V3 trace must exist
+and its seed and event count must match the backend receipt. Missing or
+stale traces cannot produce schedule PASS. `--replay`
 requires a V3 trace bound to the seed, entry-file SHA-256, bounded workspace
 source snapshot SHA-256, backend mode/platform and probe version. A workspace
 snapshot conservatively includes compiler/stdlib sources and schema manifests,
