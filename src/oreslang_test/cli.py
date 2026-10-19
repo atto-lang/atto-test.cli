@@ -360,8 +360,8 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
         with trace_path.open(encoding="utf-8") as trace_file:
             header = trace_file.readline(256).strip()
         match = re.fullmatch(
-            r"ORES_CONCURRENCY_TRACE_V2\\|seed=(-?[0-9]+)\\|entry-sha256=[0-9a-f]{64}"
-            r"\\|backend=[A-Za-z0-9_.-]{1,80}\\|probe=1", header)
+            r"ORES_CONCURRENCY_TRACE_V2\|seed=(-?[0-9]+)\|entry-sha256=[0-9a-f]{64}"
+            r"\|backend=[A-Za-z0-9_.-]{1,80}\|probe=1", header)
         if match is None:
             raise UsageError("schedule replay requires bound V2 trace provenance")
         expected_seed = int(match.group(1))
@@ -387,11 +387,11 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
     receipts = [line for line in stdout.splitlines()
                 if line.startswith("ORES_CONCURRENCY|RUN|")]
     summary_pattern = re.compile(
-        r"ORES_TEST\\|SUMMARY\\|total=([0-9]+)\\|passed=([0-9]+)"
-        r"\\|failed=([0-9]+)\\|skipped=([0-9]+)\\|filtered=([0-9]+)")
+        r"ORES_TEST\|SUMMARY\|total=([0-9]+)\|passed=([0-9]+)"
+        r"\|failed=([0-9]+)\|skipped=([0-9]+)\|filtered=([0-9]+)")
     receipt_pattern = re.compile(
-        r"ORES_CONCURRENCY\\|RUN\\|seed=(-?[0-9]+)\\|events=([0-9]+)"
-        r"\\|deadlocks=([0-9]+)\\|schedule=(normal|perturbed)\\|race_coverage=none")
+        r"ORES_CONCURRENCY\|RUN\|seed=(-?[0-9]+)\|events=([0-9]+)"
+        r"\|deadlocks=([0-9]+)\|schedule=(normal|perturbed)\|race_coverage=none")
     valid = (result.returncode == 0 and len(summaries) == iterations
              and len(receipts) == iterations)
     if valid:
