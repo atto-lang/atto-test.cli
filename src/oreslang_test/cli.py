@@ -7,6 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 import random
+import re
 import signal
 import subprocess
 import sys
@@ -353,10 +354,26 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
     params = config.get("schedule", {})
     cmd = _command(params.get("command"), "schedule")
     if replay is not None:
-        args = ["--replay=" + str(_relative(root, replay))]
+        trace_path = _relative(root, replay)
+        if not trace_path.is_file() or trace_path.is_symlink() or trace_path.stat().st_size > 8_000_000:
+            raise UsageError("schedule replay trace missing, symlinked or too large")
+        with trace_path.open(encoding="utf-8") as trace_file:
+            header = trace_file.readline(256).strip()
+        match = re.fullmatch(
+            r"ORES_CONCURRENCY_TRACE_V2\\|seed=(-?[0-9]+)\\|entry-sha256=[0-9a-f]{64}"
+            r"\\|backend=[A-Za-z0-9_.-]{1,80}\\|probe=1", header)
+        if match is None:
+            raise UsageError("schedule replay requires bound V2 trace provenance")
+        expected_seed = int(match.group(1))
+        args = ["--replay=" + str(trace_path)]
     else:
+        if seed > (2 ** 63 - 1) - (iterations - 1) or seed < -(2 ** 63):
+            raise UsageError("schedule seed sequence exceeds signed 64-bit range")
+        expected_seed = seed
         args = ["--schedule-fuzz", "--seed=" + str(seed),
                 "--iterations=" + str(iterations)]
+    # The backend must count even guest-caught deadlocks as test failures.
+    args.append("--deadlock")
     if trace_output is not None:
         args += ["--trace-output=" + str(_relative(root, trace_output))]
     result = _run(cmd + args, root, timeout)
@@ -369,9 +386,27 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
                  if line.startswith("ORES_TEST|SUMMARY|")]
     receipts = [line for line in stdout.splitlines()
                 if line.startswith("ORES_CONCURRENCY|RUN|")]
+    summary_pattern = re.compile(
+        r"ORES_TEST\\|SUMMARY\\|total=([0-9]+)\\|passed=([0-9]+)"
+        r"\\|failed=([0-9]+)\\|skipped=([0-9]+)\\|filtered=([0-9]+)")
+    receipt_pattern = re.compile(
+        r"ORES_CONCURRENCY\\|RUN\\|seed=(-?[0-9]+)\\|events=([0-9]+)"
+        r"\\|deadlocks=([0-9]+)\\|schedule=(normal|perturbed)\\|race_coverage=none")
     valid = (result.returncode == 0 and len(summaries) == iterations
-             and len(receipts) == iterations
-             and all("|failed=0|" in line for line in summaries))
+             and len(receipts) == iterations)
+    if valid:
+        for i, (line, receipt) in enumerate(zip(summaries, receipts)):
+            sm = summary_pattern.fullmatch(line)
+            rm = receipt_pattern.fullmatch(receipt)
+            if sm is None or rm is None:
+                valid = False
+                break
+            total, passed, failed, skipped, filtered = map(int, sm.groups())
+            observed_seed, events, deadlocks = map(int, rm.groups()[:3])
+            if (total < 1 or total != passed + failed + skipped or failed != 0
+                    or observed_seed != expected_seed + i or events < 0 or deadlocks != 0):
+                valid = False
+                break
     if not valid:
         print("SCHEDULE FAIL: backend did not provide complete native suite receipts")
         print((stdout + stderr)[:8000])
