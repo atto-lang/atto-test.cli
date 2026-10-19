@@ -158,6 +158,7 @@ def run_native(root, config, timeout):
                 pairs = [item.split("=", 1) for item in summaries[0].split("|")[2:]]
                 counts = {k: int(v) for k, v in pairs}
                 valid = (set(counts) == {"total", "passed", "failed", "skipped", "filtered"}
+                         and len(pairs) == 5
                          and all(x >= 0 for x in counts.values())
                          and counts["passed"] > 0
                          and counts["total"] == counts["passed"] + counts["failed"] + counts["skipped"]
