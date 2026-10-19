@@ -4,6 +4,7 @@ The producer must serialize events in causal per-task order. An independent
 runtime attestation is required to claim complete instrumentation coverage.
 """
 import json
+import os
 from pathlib import Path
 
 
@@ -44,10 +45,19 @@ def analyze_trace(path, expected_run_id=None):
     _require(path.is_file() and not path.is_symlink() and
              path.stat().st_size <= 10_000_000,
              "trace missing, symlinked, or exceeds 10 MB")
+    # Enforce the byte limit on the actual opened stream, not just on a
+    # pre-read stat() that another process could race. Use no-follow where
+    # supported to reject final-component symlink substitution.
     try:
-        with path.open(encoding="utf-8") as stream:
-            records = [json.loads(line, object_pairs_hook=_unique_keys) for line in stream]
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            raw = stream.read(10_000_001)
+        _require(len(raw) <= 10_000_000, "trace exceeds 10 MB read budget")
+        records = [json.loads(line, object_pairs_hook=_unique_keys)
+                   for line in raw.decode("utf-8", errors="strict").splitlines()]
     except (ValueError, UnicodeError) as exc:
+        if isinstance(exc, TraceError):
+            raise
         raise TraceError(f"invalid JSONL trace: {exc}") from exc
     _require(2 <= len(records) <= 100_002, "trace must have begin/end and <=100000 events")
     _require(all(type(record) is dict for record in records), "trace records must be JSON objects")
