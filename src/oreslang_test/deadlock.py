@@ -65,7 +65,11 @@ def _runtime_cycle_trace(path):
         raise TraceError("malformed runtime checkpoint trace encoding") from exc
     _require(1 <= len(lines) <= MAX_EVENTS + 1,
              "runtime checkpoint event budget exceeded")
-    _require(re.fullmatch(r"ORES_CONCURRENCY_TRACE_V1\|seed=-?[0-9]+", lines[0]) is not None,
+    v1 = r"ORES_CONCURRENCY_TRACE_V1\|seed=-?[0-9]+"
+    v2 = (r"ORES_CONCURRENCY_TRACE_V2\|seed=-?[0-9]+"
+          r"\|entry-sha256=[0-9a-f]{64}\|backend=[A-Za-z0-9_.-]{1,80}\|probe=1")
+    _require(re.fullmatch(v1, lines[0]) is not None
+             or re.fullmatch(v2, lines[0]) is not None,
              "invalid runtime checkpoint trace header")
     cycles = []
     for event in lines[1:]:
@@ -96,7 +100,8 @@ def analyze_deadlocks(path, expected_run_id=None):
              "deadlock trace missing, symlinked, or exceeds 10 MB")
     with path.open("rb") as stream:
         first_line = stream.readline(128)
-    if first_line.startswith(b"ORES_CONCURRENCY_TRACE_V1|"):
+    if first_line.startswith((b"ORES_CONCURRENCY_TRACE_V1|",
+                              b"ORES_CONCURRENCY_TRACE_V2|")):
         _require(expected_run_id is None,
                  "runtime checkpoint trace has no nonce binding; cannot authenticate a fresh capture")
         return _runtime_cycle_trace(path)
