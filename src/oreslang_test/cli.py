@@ -322,14 +322,20 @@ def deadlock(root, config, trace, timeout):
             if result is None or result.returncode != 0:
                 raise UsageError("instrumented deadlock test failed or timed out")
             report = analyze_deadlocks(path, expected_run_id=run_id)
+    for kind in report["runtime_cycle_events"][:20]:
+        print("RUNTIME CYCLE DETECTED: " + kind)
+    if report["backend"] == "graal-checkpoints" and not report["runtime_cycle_events"]:
+        raise UsageError("runtime checkpoint trace lacks lock graph evidence; "
+                         "no detected cycles is inconclusive")
     for cycle in report["observed_wait_cycles"][:20]:
         print("OBSERVED WAIT CYCLE: " + " -> ".join(cycle))
     for cycle in report["potential_lock_order_cycles"][:20]:
         print("POTENTIAL LOCK-ORDER CYCLE: " + " -> ".join(cycle))
-    if report["observed_wait_cycles"] or report["potential_lock_order_cycles"]:
+    if report["observed_wait_cycles"] or report["potential_lock_order_cycles"] or report["runtime_cycle_events"]:
         print("DEADLOCK FINDINGS: "
               f"{len(report['observed_wait_cycles'])} observed wait cycles, "
-              f"{len(report['potential_lock_order_cycles'])} potential lock-order cycles")
+              f"{len(report['potential_lock_order_cycles'])} potential lock-order cycles, "
+              f"{len(report['runtime_cycle_events'])} runtime cycle receipts")
         return 1
     print(f"DEADLOCK TRACE PASS: {report['lock_events']} observed lock events "
           "(no cycles in observed lock graph; no whole-program liveness proof)")
