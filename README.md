@@ -99,6 +99,13 @@ oreslang test --race --deadlock --trace tests/traces/instrumented.jsonl
 oreslang test --deadlock
 ```
 
+The same `--deadlock --trace` command also accepts the Java/Graal
+`ORES_CONCURRENCY_TRACE_V1` checkpoint file. It reports explicit
+`deadlock-future-cycle` and `deadlock-mutex-cycle` receipts. A file containing
+only task-turn checkpoints is **inconclusive** (exit 2), because it provides no
+mutex/wait-graph evidence. Such checkpoint files contain no invocation nonce
+and may be used only for offline inspection, not trusted fresh-run attestation.
+
 A `[deadlock].command` (or existing `[race].command`) must emit a **fresh**
 ORES_RACE_V1 JSONL trace at `ORESLANG_RACE_TRACE`, echoing the random
 `ORESLANG_RACE_RUN_ID` in the begin/end records. A missing trace or no observed
