@@ -68,9 +68,9 @@ def _runtime_cycle_trace(path):
     v1 = r"ORES_CONCURRENCY_TRACE_V1\|seed=-?[0-9]+"
     v2 = (r"ORES_CONCURRENCY_TRACE_V2\|seed=-?[0-9]+"
           r"\|entry-sha256=[0-9a-f]{64}\|backend=[A-Za-z0-9_.-]{1,80}\|probe=1")
-    v3 = (r"ORES_CONCURRENCY_TRACE_V3\\|seed=-?[0-9]+"
-          r"\\|entry-sha256=[0-9a-f]{64}\\|workspace-sha256=[0-9a-f]{64}"
-          r"\\|backend=[A-Za-z0-9_.-]{1,80}\\|probe=3")
+    v3 = (r"ORES_CONCURRENCY_TRACE_V3\|seed=-?[0-9]+"
+          r"\|entry-sha256=[0-9a-f]{64}\|workspace-sha256=[0-9a-f]{64}"
+          r"\|backend=[A-Za-z0-9_.-]{1,80}\|probe=3")
     _require(re.fullmatch(v1, lines[0]) is not None
              or re.fullmatch(v2, lines[0]) is not None
              or re.fullmatch(v3, lines[0]) is not None,
