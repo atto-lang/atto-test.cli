@@ -65,7 +65,7 @@ def _runtime_cycle_trace(path):
         raise TraceError("malformed runtime checkpoint trace encoding") from exc
     _require(1 <= len(lines) <= MAX_EVENTS + 1,
              "runtime checkpoint event budget exceeded")
-    _require(re.fullmatch(r"ORES_CONCURRENCY_TRACE_V1\\|seed=-?[0-9]+", lines[0]) is not None,
+    _require(re.fullmatch(r"ORES_CONCURRENCY_TRACE_V1\|seed=-?[0-9]+", lines[0]) is not None,
              "invalid runtime checkpoint trace header")
     cycles = []
     for event in lines[1:]:
