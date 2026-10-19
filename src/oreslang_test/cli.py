@@ -413,11 +413,11 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
     if summary_line is not None or any(case_counts.values()):
         valid = False
     summary_pattern = re.compile(
-        r"ORES_TEST\\|SUMMARY\\|total=([0-9]+)\\|passed=([0-9]+)"
-        r"\\|failed=([0-9]+)\\|skipped=([0-9]+)\\|filtered=([0-9]+)")
+        r"ORES_TEST\|SUMMARY\|total=([0-9]+)\|passed=([0-9]+)"
+        r"\|failed=([0-9]+)\|skipped=([0-9]+)\|filtered=([0-9]+)")
     receipt_pattern = re.compile(
-        r"ORES_CONCURRENCY\\|RUN\\|seed=(-?[0-9]+)\\|events=([0-9]+)"
-        r"\\|deadlocks=([0-9]+)\\|schedule=(normal|perturbed)\\|race_coverage=none")
+        r"ORES_CONCURRENCY\|RUN\|seed=(-?[0-9]+)\|events=([0-9]+)"
+        r"\|deadlocks=([0-9]+)\|schedule=(normal|perturbed)\|race_coverage=none")
     valid &= len(runs) == iterations
     if valid:
         for i, (line, receipt, counted) in enumerate(runs):
