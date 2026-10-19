@@ -6,6 +6,7 @@ are observed at trace end, not proof that timeouts/cancellation cannot resolve.
 No instrumentation-coverage assertion is inferred from an empty trace.
 """
 import json
+import re
 from collections import deque
 from pathlib import Path
 
@@ -54,12 +55,51 @@ def _cycles(graph):
                 return witnesses
     return witnesses
 
+def _runtime_cycle_trace(path):
+    """Java/Graal experimental checkpoint receipts, NOT a full wait graph."""
+    if path.stat().st_size > 8_000_000:
+        raise TraceError("runtime checkpoint trace exceeds 8 MB")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeError as exc:
+        raise TraceError("malformed runtime checkpoint trace encoding") from exc
+    _require(1 <= len(lines) <= MAX_EVENTS + 1,
+             "runtime checkpoint event budget exceeded")
+    _require(re.fullmatch(r"ORES_CONCURRENCY_TRACE_V1\\|seed=-?[0-9]+", lines[0]) is not None,
+             "invalid runtime checkpoint trace header")
+    cycles = []
+    for event in lines[1:]:
+        parts = event.split("|")
+        _require(len(parts) == 2 and re.fullmatch(r"[a-z][a-z0-9-]{0,47}", parts[0])
+                 and parts[1] in ("0", "1", "2"),
+                 "invalid runtime checkpoint event")
+        if parts[0].startswith("deadlock-"):
+            _require(parts[0] in ("deadlock-future-cycle", "deadlock-mutex-cycle"),
+                     "unsupported runtime deadlock event")
+            cycles.append(parts[0])
+    return {
+        "events": len(lines) - 1,
+        "lock_events": 0,
+        "potential_lock_order_cycles": [],
+        "observed_wait_cycles": [],
+        "runtime_cycle_events": cycles,
+        "pending_waits": 0,
+        "backend": "graal-checkpoints",
+    }
+
+
 def analyze_deadlocks(path, expected_run_id=None):
     """Analyze a complete bounded trace; do not claim whole-program liveness."""
     path = Path(path)
     _require(path.is_file() and not path.is_symlink()
              and path.stat().st_size <= 10_000_000,
              "deadlock trace missing, symlinked, or exceeds 10 MB")
+    with path.open("rb") as stream:
+        first_line = stream.readline(128)
+    if first_line.startswith(b"ORES_CONCURRENCY_TRACE_V1|"):
+        _require(expected_run_id is None,
+                 "runtime checkpoint trace has no nonce binding; cannot authenticate a fresh capture")
+        return _runtime_cycle_trace(path)
     try:
         with path.open(encoding="utf-8") as stream:
             records = [json.loads(line, object_pairs_hook=_unique_keys) for line in stream]
@@ -170,6 +210,7 @@ def analyze_deadlocks(path, expected_run_id=None):
         "lock_events": observed,
         "potential_lock_order_cycles": order_cycles,
         "observed_wait_cycles": wait_cycles,
+        "runtime_cycle_events": [],
         "pending_waits": len(pending),
         "backend": start["backend"],
     }
