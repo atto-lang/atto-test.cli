@@ -149,10 +149,12 @@ actual PASS; fabricated summaries, duplicate metadata fields, and all-skipped
 runs fail closed. It checks
 per-iteration seeds, well-formed and consistent summary counts, and zero
 observed deadlocks, and passes `--deadlock` to the Java runtime. `--replay`
-requires a V2 trace bound to the seed, entry-file SHA-256, backend mode/platform
-and probe version. Actual source/import-closure and runtime-build digests are
-not yet recorded; exact Git-tree CI is still required for trustworthy
-reproducibility. It does **not**
+requires a V3 trace bound to the seed, entry-file SHA-256, bounded workspace
+source snapshot SHA-256, backend mode/platform and probe version. A workspace
+snapshot conservatively includes compiler/stdlib sources and schema manifests,
+but is not a fully resolved import graph, does not cover imports outside the
+workspace, and does not attest the deployed compiler binary. Exact Git-tree
+CI remains required for independently verifiable build provenance. It does **not**
 synthesize successful receipts, does not claim deterministic physical carrier
 ordering, and does not infer data-race freedom from scheduler perturbations.
 
@@ -173,3 +175,17 @@ The hardening revision strengthens the host-only tool without claiming language-
 - `python -m unittest discover -s tests -v` covers 28 cases including race-history and synchronization adversarial examples. The local audit test result is **not** a GitHub Actions result until the complete exact Git tree has run on a CI runner.
 
 The `finish` event is an extension of the v1 JSONL trace vocabulary. Existing traces with independent root tasks remain valid; actual `fork` traces should emit corresponding task completion events. This remains host-side analysis of observed events, and runtime coverage must be separately attested before claiming race freedom.
+
+### Exact-tree concurrency P0 gate
+
+On an authorized private runner, check out the exact PR tree (never a partial
+cherry-pick) and set `EXPECTED_SOURCE_TREE_SHA` to its verified Git tree SHA:
+
+```sh
+EXPECTED_SOURCE_TREE_SHA=<40-character-tree-sha> bash scripts/ci-verify-concurrency-p0.sh
+```
+
+The gate must execute the tests and print `ORES_CONCURRENCY_CI|...|result=PASS`
+only after success. Matching Git tree SHA and executable CI logs are required;
+failed pre-step GitHub Actions jobs do not count as test evidence. This
+script does not grant access to private source across organizations.
