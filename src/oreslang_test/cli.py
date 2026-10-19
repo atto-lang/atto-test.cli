@@ -362,10 +362,11 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
         with trace_path.open(encoding="utf-8") as trace_file:
             header = trace_file.readline(256).strip()
         match = re.fullmatch(
-            r"ORES_CONCURRENCY_TRACE_V2\|seed=(-?[0-9]+)\|entry-sha256=[0-9a-f]{64}"
-            r"\|backend=[A-Za-z0-9_.-]{1,80}\|probe=1", header)
+            r"ORES_CONCURRENCY_TRACE_V3\|seed=(-?[0-9]+)\|entry-sha256=[0-9a-f]{64}"
+            r"\|workspace-sha256=[0-9a-f]{64}"
+            r"\|backend=[A-Za-z0-9_.-]{1,80}\|probe=3", header)
         if match is None:
-            raise UsageError("schedule replay requires bound V2 trace provenance")
+            raise UsageError("schedule replay requires workspace-bound V3 trace provenance")
         expected_seed = int(match.group(1))
         args = ["--replay=" + str(trace_path)]
     else:
