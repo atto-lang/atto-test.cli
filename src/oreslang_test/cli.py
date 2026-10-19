@@ -397,6 +397,7 @@ def main(argv=None):
     parser.add_argument("--fuzz", action="store_true")
     parser.add_argument("--race", action="store_true")
     parser.add_argument("--deadlock", action="store_true")
+    parser.add_argument("--model-check", action="store_true")
     parser.add_argument("--schedule-fuzz", action="store_true")
     parser.add_argument("--replay", help="project-relative backend schedule replay trace")
     parser.add_argument("--trace-output", help="project-relative schedule trace output")
@@ -410,18 +411,20 @@ def main(argv=None):
     parser.add_argument("--max-schedules", type=int, default=10000)
     args = parser.parse_args(argv)
     try:
-        if args.fuzz and (args.race or args.deadlock or args.logical
+        if args.fuzz and (args.race or args.deadlock or args.model_check or args.logical
                           or args.model or args.trace or args.schedule_fuzz):
             raise UsageError("--fuzz cannot combine with other testing modes")
-        if (args.logical or args.model) and not args.race:
-            raise UsageError("--logical/--model requires --race")
+        if (args.logical or args.model) and not (args.race or args.model_check):
+            raise UsageError("--logical/--model requires --race or --model-check")
+        if args.model_check and args.race:
+            raise UsageError("--model-check explores reference models; do not combine with instrumented --race")
         if args.trace and not (args.race or args.deadlock):
             raise UsageError("--trace requires --race or --deadlock")
         if args.replay and args.schedule_fuzz:
             raise UsageError("--replay and --schedule-fuzz are mutually exclusive")
         if (args.replay or args.trace_output or args.iterations != 1) and not (args.schedule_fuzz or args.replay):
             raise UsageError("schedule options require --schedule-fuzz or --replay")
-        if (args.schedule_fuzz or args.replay) and (args.race or args.deadlock or args.fuzz):
+        if (args.schedule_fuzz or args.replay) and (args.race or args.deadlock or args.fuzz or args.model_check):
             raise UsageError("schedule runner is a separate backend test mode")
         if not 0.01 <= args.timeout <= 600:
             raise UsageError("--timeout must be between 0.01 and 600 seconds")
@@ -439,6 +442,11 @@ def main(argv=None):
                             args.timeout, args.replay, args.trace_output)
         if args.fuzz:
             return fuzz(root, config, args.seed, args.cases, args.timeout)
+        if args.model_check:
+            # The existing bounded reference-model explorer, not full guest
+            # compiler model checking. The output explicitly identifies scope.
+            return race(root, config, None, True, args.model,
+                        args.timeout, args.max_schedules)
         status = 0
         if args.race:
             status |= race(root, config, args.trace, args.logical, args.model,
