@@ -159,6 +159,7 @@ def run_native(root, config, timeout):
                 counts = {k: int(v) for k, v in pairs}
                 valid = (set(counts) == {"total", "passed", "failed", "skipped", "filtered"}
                          and all(x >= 0 for x in counts.values())
+                         and counts["passed"] > 0
                          and counts["total"] == counts["passed"] + counts["failed"] + counts["skipped"]
                          and len(status_lines) == counts["total"])
                 for status in ("PASS", "FAIL", "SKIP"):
@@ -382,20 +383,44 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
         return 1
     stdout = result.stdout.decode("utf-8", errors="replace")
     stderr = result.stderr.decode("utf-8", errors="replace")
-    summaries = [line for line in stdout.splitlines()
-                 if line.startswith("ORES_TEST|SUMMARY|")]
-    receipts = [line for line in stdout.splitlines()
-                if line.startswith("ORES_CONCURRENCY|RUN|")]
+    # Every report must contain independently checkable case records,
+    # its summary, and its receipt, in this order. A fabricated SUMMARY
+    # alone is not sufficient evidence that guest cases executed.
+    runs = []
+    case_counts = {"PASS": 0, "FAIL": 0, "SKIP": 0}
+    summary_line = None
+    valid = result.returncode == 0
+    for line in stdout.splitlines():
+        kind = next((status for status in case_counts
+                     if line.startswith(f"ORES_TEST|{status}|")), None)
+        if kind is not None:
+            if summary_line is not None:
+                valid = False
+                break
+            case_counts[kind] += 1
+        elif line.startswith("ORES_TEST|SUMMARY|"):
+            if summary_line is not None:
+                valid = False
+                break
+            summary_line = line
+        elif line.startswith("ORES_CONCURRENCY|RUN|"):
+            if summary_line is None:
+                valid = False
+                break
+            runs.append((summary_line, line, dict(case_counts)))
+            summary_line = None
+            case_counts = {"PASS": 0, "FAIL": 0, "SKIP": 0}
+    if summary_line is not None or any(case_counts.values()):
+        valid = False
     summary_pattern = re.compile(
-        r"ORES_TEST\|SUMMARY\|total=([0-9]+)\|passed=([0-9]+)"
-        r"\|failed=([0-9]+)\|skipped=([0-9]+)\|filtered=([0-9]+)")
+        r"ORES_TEST\\|SUMMARY\\|total=([0-9]+)\\|passed=([0-9]+)"
+        r"\\|failed=([0-9]+)\\|skipped=([0-9]+)\\|filtered=([0-9]+)")
     receipt_pattern = re.compile(
-        r"ORES_CONCURRENCY\|RUN\|seed=(-?[0-9]+)\|events=([0-9]+)"
-        r"\|deadlocks=([0-9]+)\|schedule=(normal|perturbed)\|race_coverage=none")
-    valid = (result.returncode == 0 and len(summaries) == iterations
-             and len(receipts) == iterations)
+        r"ORES_CONCURRENCY\\|RUN\\|seed=(-?[0-9]+)\\|events=([0-9]+)"
+        r"\\|deadlocks=([0-9]+)\\|schedule=(normal|perturbed)\\|race_coverage=none")
+    valid &= len(runs) == iterations
     if valid:
-        for i, (line, receipt) in enumerate(zip(summaries, receipts)):
+        for i, (line, receipt, counted) in enumerate(runs):
             sm = summary_pattern.fullmatch(line)
             rm = receipt_pattern.fullmatch(receipt)
             if sm is None or rm is None:
@@ -403,8 +428,11 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
                 break
             total, passed, failed, skipped, filtered = map(int, sm.groups())
             observed_seed, events, deadlocks = map(int, rm.groups()[:3])
-            if (total < 1 or total != passed + failed + skipped or failed != 0
-                    or observed_seed != expected_seed + i or events < 0 or deadlocks != 0):
+            if (passed < 1 or total != passed + failed + skipped or failed != 0
+                    or counted["PASS"] != passed or counted["FAIL"] != failed
+                    or counted["SKIP"] != skipped
+                    or observed_seed != expected_seed + i or events < 0
+                    or deadlocks != 0):
                 valid = False
                 break
     if not valid:
