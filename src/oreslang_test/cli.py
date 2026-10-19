@@ -349,8 +349,16 @@ def _schedule_trace(path):
     """Validate a bounded V3 checkpoint trace; no claim of deterministic carriers."""
     if not path.is_file() or path.is_symlink() or path.stat().st_size > 8_000_000:
         raise UsageError("schedule trace missing, symlinked or too large")
+    # Enforce the byte budget on the opened stream, not only on a mutable
+    # stat() result. O_NOFOLLOW also closes the last-component symlink race
+    # on platforms where the flag is supported.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        raw = stream.read(8_000_001)
+    if len(raw) > 8_000_000:
+        raise UsageError("schedule trace exceeds the 8 MB read budget")
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = raw.decode("utf-8", errors="strict").splitlines()
     except UnicodeError as exc:
         raise UsageError("schedule trace is not valid UTF-8") from exc
     if not 2 <= len(lines) <= 100_001:
