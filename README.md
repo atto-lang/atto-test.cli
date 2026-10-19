@@ -143,7 +143,10 @@ oreslang test --replay evidence.trace --timeout 60
 ```
 
 The wrapper requires native Oreslang `ORES_TEST|SUMMARY` and
-`ORES_CONCURRENCY|RUN` receipts for every schedule run. It checks
+`ORES_CONCURRENCY|RUN` receipts for every schedule run. Case-level PASS/FAIL/SKIP
+lines must precede each summary, match its counts, and include at least one
+actual PASS; fabricated summaries, duplicate metadata fields, and all-skipped
+runs fail closed. It checks
 per-iteration seeds, well-formed and consistent summary counts, and zero
 observed deadlocks, and passes `--deadlock` to the Java runtime. `--replay`
 requires a V2 trace bound to the seed, entry-file SHA-256, backend mode/platform
