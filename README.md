@@ -162,6 +162,13 @@ CI remains required for independently verifiable build provenance. It does **not
 synthesize successful receipts, does not claim deterministic physical carrier
 ordering, and does not infer data-race freedom from scheduler perturbations.
 
+Cross-backend host analyzers now agree on important observed-trace contracts:
+`fork` creates a fresh logical task, `finish` marks its terminal state,
+`join` accepts only a finished direct child once, nested critical-section
+locks publish ordering only on the final unlock, and message IDs are globally
+single-use even after receipt. These are **analyzer contracts**, not guest
+compiler/runtime instrumentation or guaranteed replay of carrier threads.
+
 These modes complement the existing **actual** byte-corpus mutation fuzzing
 (`--fuzz`) and host-side vector-clock race analyzer (`--race`).
 Java/Graal `--race` still refuses an uninstrumented memory-safety verdict;
@@ -176,7 +183,7 @@ The hardening revision strengthens the host-only tool without claiming language-
 - The trace grammar adds `{"op":"finish","task":"..."}`. A `join` now requires a finished, directly forked child that has not already been joined. Any forked child left unfinished at trace termination, post-finish access, duplicate JSON key, or invalid encoding is a hard error.
 - Model files are limited to 2 MB, 16 actors, 64 turns, 4096 operations, and 256 state keys. Operation schemas and local references are validated before exploring interleavings.
 - Each test subprocess captures no more than 4 MB per stdout/stderr stream in memory; larger outputs fail. Timed-out process groups are terminated on POSIX hosts. A fuzz counterexample is re-executed twice before minimization and the reduced input is also checked twice; flaky first failures become an explicit non-success status.
-- `python -m unittest discover -s tests -v` covers 28 cases including race-history and synchronization adversarial examples. The local audit test result is **not** a GitHub Actions result until the complete exact Git tree has run on a CI runner.
+- `python -m unittest discover -s tests -v` includes race-history, task lifecycle, reentrant-lock, single-use-message, and schedule/replay adversarial cases. The suite's executable test count and outcome must come from an actual runner log, not from source inspection.
 
 The `finish` event is an extension of the v1 JSONL trace vocabulary. Existing traces with independent root tasks remain valid; actual `fork` traces should emit corresponding task completion events. This remains host-side analysis of observed events, and runtime coverage must be separately attested before claiming race freedom.
 
