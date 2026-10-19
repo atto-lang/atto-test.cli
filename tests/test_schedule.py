@@ -82,6 +82,69 @@ for i in range(count):
             self.assertEqual(status, 1, err)
             self.assertIn("SCHEDULE FAIL", out)
 
+    def test_backend_cannot_claim_trace_output_without_writing_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "fake_backend.py").write_text(
+                "print('ORES_TEST|PASS|suite/case|')\n"
+                "print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\n"
+                "print('ORES_CONCURRENCY|RUN|seed=7|events=1|deadlocks=0|schedule=perturbed|race_coverage=none')\n",
+                encoding="utf-8")
+            (root / "oreslang-test.toml").write_text(
+                '[schedule]\ncommand = ["' + sys.executable + '", "fake_backend.py"]\n',
+                encoding="utf-8")
+            code, stdout, stderr = self.invoke(root, "--schedule-fuzz",
+                                                "--seed", "7", "--trace-output", "absent.trace")
+            self.assertEqual(code, 1, stderr)
+            self.assertIn("SCHEDULE FAIL", stdout)
+
+    def test_rejects_stale_output_trace_before_backend_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "evidence.trace").write_text("old evidence", encoding="utf-8")
+            (root / "oreslang-test.toml").write_text(
+                '[schedule]\ncommand = ["' + sys.executable + '", "-c", "pass"]\n',
+                encoding="utf-8")
+            code, _, stderr = self.invoke(root, "--schedule-fuzz",
+                                           "--seed", "7", "--trace-output", "evidence.trace")
+            self.assertEqual(code, 2)
+            self.assertIn("must be new", stderr)
+
+    def test_replay_event_count_mismatch_is_not_success(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "fake_backend.py").write_text(
+                "print('ORES_TEST|PASS|suite/case|')\n"
+                "print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\n"
+                "print('ORES_CONCURRENCY|RUN|seed=17|events=3|deadlocks=0|schedule=normal|race_coverage=none')\n",
+                encoding="utf-8")
+            (root / "oreslang-test.toml").write_text(
+                '[schedule]\ncommand = ["' + sys.executable + '", "fake_backend.py"]\n',
+                encoding="utf-8")
+            (root / "input.trace").write_text(
+                "ORES_CONCURRENCY_TRACE_V3|seed=17|entry-sha256="
+                + "a" * 64 + "|workspace-sha256=" + "b" * 64
+                + "|backend=jit-server|probe=3\n"
+                + "task-turn|0\n", encoding="utf-8")
+            code, stdout, stderr = self.invoke(root, "--replay", "input.trace")
+            self.assertEqual(code, 1, stderr)
+            self.assertIn("SCHEDULE FAIL", stdout)
+
+    def test_schedule_zero_checkpoint_receipt_is_not_coverage(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "fake_backend.py").write_text(
+                "print('ORES_TEST|PASS|suite/case|')\n"
+                "print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\n"
+                "print('ORES_CONCURRENCY|RUN|seed=7|events=0|deadlocks=0|schedule=perturbed|race_coverage=none')\n",
+                encoding="utf-8")
+            (root / "oreslang-test.toml").write_text(
+                '[schedule]\ncommand = ["' + sys.executable + '", "fake_backend.py"]\n',
+                encoding="utf-8")
+            code, stdout, stderr = self.invoke(root, "--schedule-fuzz", "--seed", "7")
+            self.assertEqual(code, 1, stderr)
+            self.assertIn("SCHEDULE FAIL", stdout)
+
     def test_missing_backend_and_conflicting_modes_fail_closed(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
