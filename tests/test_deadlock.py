@@ -168,6 +168,30 @@ class DeadlockGraphTests(unittest.TestCase):
             self.assertEqual(status, 2)
             self.assertIn("invalid runtime checkpoint trace header", stderr.getvalue())
 
+    def test_graal_v3_source_snapshot_trace_detects_cycle(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            header = ("ORES_CONCURRENCY_TRACE_V3|seed=12|entry-sha256="
+                      + "a" * 64 + "|workspace-sha256=" + "b" * 64
+                      + "|backend=jit-server|probe=3")
+            trace = root / "v3.trace"
+            trace.write_text(header + "\n" + "deadlock-future-cycle|0\n",
+                             encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = main(["--root", d, "--deadlock", "--trace", "v3.trace"])
+            self.assertEqual(status, 1)
+            self.assertIn("RUNTIME CYCLE DETECTED", output.getvalue())
+            trace.write_text(header.replace("workspace-sha256=" + "b" * 64,
+                                            "workspace-sha256=bad")
+                             + "\n" + "deadlock-future-cycle|0\n",
+                             encoding="utf-8")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                status = main(["--root", d, "--deadlock", "--trace", "v3.trace"])
+            self.assertEqual(status, 2)
+            self.assertIn("invalid runtime checkpoint trace header", stderr.getvalue())
+
     def test_graal_checkpoint_only_trace_does_not_certify_deadlock_freedom(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
