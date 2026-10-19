@@ -403,7 +403,7 @@ def main(argv=None):
     parser.add_argument("--trace-output", help="project-relative schedule trace output")
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--logical", action="store_true")
-    parser.add_argument("--trace", help="offline ORES_RACE_V1 JSONL trace (project-relative)")
+    parser.add_argument("--trace", help="project-relative ORES_RACE_V1 JSONL or Java runtime cycle trace")
     parser.add_argument("--model", help="bounded actor model JSON (project-relative)")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--cases", type=int, default=100)
