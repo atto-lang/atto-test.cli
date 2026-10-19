@@ -68,8 +68,12 @@ def _runtime_cycle_trace(path):
     v1 = r"ORES_CONCURRENCY_TRACE_V1\|seed=-?[0-9]+"
     v2 = (r"ORES_CONCURRENCY_TRACE_V2\|seed=-?[0-9]+"
           r"\|entry-sha256=[0-9a-f]{64}\|backend=[A-Za-z0-9_.-]{1,80}\|probe=1")
+    v3 = (r"ORES_CONCURRENCY_TRACE_V3\\|seed=-?[0-9]+"
+          r"\\|entry-sha256=[0-9a-f]{64}\\|workspace-sha256=[0-9a-f]{64}"
+          r"\\|backend=[A-Za-z0-9_.-]{1,80}\\|probe=3")
     _require(re.fullmatch(v1, lines[0]) is not None
-             or re.fullmatch(v2, lines[0]) is not None,
+             or re.fullmatch(v2, lines[0]) is not None
+             or re.fullmatch(v3, lines[0]) is not None,
              "invalid runtime checkpoint trace header")
     cycles = []
     for event in lines[1:]:
@@ -101,7 +105,8 @@ def analyze_deadlocks(path, expected_run_id=None):
     with path.open("rb") as stream:
         first_line = stream.readline(128)
     if first_line.startswith((b"ORES_CONCURRENCY_TRACE_V1|",
-                              b"ORES_CONCURRENCY_TRACE_V2|")):
+                              b"ORES_CONCURRENCY_TRACE_V2|",
+                              b"ORES_CONCURRENCY_TRACE_V3|")):
         _require(expected_run_id is None,
                  "runtime checkpoint trace has no nonce binding; cannot authenticate a fresh capture")
         return _runtime_cycle_trace(path)
