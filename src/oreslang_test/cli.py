@@ -345,6 +345,28 @@ def deadlock(root, config, trace, timeout):
     return 0
 
 
+def _schedule_trace(path):
+    """Validate a bounded V3 checkpoint trace; no claim of deterministic carriers."""
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > 8_000_000:
+        raise UsageError("schedule trace missing, symlinked or too large")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeError as exc:
+        raise UsageError("schedule trace is not valid UTF-8") from exc
+    if not 2 <= len(lines) <= 100_001:
+        raise UsageError("schedule trace has no checkpoints or exceeds event budget")
+    match = re.fullmatch(
+        r"ORES_CONCURRENCY_TRACE_V3\|seed=(-?[0-9]+)\|entry-sha256=[0-9a-f]{64}"
+        r"\|workspace-sha256=[0-9a-f]{64}"
+        r"\|backend=[A-Za-z0-9_.-]{1,80}\|probe=3", lines[0])
+    if match is None:
+        raise UsageError("schedule replay requires workspace-bound V3 trace provenance")
+    for index, line in enumerate(lines[1:], 1):
+        if re.fullmatch(r"[a-z][a-z0-9-]{0,47}\|[012]", line) is None:
+            raise UsageError(f"schedule trace malformed at event {index}")
+    return int(match.group(1)), len(lines) - 1
+
+
 def schedule(root, config, seed, iterations, timeout, replay, trace_output):
     """Delegate schedule perturbation/replay to the explicitly configured runtime."""
     if not 1 <= iterations <= 1_000:
@@ -355,19 +377,12 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
         raise UsageError("--trace-output requires --iterations=1")
     params = config.get("schedule", {})
     cmd = _command(params.get("command"), "schedule")
+    replay_events = None
     if replay is not None:
+        if (root / replay).is_symlink():
+            raise UsageError("schedule replay input cannot be a symbolic link")
         trace_path = _relative(root, replay)
-        if not trace_path.is_file() or trace_path.is_symlink() or trace_path.stat().st_size > 8_000_000:
-            raise UsageError("schedule replay trace missing, symlinked or too large")
-        with trace_path.open(encoding="utf-8") as trace_file:
-            header = trace_file.readline(256).strip()
-        match = re.fullmatch(
-            r"ORES_CONCURRENCY_TRACE_V3\|seed=(-?[0-9]+)\|entry-sha256=[0-9a-f]{64}"
-            r"\|workspace-sha256=[0-9a-f]{64}"
-            r"\|backend=[A-Za-z0-9_.-]{1,80}\|probe=3", header)
-        if match is None:
-            raise UsageError("schedule replay requires workspace-bound V3 trace provenance")
-        expected_seed = int(match.group(1))
+        expected_seed, replay_events = _schedule_trace(trace_path)
         args = ["--replay=" + str(trace_path)]
     else:
         if seed > (2 ** 63 - 1) - (iterations - 1) or seed < -(2 ** 63):
@@ -377,8 +392,16 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
                 "--iterations=" + str(iterations)]
     # The backend must count even guest-caught deadlocks as test failures.
     args.append("--deadlock")
+    output_trace = None
     if trace_output is not None:
-        args += ["--trace-output=" + str(_relative(root, trace_output))]
+        if (root / trace_output).is_symlink():
+            raise UsageError("schedule trace output cannot be a symbolic link")
+        output_trace = _relative(root, trace_output)
+        if output_trace.exists():
+            raise UsageError("schedule trace output must be new, not stale")
+        if replay is not None and output_trace == trace_path:
+            raise UsageError("schedule trace output cannot overwrite replay input")
+        args += ["--trace-output=" + str(output_trace)]
     result = _run(cmd + args, root, timeout)
     if result is None:
         print("SCHEDULE TIMEOUT")
@@ -433,10 +456,19 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
             if (passed < 1 or total != passed + failed + skipped or failed != 0
                     or counted["PASS"] != passed or counted["FAIL"] != failed
                     or counted["SKIP"] != skipped
-                    or observed_seed != expected_seed + i or events < 0
+                    or observed_seed != expected_seed + i or events < 1
+                    or (replay_events is not None and events != replay_events)
                     or deadlocks != 0):
                 valid = False
                 break
+    if valid and output_trace is not None:
+        try:
+            trace_seed, trace_events = _schedule_trace(output_trace)
+            reported = receipt_pattern.fullmatch(runs[0][1])
+            valid &= (reported is not None and trace_seed == expected_seed
+                      and trace_events == int(reported.group(2)))
+        except (UsageError, OSError):
+            valid = False
     if not valid:
         print("SCHEDULE FAIL: backend did not provide complete native suite receipts")
         print((stdout + stderr)[:8000])
