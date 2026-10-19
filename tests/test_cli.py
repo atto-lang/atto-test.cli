@@ -105,6 +105,30 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertIn("FUZZ PASS cases=7 seed=2", output)
 
+    def test_native_only_skipped_cases_fail_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p / "tests").mkdir()
+            (p / "tests/test_skipped.ores").write_text("// test", encoding="utf-8")
+            runner = p / "runner"
+            runner.write_text("#!" + sys.executable + "\\n"
+                              + "print('ORES_TEST|SKIP|suite/skipped|')\\n"
+                              + "print('ORES_TEST|SUMMARY|total=1|passed=0|failed=0|skipped=1|filtered=0')\\n",
+                              encoding="utf-8")
+            runner.chmod(0o755)
+            import os
+            prior = os.environ.get("ORESLANG_BIN")
+            os.environ["ORESLANG_BIN"] = str(runner)
+            try:
+                status, output, _ = self.call("--root", d)
+                self.assertEqual(status, 1)
+                self.assertIn("FAIL tests/test_skipped.ores", output)
+            finally:
+                if prior is None:
+                    os.environ.pop("ORESLANG_BIN", None)
+                else:
+                    os.environ["ORESLANG_BIN"] = prior
+
     def test_native_machine_protocol(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
