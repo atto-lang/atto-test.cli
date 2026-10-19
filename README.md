@@ -95,6 +95,9 @@ without pretending that guest instrumentation is complete.
 oreslang test --deadlock --trace tests/traces/lock-orders.jsonl
 oreslang test --race --deadlock --trace tests/traces/instrumented.jsonl
 
+# Systematic bounded exploration of declarative actor-turn reference models:
+oreslang test --model-check --model tests/models/atomic-update.json
+
 # Or run a configured instrumented target automatically:
 oreslang test --deadlock
 ```
