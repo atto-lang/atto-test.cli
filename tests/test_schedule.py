@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from oreslang_test.cli import main
+from oreslang_test.cli import main, _schedule_trace, UsageError
 
 
 class ScheduleDelegationTests(unittest.TestCase):
@@ -144,6 +144,26 @@ for i in range(count):
             code, stdout, stderr = self.invoke(root, "--schedule-fuzz", "--seed", "7")
             self.assertEqual(code, 1, stderr)
             self.assertIn("SCHEDULE FAIL", stdout)
+
+    def test_v3_trace_rejects_invalid_utf8_and_oversize(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            path = root / "invalid.trace"
+            path.write_bytes(b"\xff\xfe")
+            with self.assertRaises(UsageError):
+                _schedule_trace(path)
+            path.write_bytes(b"x" * 8_000_001)
+            with self.assertRaises(UsageError):
+                _schedule_trace(path)
+
+    def test_v3_trace_rejects_empty_checkpoint_sequence(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "no-events.trace"
+            path.write_text("ORES_CONCURRENCY_TRACE_V3|seed=1|entry-sha256="
+                            + "a" * 64 + "|workspace-sha256=" + "b" * 64
+                            + "|backend=jit-server|probe=3\n", encoding="utf-8")
+            with self.assertRaises(UsageError):
+                _schedule_trace(path)
 
     def test_missing_backend_and_conflicting_modes_fail_closed(self):
         with tempfile.TemporaryDirectory() as d:
