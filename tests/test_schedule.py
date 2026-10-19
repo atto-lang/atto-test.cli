@@ -42,11 +42,11 @@ for i in range(count):
             root = Path(d)
             script = root / "empty_case.py"
             script.write_text(
-                "print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\\n"
-                "print('ORES_CONCURRENCY|RUN|seed=7|events=0|deadlocks=0|schedule=perturbed|race_coverage=none')\\n",
+                "print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\n"
+                "print('ORES_CONCURRENCY|RUN|seed=7|events=0|deadlocks=0|schedule=perturbed|race_coverage=none')\n",
                 encoding="utf-8")
             (root / "oreslang-test.toml").write_text(
-                '[schedule]\\ncommand = ["' + sys.executable + '", "empty_case.py"]\\n',
+                '[schedule]\ncommand = ["' + sys.executable + '", "empty_case.py"]\n',
                 encoding="utf-8")
             status, output, error = self.invoke(root, "--schedule-fuzz", "--seed", "7")
             self.assertEqual(status, 1, error)
@@ -57,12 +57,12 @@ for i in range(count):
             root = Path(d)
             script = root / "skipped.py"
             script.write_text(
-                "print('ORES_TEST|SKIP|suite/case|')\\n"
-                "print('ORES_TEST|SUMMARY|total=1|passed=0|failed=0|skipped=1|filtered=0')\\n"
-                "print('ORES_CONCURRENCY|RUN|seed=7|events=0|deadlocks=0|schedule=perturbed|race_coverage=none')\\n",
+                "print('ORES_TEST|SKIP|suite/case|')\n"
+                "print('ORES_TEST|SUMMARY|total=1|passed=0|failed=0|skipped=1|filtered=0')\n"
+                "print('ORES_CONCURRENCY|RUN|seed=7|events=0|deadlocks=0|schedule=perturbed|race_coverage=none')\n",
                 encoding="utf-8")
             (root / "oreslang-test.toml").write_text(
-                '[schedule]\\ncommand = ["' + sys.executable + '", "skipped.py"]\\n',
+                '[schedule]\ncommand = ["' + sys.executable + '", "skipped.py"]\n',
                 encoding="utf-8")
             status, output, error = self.invoke(root, "--schedule-fuzz", "--seed", "7")
             self.assertEqual(status, 1, error)
