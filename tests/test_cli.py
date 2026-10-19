@@ -111,9 +111,9 @@ class CommandTests(unittest.TestCase):
             (p / "tests").mkdir()
             (p / "tests/test_skipped.ores").write_text("// test", encoding="utf-8")
             runner = p / "runner"
-            runner.write_text("#!" + sys.executable + "\\n"
-                              + "print('ORES_TEST|SKIP|suite/skipped|')\\n"
-                              + "print('ORES_TEST|SUMMARY|total=1|passed=0|failed=0|skipped=1|filtered=0')\\n",
+            runner.write_text("#!" + sys.executable + "\n"
+                              + "print('ORES_TEST|SKIP|suite/skipped|')\n"
+                              + "print('ORES_TEST|SUMMARY|total=1|passed=0|failed=0|skipped=1|filtered=0')\n",
                               encoding="utf-8")
             runner.chmod(0o755)
             import os
