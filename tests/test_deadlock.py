@@ -134,6 +134,31 @@ class DeadlockGraphTests(unittest.TestCase):
             self.assertEqual(status, 1)
             self.assertIn("POTENTIAL LOCK-ORDER CYCLE:", output.getvalue())
 
+    def test_graal_runtime_cycle_receipt_reports_nonzero(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "runtime.trace").write_text(
+                "ORES_CONCURRENCY_TRACE_V1|seed=42\\n"
+                "task-turn|1\\n"
+                "deadlock-future-cycle|0\\n", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["--root", d, "--deadlock", "--trace", "runtime.trace"])
+            self.assertEqual(code, 1)
+            self.assertIn("RUNTIME CYCLE DETECTED", output.getvalue())
+
+    def test_graal_checkpoint_only_trace_does_not_certify_deadlock_freedom(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "runtime.trace").write_text(
+                "ORES_CONCURRENCY_TRACE_V1|seed=42\\n"
+                "task-turn|1\\n", encoding="utf-8")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                code = main(["--root", d, "--deadlock", "--trace", "runtime.trace"])
+            self.assertEqual(code, 2)
+            self.assertIn("inconclusive", stderr.getvalue())
+
     def test_cli_no_trace_refuses_false_success(self):
         with tempfile.TemporaryDirectory() as d:
             err = io.StringIO()
