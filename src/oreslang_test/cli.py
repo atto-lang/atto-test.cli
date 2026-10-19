@@ -416,8 +416,8 @@ def main(argv=None):
             raise UsageError("--fuzz cannot combine with other testing modes")
         if (args.logical or args.model) and not (args.race or args.model_check):
             raise UsageError("--logical/--model requires --race or --model-check")
-        if args.model_check and args.race:
-            raise UsageError("--model-check explores reference models; do not combine with instrumented --race")
+        if args.model_check and (args.race or args.deadlock):
+            raise UsageError("--model-check explores reference models; do not combine with instrumented --race/--deadlock")
         if args.trace and not (args.race or args.deadlock):
             raise UsageError("--trace requires --race or --deadlock")
         if args.replay and args.schedule_fuzz:
