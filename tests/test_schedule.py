@@ -40,11 +40,11 @@ for i in range(count):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "broken.py").write_text(
-                "print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\\n"
-                "print('ORES_CONCURRENCY|RUN|seed=999|events=1|deadlocks=1|schedule=perturbed|race_coverage=none')\\n",
+                "print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\n"
+                "print('ORES_CONCURRENCY|RUN|seed=999|events=1|deadlocks=1|schedule=perturbed|race_coverage=none')\n",
                 encoding="utf-8")
             (root / "oreslang-test.toml").write_text(
-                '[schedule]\\ncommand = ["' + sys.executable + '", "broken.py"]\\n',
+                '[schedule]\ncommand = ["' + sys.executable + '", "broken.py"]\n',
                 encoding="utf-8")
             status, out, err = self.invoke(root, "--schedule-fuzz", "--seed", "3")
             self.assertEqual(status, 1, err)
