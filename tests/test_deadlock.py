@@ -138,9 +138,9 @@ class DeadlockGraphTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "runtime.trace").write_text(
-                "ORES_CONCURRENCY_TRACE_V1|seed=42\\n"
-                "task-turn|1\\n"
-                "deadlock-future-cycle|0\\n", encoding="utf-8")
+                "ORES_CONCURRENCY_TRACE_V1|seed=42\n"
+                "task-turn|1\n"
+                "deadlock-future-cycle|0\n", encoding="utf-8")
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 code = main(["--root", d, "--deadlock", "--trace", "runtime.trace"])
@@ -151,8 +151,8 @@ class DeadlockGraphTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "runtime.trace").write_text(
-                "ORES_CONCURRENCY_TRACE_V1|seed=42\\n"
-                "task-turn|1\\n", encoding="utf-8")
+                "ORES_CONCURRENCY_TRACE_V1|seed=42\n"
+                "task-turn|1\n", encoding="utf-8")
             stderr = io.StringIO()
             with contextlib.redirect_stderr(stderr):
                 code = main(["--root", d, "--deadlock", "--trace", "runtime.trace"])
