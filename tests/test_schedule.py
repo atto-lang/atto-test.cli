@@ -24,9 +24,9 @@ class ScheduleDelegationTests(unittest.TestCase):
             script.write_text("""import sys
 count = next((int(x.split('=', 1)[1]) for x in sys.argv
               if x.startswith('--iterations=')), 1)
-for _ in range(count):
+for i in range(count):
     print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')
-    print('ORES_CONCURRENCY|RUN|seed=7|events=2|deadlocks=0|schedule=perturbed|race_coverage=none')
+    print(f'ORES_CONCURRENCY|RUN|seed={7+i}|events=2|deadlocks=0|schedule=perturbed|race_coverage=none')
 """, encoding="utf-8")
             (root / "oreslang-test.toml").write_text(
                 '[schedule]\ncommand = ["' + sys.executable + '", "fake_runtime.py"]\n',
@@ -35,6 +35,20 @@ for _ in range(count):
                                            "--seed", "7", "--iterations", "3")
             self.assertEqual(status, 0, err)
             self.assertIn("SCHEDULE PASS: 3", out)
+
+    def test_deadlock_or_forged_seed_receipt_is_never_success(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "broken.py").write_text(
+                "print('ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0')\\n"
+                "print('ORES_CONCURRENCY|RUN|seed=999|events=1|deadlocks=1|schedule=perturbed|race_coverage=none')\\n",
+                encoding="utf-8")
+            (root / "oreslang-test.toml").write_text(
+                '[schedule]\\ncommand = ["' + sys.executable + '", "broken.py"]\\n',
+                encoding="utf-8")
+            status, out, err = self.invoke(root, "--schedule-fuzz", "--seed", "3")
+            self.assertEqual(status, 1, err)
+            self.assertIn("SCHEDULE FAIL", out)
 
     def test_missing_backend_and_conflicting_modes_fail_closed(self):
         with tempfile.TemporaryDirectory() as d:
