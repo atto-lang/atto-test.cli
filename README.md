@@ -143,7 +143,13 @@ oreslang test --replay evidence.trace --timeout 60
 ```
 
 The wrapper requires native Oreslang `ORES_TEST|SUMMARY` and
-`ORES_CONCURRENCY|RUN` receipts for every schedule run. It does **not**
+`ORES_CONCURRENCY|RUN` receipts for every schedule run. It checks
+per-iteration seeds, well-formed and consistent summary counts, and zero
+observed deadlocks, and passes `--deadlock` to the Java runtime. `--replay`
+requires a V2 trace bound to the seed, entry-file SHA-256, backend mode/platform
+and probe version. Actual source/import-closure and runtime-build digests are
+not yet recorded; exact Git-tree CI is still required for trustworthy
+reproducibility. It does **not**
 synthesize successful receipts, does not claim deterministic physical carrier
 ordering, and does not infer data-race freedom from scheduler perturbations.
 
