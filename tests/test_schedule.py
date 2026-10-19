@@ -46,6 +46,23 @@ for _ in range(count):
             self.assertEqual(status, 2)
             self.assertIn("separate backend test mode", err)
 
+    def test_model_check_uses_bounded_reference_model(self):
+        fixture = (Path(__file__).resolve().parent / "models" / "atomic-update.json")
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "model.json").write_bytes(fixture.read_bytes())
+            status, out, err = self.invoke(root, "--model-check",
+                                           "--model", "model.json")
+            self.assertEqual(status, 0, err)
+            self.assertIn("LOGICAL PASS", out)
+            self.assertIn("reference model only", out)
+
+    def test_reference_model_not_mixed_with_runtime_deadlock(self):
+        with tempfile.TemporaryDirectory() as d:
+            status, _, err = self.invoke(Path(d), "--model-check", "--deadlock")
+            self.assertEqual(status, 2)
+            self.assertIn("do not combine", err)
+
     def test_replay_requires_single_iteration(self):
         with tempfile.TemporaryDirectory() as d:
             status, _, err = self.invoke(Path(d), "--replay", "events.trace",
