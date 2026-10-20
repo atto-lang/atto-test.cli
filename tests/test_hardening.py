@@ -58,6 +58,58 @@ class RaceHistoryTests(unittest.TestCase):
         ]
         self.assertEqual(check(events)["races"], [])
 
+    def test_nested_mutex_only_orders_after_final_unlock(self):
+        events = [
+            {"op": "task", "task": "a"},
+            {"op": "task", "task": "b"},
+            {"op": "lock", "task": "a", "name": "critical"},
+            {"op": "lock", "task": "a", "name": "critical"},
+            {"op": "access", "task": "a", "location": "state", "mode": "W"},
+            {"op": "unlock", "task": "a", "name": "critical"},
+            {"op": "unlock", "task": "a", "name": "critical"},
+            {"op": "lock", "task": "b", "name": "critical"},
+            {"op": "access", "task": "b", "location": "state", "mode": "R"},
+            {"op": "unlock", "task": "b", "name": "critical"},
+        ]
+        self.assertEqual(check(events)["race_count"], 0)
+
+    def test_other_owner_cannot_acquire_while_recursive_lock_held(self):
+        events = [
+            {"op": "task", "task": "a"},
+            {"op": "task", "task": "b"},
+            {"op": "lock", "task": "a", "name": "critical"},
+            {"op": "lock", "task": "a", "name": "critical"},
+            {"op": "unlock", "task": "a", "name": "critical"},
+            {"op": "lock", "task": "b", "name": "critical"},
+            {"op": "access", "task": "b", "location": "state", "mode": "W"},
+        ]
+        with self.assertRaisesRegex(TraceError, "different participant"):
+            check(events)
+
+    def test_consumed_message_token_cannot_be_republished(self):
+        events = [
+            {"op": "task", "task": "a"},
+            {"op": "task", "task": "b"},
+            {"op": "send", "task": "a", "message": "once"},
+            {"op": "recv", "task": "b", "message": "once"},
+            {"op": "send", "task": "b", "message": "once"},
+            {"op": "access", "task": "b", "location": "x", "mode": "W"},
+        ]
+        with self.assertRaisesRegex(TraceError, "cannot be reused"):
+            check(events)
+
+    def test_sibling_lifetimes_remain_concurrent(self):
+        events = [
+            {"op": "task", "task": "parent"},
+            {"op": "fork", "task": "parent", "child": "child1"},
+            {"op": "fork", "task": "parent", "child": "child2"},
+            {"op": "access", "task": "child1", "location": "shared", "mode": "W"},
+            {"op": "access", "task": "child2", "location": "shared", "mode": "W"},
+            {"op": "finish", "task": "child1"},
+            {"op": "finish", "task": "child2"},
+        ]
+        self.assertEqual(check(events)["race_count"], 1)
+
     def test_join_before_finish_refused(self):
         events = [
             {"op": "task", "task": "parent"},
@@ -117,6 +169,13 @@ class RaceHistoryTests(unittest.TestCase):
             p.write_bytes(b'\xff')
             with self.assertRaises(TraceError):
                 analyze_trace(p)
+
+    def test_trace_read_budget_rejects_oversized_jsonl(self):
+        with tempfile.TemporaryDirectory() as d:
+            trace = Path(d) / "too-big.jsonl"
+            trace.write_bytes(b"x" * 10_000_001)
+            with self.assertRaisesRegex(TraceError, "10 MB"):
+                analyze_trace(trace)
 
     def test_boolean_version_refused(self):
         events = [{"op": "task", "task": "a"}, {"op": "access", "task": "a", "location": "x", "mode": "R"}]

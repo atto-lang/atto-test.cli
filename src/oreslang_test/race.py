@@ -4,6 +4,7 @@ The producer must serialize events in causal per-task order. An independent
 runtime attestation is required to claim complete instrumentation coverage.
 """
 import json
+import os
 from pathlib import Path
 
 
@@ -44,10 +45,19 @@ def analyze_trace(path, expected_run_id=None):
     _require(path.is_file() and not path.is_symlink() and
              path.stat().st_size <= 10_000_000,
              "trace missing, symlinked, or exceeds 10 MB")
+    # Enforce the byte limit on the actual opened stream, not just on a
+    # pre-read stat() that another process could race. Use no-follow where
+    # supported to reject final-component symlink substitution.
     try:
-        with path.open(encoding="utf-8") as stream:
-            records = [json.loads(line, object_pairs_hook=_unique_keys) for line in stream]
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            raw = stream.read(10_000_001)
+        _require(len(raw) <= 10_000_000, "trace exceeds 10 MB read budget")
+        records = [json.loads(line, object_pairs_hook=_unique_keys)
+                   for line in raw.decode("utf-8", errors="strict").splitlines()]
     except (ValueError, UnicodeError) as exc:
+        if isinstance(exc, TraceError):
+            raise
         raise TraceError(f"invalid JSONL trace: {exc}") from exc
     _require(2 <= len(records) <= 100_002, "trace must have begin/end and <=100000 events")
     _require(all(type(record) is dict for record in records), "trace records must be JSON objects")
@@ -67,8 +77,9 @@ def analyze_trace(path, expected_run_id=None):
     finished = set()
     parents = {}
     joined = set()
-    locks = {}      # name => (owner, last_release_vector)
-    messages = {}   # message-id => send_vector
+    locks = {}      # name => (owner, depth, last_release_vector)
+    messages = {}   # outstanding message-id => send_vector
+    issued_message_ids = set()  # globally single-use even after receipt
     history = {}    # location => {"R": task=>vector, "W": task=>vector}
     reported = []
     total_races = 0
@@ -91,7 +102,7 @@ def analyze_trace(path, expected_run_id=None):
             clocks[child][child] = 1
             parents[child] = task
         elif op == "finish":
-            _require(all(owner != task for owner, _ in locks.values()),
+            _require(all(owner != task for owner, _, _ in locks.values()),
                      "cannot finish while holding a lock")
             finished.add(task)
         elif op == "join":
@@ -102,18 +113,28 @@ def analyze_trace(path, expected_run_id=None):
             joined.add(child)
         elif op == "lock":
             name = _identifier(event.get("name"), "lock")
-            owner, released = locks.get(name, (None, {}))
-            _require(owner is None, f"lock {name} acquired while owned")
-            _merge(clock, released)
-            locks[name] = (task, released)
+            owner, depth, released = locks.get(name, (None, 0, {}))
+            _require(owner is None or owner == task,
+                     f"lock {name} acquired while owned by a different participant")
+            _require(depth < 2 ** 32 - 1, "reentrant lock depth exhausted")
+            if owner is None:
+                _merge(clock, released)
+                locks[name] = (task, 1, released)
+            else:
+                locks[name] = (task, depth + 1, released)
         elif op == "unlock":
             name = _identifier(event.get("name"), "lock")
-            owner, _ = locks.get(name, (None, {}))
-            _require(owner == task, f"unlock of unowned lock {name}")
-            locks[name] = (None, dict(clock))
+            owner, depth, released = locks.get(name, (None, 0, {}))
+            _require(owner == task and depth > 0, f"unlock of unowned lock {name}")
+            if depth > 1:
+                locks[name] = (task, depth - 1, released)
+            else:
+                locks[name] = (None, 0, dict(clock))
         elif op == "send":
             message = _identifier(event.get("message"), "message")
-            _require(message not in messages, "outstanding message identity reused")
+            _require(message not in issued_message_ids,
+                     "message identity cannot be reused even after receipt")
+            issued_message_ids.add(message)
             messages[message] = dict(clock)
         elif op == "recv":
             message = _identifier(event.get("message"), "message")
@@ -143,7 +164,8 @@ def analyze_trace(path, expected_run_id=None):
         clock[task] = clock.get(task, 0) + 1
 
     _require(reads_writes > 0, "trace contains no memory accesses; refusing false PASS")
-    _require(all(owner is None for owner, _ in locks.values()), "trace ends with held locks")
+    _require(all(owner is None and depth == 0
+                 for owner, depth, _ in locks.values()), "trace ends with held locks")
     _require(all(child in finished for child in parents), "trace ends with unfinished forked task")
     return {"events": len(records) - 2, "accesses": reads_writes,
             "race_count": total_races, "races": reported, "backend": backend}

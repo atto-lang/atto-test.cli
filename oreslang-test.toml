@@ -10,3 +10,7 @@
 # command = ["/path/to/instrumented-runtime", "tests/race_suite.ores"]
 # [logical]
 # models = ["tests/models/atomic-update.json"]
+# [deadlock]
+# command = ["/path/to/instrumented-runtime", "tests/deadlock_suite.ores"]
+# [schedule]
+# command = ["/path/to/oreslang-compiler", "test", "tests/concurrency.ores"]
