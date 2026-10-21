@@ -13,12 +13,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418ac47884d3fc278a79a55c6f6e602
-        with:
-          components: rustfmt, clippy
-      - run: cargo fmt --all --check
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - name: Install Rust 1.88 with formatter and Clippy
+        run: rustup toolchain install 1.88.0 --profile minimal --component rustfmt,clippy --no-self-update
+      - run: cargo +1.88.0 fmt --all --check
+      - run: cargo +1.88.0 clippy --locked --all-targets -- -D warnings
+      - run: cargo +1.88.0 test --locked
   unit:
     strategy:
       fail-fast: false
@@ -32,8 +31,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m compileall -q src tests
       - run: python -m unittest discover -s tests -v
-      - uses: dtolnay/rust-toolchain@b3b07ba8b418ac47884d3fc278a79a55c6f6e602
-      - run: cargo build --locked
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+      - run: cargo +1.88.0 build --locked
       - run: target/debug/oreslang test --root . --race --trace tests/traces/ordered.jsonl
       - run: target/debug/oreslang test --root . --race --logical --model tests/models/atomic-update.json
       - name: Race findings must exit 1 (not an invocation error)
