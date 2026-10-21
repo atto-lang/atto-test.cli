@@ -30,3 +30,8 @@ walkdir = "2.5"
 lto = true
 codegen-units = 1
 strip = true
+
+# Oreslang tooling deliberately uses explicit returns in named Rust functions.
+# Keep all other Clippy warnings denied by CI.
+[lints.clippy]
+needless_return = "allow"
