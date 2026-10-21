@@ -20,7 +20,7 @@ fn same_file(core:&OsString, me:&PathBuf)->bool {
 }
 fn main(){
     let args:Vec<OsString>=std::env::args_os().skip(1).collect();
-    let me=match std::env::current_exe().and_then(|p|std::fs::canonicalize(p)) {
+    let me=match std::env::current_exe().and_then(std::fs::canonicalize) {
         Ok(v)=>v,
         Err(e)=>{eprintln!("oreslang: cannot locate self: {e}");exit(2)}
     };
