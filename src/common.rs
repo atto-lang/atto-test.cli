@@ -12,7 +12,7 @@ pub fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
         if let Component::Normal(name) = part {
             target.push(name);
             if target.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
-                return Err(format!("symlink path is forbidden: {relative}"));
+                return Err(format!("source symlink refused: {relative}"));
             }
         }
     }
