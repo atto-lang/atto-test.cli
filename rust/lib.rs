@@ -308,7 +308,17 @@ pub fn run(mut args: Vec<OsString>, core_launcher: bool) -> i32 {
         }
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("usage: oreslang test --audit [--audit-file SOURCE] [--fail-on SEVERITY] [--audit-format text|json]\\n       oreslang test --security | --anti-patterns\\n       oreslang test [--root DIR] [--effects [--effects-strict] [--file SOURCE]...]\\n       oreslang test --fuzz [--seed N] [--cases N] [--timeout SECONDS]\\n       oreslang test --race --trace OFFLINE.jsonl\\n\\nAll CLI analysis and execution modes are Rust native.\\nUninstrumented runtime race certification and --logical remain inconclusive (exit 2).\\nExit 0: scoped observed pass; 1: finding/failure; 2: invalid/inconclusive.");
+        println!(r#"usage: oreslang test [--root DIR] [--effects [--effects-strict] [--file SOURCE]...]
+       oreslang test --audit [--audit-file SOURCE] [--fail-on SEVERITY] [--audit-format text|json]
+       oreslang test --security | --anti-patterns
+       oreslang test --fuzz [--fuzz-profile basic|security] [--seed N] [--cases N] [--timeout SECONDS]
+       oreslang test --race --trace OFFLINE.jsonl
+       oreslang test --deadlock --trace OFFLINE.jsonl
+       oreslang test --race --deadlock --trace OFFLINE.jsonl
+
+All current CLI engines are Rust-only; no Python fallback.
+Uninstrumented --race/--deadlock and --logical are inconclusive (exit 2).
+Exit 0: scoped observed pass; 1: finding/failure; 2: invalid/inconclusive."#);
         return 0;
     }
     if args.iter().any(|a| {
