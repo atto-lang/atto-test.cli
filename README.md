@@ -85,6 +85,33 @@ See docs/security-audit-rust.md.
 exception-effect source scan; not full compiler type/effect analysis.
 See docs/exception-effects.md.
 
+## Continued Rust parity hardening
+
+- `--fuzz --fuzz-profile security` adds deterministic adversarial byte inputs
+  (traversal, encoded NUL, invalid UTF-8, injection-looking payloads and
+  oversize shapes), constrained by the configured per-case maximum. A test
+  target must demonstrate a reproducible violated property; the input's
+  appearance alone is not a vulnerability finding. The `basic` profile is
+  the default. Corpus and failure-output paths reject symlinked ancestors,
+  though descriptor-relative atomic open remains a hardening task.
+- `--deadlock --trace file.jsonl` analyzes observed lock ordering and
+  outstanding wait cycles in Rust. It is offline only and does not certify
+  liveness. `--race --deadlock --trace` combines the two findings on the
+  same trace, but a missing memory access event makes the race half
+  inconclusive rather than claiming a complete result.
+- The `oreslang_test::reactive::analyze` Rust host library replaces the
+  prior Python reactive-composition reference model with typed Subscribe,
+  Request, Next, Complete, Cancel, Error and Dispose events. It is not a
+  CLI runtime instrumentation mode. See
+  `docs/REACTIVE_COMPOSITION_TRACE_V1.md`.
+- This branch is reconciled against the latest `main`, retains the newer
+  integration contract, native P0 verifier and reactive documentation, and
+  has no `.py` files. The older Python deadlock, reactive and model-checker
+  scripts are removed, not silently delegated to.
+- Missing Rust logical schedule exploration, GraalVM checkpoint-only trace
+  adapter, and schedule replay are still explicitly unsupported and may not
+  return an evidence-free clean verdict.
+
 ## Exit conventions
 
 - 0: selected tests or observations completed without detected failures.
