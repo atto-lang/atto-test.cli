@@ -1,7 +1,14 @@
-#!/usr/bin/env python3
-"""Standalone spelling equivalent to oreslang test."""
-from pathlib import Path
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-from oreslang_test.cli import main
-sys.exit(main())
+#!/bin/sh
+# The official implementation is the Rust binary.
+set -eu
+base=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ -n "${ORESLANG_TEST_BIN:-}" ]; then
+    exec "$ORESLANG_TEST_BIN" "$@"
+elif [ -x "$base/target/release/oreslang-test" ]; then
+    exec "$base/target/release/oreslang-test" "$@"
+elif [ -x "$base/target/debug/oreslang-test" ]; then
+    exec "$base/target/debug/oreslang-test" "$@"
+else
+    echo "oreslang-test has not been built; run 'cargo build --release' in $base" >&2
+    exit 2
+fi
