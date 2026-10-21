@@ -122,7 +122,7 @@ mod tests {
   #[test]
   fn overflowing_scheduler_summary_is_rejected_not_panicked(){
     let out=format!(
-      "ORES_TEST|PASS|case\nORES_TEST|SUMMARY|total={}|passed={}|failed=1|skipped=0|filtered=0\nORES_CONCURRENCY|RUN|seed=7|events=1|deadlocks=0|schedule=perturbed|race_coverage=none\n",
+      "ORES_TEST|PASS|case\nORES_TEST|SUMMARY|total={}|passed={}|failed=0|skipped=1|filtered=0\nORES_CONCURRENCY|RUN|seed=7|events=1|deadlocks=0|schedule=perturbed|race_coverage=none\n",
       usize::MAX, usize::MAX
     );
     assert!(validate(&out,1,7,None).is_err());
