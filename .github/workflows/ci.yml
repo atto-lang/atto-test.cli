@@ -14,8 +14,21 @@ jobs:
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
-      - name: Rust formatting (verify compilable sources first)
-        run: cargo fmt --all
+      - name: Enforce Rust-only implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-files -- '*.py' | grep -q .; then
+            echo "Python source files are forbidden in oreslang-test.cli:" >&2
+            git ls-files -- '*.py' >&2
+            exit 1
+          fi
+          if git grep -n -I -E '^#!.*python([0-9.]*)?([[:space:]]|$)' -- .; then
+            echo "Python shebangs are forbidden in executable tooling." >&2
+            exit 1
+          fi
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
       - name: Unit and regression tests
         run: cargo test --all-targets
       - name: Release binary
