@@ -41,13 +41,13 @@ ORES_CHECK|PASS|sha256=<64 lowercase hex digits>|phase=syntax-only
 ORES_CHECK|PASS|sha256=<64 lowercase hex digits>|phase=types
 ```
 
-The digest is the SHA-256 of the exact source bytes submitted. A missing/mismatched receipt, missing compiler, empty source selection or inaccessible file is **inconclusive/error (exit 2)**, never success. A backend-reported syntax/type error is **exit 1**. The frontend must actually implement the noncompiling flags and receipt contract; simply configuring an executable is not proof that compilation was skipped.
+The digest is the SHA-256 of the exact source bytes submitted. The host running strict checks must also provide an **independent compiler executable pin** in `ORESLANG_TRUSTED_CHECK_COMPILER_SHA256` (64-character SHA-256). The `[check].command` must consist of **exactly one absolute path** to the actual compiler executable, not a shell, wrapper, relative PATH lookup or additional arguments. The Rust CLI hashes the compiler before and after running it and rejects symlinks, unexpected replacements, and unpinned/mismatched binaries. The SHA must be supplied by an authorized CI/release process independent of the project being checked; a hash copied from the untrusted project is not proof of trust. This does not itself prove a trusted compiler actually performed a no-codegen pass; backend receipt compliance still requires independent conformance tests. A missing/mismatched receipt, missing compiler, empty source selection or inaccessible file is **inconclusive/error (exit 2)**, never success. A backend-reported syntax/type error is **exit 1**. The frontend must actually implement the noncompiling flags and receipt contract; simply configuring an executable is not proof that compilation was skipped.
 
 Example configuration, once the chosen Oreslang compiler supports the above contract:
 
 ```toml
 [check]
-command = ["/path/to/oreslang-compiler", "check"]
+command = ["/absolute/path/to/pinned-oreslang-compiler"]
 ```
 
 This adapter deliberately does **not** substitute a second parser for Java/GraalVM, LLVM, WASM, JS or .NET. Canonical frontend conformance is pending those integrations.
