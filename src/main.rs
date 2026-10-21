@@ -361,3 +361,39 @@ fn main(){
     };
     std::process::exit(exit.into());
 }
+
+#[cfg(test)]
+mod check_compiler_trust_tests {
+    use super::*;
+
+    #[test]
+    fn only_independently_pinned_absolute_regular_compiler_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fake-compiler");
+        std::fs::write(&path, b"abc").unwrap();
+        let command = vec![path.to_str().unwrap().to_owned()];
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(digest_trusted_compiler(&command, expected).unwrap(), expected);
+        assert!(digest_trusted_compiler(&command, &"0".repeat(64)).is_err(),
+            "a forged receipt cannot substitute for an independently pinned binary");
+        assert!(digest_trusted_compiler(&["sh".to_string()], expected).is_err());
+        assert!(digest_trusted_compiler(&[command[0].clone(), "-c".into()], expected).is_err());
+        assert!(digest_trusted_compiler(&command, "not-a-sha").is_err());
+        std::fs::write(&path, b"abd").unwrap();
+        assert!(digest_trusted_compiler(&command, expected).is_err(),
+            "modifying the compiler after pinning must invalidate admission");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_compiler_is_rejected_even_when_its_target_digest_matches() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("compiler");
+        let alias = dir.path().join("alias");
+        std::fs::write(&target, b"abc").unwrap();
+        symlink(&target, &alias).unwrap();
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(digest_trusted_compiler(&[alias.to_str().unwrap().to_owned()], expected).is_err());
+    }
+}
