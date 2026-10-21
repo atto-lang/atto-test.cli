@@ -22,6 +22,16 @@ pub fn bounded_read(path: &Path, max: usize) -> Result<Vec<u8>> {
     if path.symlink_metadata().map_err(|e| e.to_string())?.file_type().is_symlink() {
         return Err("trace/corpus symlink is forbidden".into());
     }
+    // The lstat precheck is not sufficient against a final-component symlink
+    // swap between validation and open. Refuse following that link atomically.
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path).map_err(|e| e.to_string())?
+    };
+    #[cfg(not(unix))]
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() || meta.len() > max as u64 { return Err("invalid or oversized input".into()); }
