@@ -111,3 +111,24 @@ fn native_test_discovery_rejects_symlinked_entries(){
     assert_eq!(code(&result),2,"{}",String::from_utf8_lossy(&result.stderr));
     assert!(String::from_utf8_lossy(&result.stderr).contains("symlink"));
 }
+
+#[test]
+fn malformed_or_oversized_manifest_never_passes(){
+    let project=tempfile::tempdir().unwrap();
+    let manifest=project.path().join("oreslang-test.toml");
+    fs::write(&manifest,vec![b'x';1_048_577]).unwrap();
+    assert_eq!(code(&invoke(project.path(),&["--race"])),2);
+    fs::write(&manifest,"[fuzz]\ncommand = [\"sh\"]\n").unwrap();
+    assert_eq!(code(&invoke(project.path(),&["--fuzz","--cases","0"])),2);
+}
+
+#[cfg(unix)]
+#[test]
+fn config_symlink_cannot_be_used_to_influence_runner(){
+    use std::os::unix::fs::symlink;
+    let project=tempfile::tempdir().unwrap();
+    let outside=tempfile::NamedTempFile::new().unwrap();
+    fs::write(outside.path(),"[fuzz]\ncommand=[\"sh\"]\n").unwrap();
+    symlink(outside.path(),project.path().join("oreslang-test.toml")).unwrap();
+    assert_eq!(code(&invoke(project.path(),&["--fuzz","--cases","1"])),2);
+}
