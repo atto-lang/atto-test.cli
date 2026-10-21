@@ -31,6 +31,7 @@ class AuditTests(unittest.TestCase):
 let api_key = "topsecretvalue1234";
 let url = "http://example.org/api";
 let loopback = "http://localhost:1234";
+let loopback_ipv6 = "http://[::1]:8080/";
 crypto.md5(input);
 shell.exec(command);
 let safe = "// this is not a code comment";
