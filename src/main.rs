@@ -96,6 +96,16 @@ fn digest_trusted_compiler(command: &[String], expected: &str) -> Result<String>
     if !before.is_file() || before.file_type().is_symlink() || before.len() > (1u64 << 30) {
         return Err("trusted check compiler must be a bounded regular file, not a symlink".into());
     }
+    // Hash the same regular file opened with no final-component symlink
+    // following; lstat alone permits a symlink swap before File::open.
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path).map_err(|e| e.to_string())?
+    };
+    #[cfg(not(unix))]
     let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let actual = file.metadata().map_err(|e| e.to_string())?;
     if !actual.is_file() || actual.len() != before.len() {
@@ -329,7 +339,8 @@ fn native(root:&Path,cfg:&toml::Value,timeout:f64)->Result<u8>{
                 .map(|(key,p)|p.strip_prefix(&format!("{key}="))?.parse().ok())
                 .collect();
             let v=values?;
-            Some(v[0]==v[1]+v[2]+v[3] && v[1]>0 && v[2]==0 && counts==[v[1],v[2],v[3]])
+            let accounted=v[1].checked_add(v[2])?.checked_add(v[3])?;
+            Some(v[0]==accounted && v[1]>0 && v[2]==0 && counts==[v[1],v[2],v[3]])
         }).unwrap_or(false);
         if out.code!=0 || !valid {
             failures+=1;
