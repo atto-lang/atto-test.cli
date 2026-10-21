@@ -1,202 +1,102 @@
-# Oreslang Test CLI
+# Oreslang Test CLI (Rust)
 
-The new test command runner for the Oreslang language.
+The Oreslang test command runner and host-side analyzers are written in **Rust**, distributed as a native executable. No Python interpreter is needed for building or running this CLI.
 
-**Status: working host-side prototype, not yet a fully instrumented language feature.** Python 3.11+ (standard library only). The Java/GraalVM and LLVM runtimes do not yet emit comprehensive memory-access traces, and actual guest schedule control is still to be implemented. Tests here are conformance tests of the tool and synthetic reference models.
+**Status:** Rust migration branch. Runtime race instrumentation and compiler syntax-only support are separate integration requirements; the CLI refuses unsupported clean verdicts.
 
-## Install and try it
+## Build
 
-Put the repository's bin directory on PATH, with ORESLANG_BIN pointing to your *existing* Oreslang launcher (not to the shim itself). Non-test commands delegate to that launcher. The alternative executable oreslang-test accepts the test options directly.
+```sh
+cargo build --release
+cargo test --all-targets
+./target/release/oreslang-test --help
+```
 
-    export PATH=/path/to/oreslang-test.cli/bin:$PATH
-    export ORESLANG_BIN=/path/to/real/oreslang
+Put `bin/` on `PATH` to use the launcher, which delegates `oreslang test` to the Rust binary; ordinary `oreslang` commands delegate to `ORESLANG_BIN` (or `oreslang-core`). Or invoke `target/release/oreslang-test` directly.
 
-    oreslang test
-    oreslang test --fuzz --seed 87 --cases 2000
-    oreslang test --race
-    oreslang test --race --trace tests/traces/recorded.jsonl
-    oreslang test --race --logical --model tests/models/lost-update.json
+## CLI
 
-A project must contain oreslang-test.toml. Native tests are automatically discovered as tests/**/test_*.ores and tests/**/*_test.ores, or listed via [native].files. The existing Oreslang stdlib/testing.ores machine protocol (ORES_TEST|...) is parsed and validated. An interpreter failure, absent summary or inconsistent counts makes the suite fail.
+```sh
+oreslang test --check src/main.ores
+oreslang test --check .
+oreslang test --check-types .
+oreslang test --fuzz --seed 87 --cases 2000 --timeout 5
+oreslang test --race --trace tests/traces/ordered.jsonl
+oreslang test --race --logical --model tests/models/atomic-update.json
+oreslang test --deadlock --trace tests/traces/lock-orders.jsonl
+oreslang test --model-check --model tests/models/lost-update.json
+oreslang test --schedule-fuzz --seed 42 --iterations 20
+oreslang test --replay evidence.trace
+oreslang test
+```
 
-Run the included test suite with:
+`oreslang-test` accepts exactly the same test arguments without the `oreslang test` prefix. `--root` selects the project root (default `.`).
 
-    python3 -m unittest discover -s tests -v
-    python3 bin/oreslang test --race --trace tests/traces/racy.jsonl
-    python3 bin/oreslang test --race --logical --model tests/models/lost-update.json
+## Syntax-only and type checks
 
-The two example invocations deliberately report detected defects.
+The Rust CLI **does not invent an Oreslang grammar**. It invokes the canonical language frontend configured under `[check].command`, adding `--syntax-only <file>` or `--check-types <file>`. The backend must return success *and* emit a source-bound no-codegen receipt:
+
+```text
+ORES_CHECK|PASS|sha256=<64 lowercase hex digits>|phase=syntax-only
+ORES_CHECK|PASS|sha256=<64 lowercase hex digits>|phase=types
+```
+
+The digest is the SHA-256 of the exact source bytes submitted. A missing/mismatched receipt, missing compiler, empty source selection or inaccessible file is **inconclusive/error (exit 2)**, never success. A backend-reported syntax/type error is **exit 1**. The frontend must actually implement the noncompiling flags and receipt contract; simply configuring an executable is not proof that compilation was skipped.
+
+Example configuration, once the chosen Oreslang compiler supports the above contract:
+
+```toml
+[check]
+command = ["/path/to/oreslang-compiler", "check"]
+```
+
+This adapter deliberately does **not** substitute a second parser for Java/GraalVM, LLVM, WASM, JS or .NET. Canonical frontend conformance is pending those integrations.
 
 ## Fuzzing
 
-Configure a real executable target that reads a raw test case on standard input and exits nonzero when a property fails:
-
-~~~toml
+```toml
 [fuzz]
 command = ["/path/to/oreslang", "tests/fuzz_stdin.ores"]
 corpus = "tests/corpus/my-property"
 max_bytes = 256
-~~~
-
-The runner mutates seed/corpus bytes reproducibly using --seed, runs one isolated process per --cases input, enforces --timeout, stops on failure and attempts delta-debugging shrinkage without changing the failure class. Minimized case bytes are saved under .oreslang-test/failures/fuzz-<hash>.bin. Reproduce by redirecting these bytes into the configured command. This is *mutation fuzzing*, not coverage-guided fuzzing yet; there is no automatic source-level fuzz target discovery or Oreslang-native input generation yet.
-
-## Data races and happens-before
-
-The race analyzer consumes version-1 JSONL records with explicit task and memory location identities. Supported events are task; fork/join with child; lock/unlock with name; send/recv with message; and access with location and mode R/W. It checks unordered conflicting accesses using vector clocks. A minimal intentionally racy record sequence is:
-
-~~~jsonl
-{"op":"begin","version":1,"run_id":"test","backend":"graal"}
-{"op":"task","task":"a"}
-{"op":"task","task":"b"}
-{"op":"access","task":"a","location":"heap:alloc-1.field","mode":"W"}
-{"op":"access","task":"b","location":"heap:alloc-1.field","mode":"R"}
-{"op":"end","run_id":"test","events":4}
-~~~
-
-Production runtime integrations must write a *fresh* trace to ORESLANG_RACE_TRACE and echo the invocation's ORESLANG_RACE_RUN_ID in begin/end markers:
-
-~~~toml
-[race]
-command = ["/path/to/instrumented-oreslang", "tests/race_suite.ores"]
-~~~
-
-The tool refuses missing, stale, truncated, malformed and failed traces. Task identifiers mean physical concurrency contexts; all relevant synchronization including actor turn serialization and mailbox handoff must be captured. Memory locations must use stable allocation identities to avoid address reuse false positives. No checker's silence can prove absence of races that instrumentation did not observe. Sample traces here are synthetic.
-
-## Logical races in actor programs
-
-In addition to physical data races, a reentrant actor can suspend after reading a snapshot, then resume and write a stale value. This is a logical race even if native memory accesses are correctly synchronized.
-
-For now --race --logical explores *declarative bounded models*, not compiled Oreslang programs. Each actor contains arrays of atomic turns; boundaries represent suspension. The model supports read, write, atomic_add and final expected integer invariants. The explorer enumerates enabled actor turns and reports a counterexample schedule on invariant failure. If --max-schedules is hit before exploration completes, the result is **inconclusive** (exit code 2). Example files: tests/models/lost-update.json and tests/models/atomic-update.json.
-
-~~~toml
-[logical]
-models = ["tests/models/atomic-update.json"]
-~~~
-
-## Exit codes and integration milestones
-
-- **0:** Tests or observed trace/model run passed. Never interpret this as proof of complete race freedom.
-- **1:** Executed test failed, fuzz counterexample, data-race conflict or model invariant violation.
-- **2:** Invalid configuration, missing instrumented backend, invalid/incomplete trace, or inconclusive model search.
-
-The native language testing API remains in oreslang-source.java/stdlib/testing.ores. The shared ACTOR_LOGICAL_RACE_V1 contract in Java and LLVM currently certifies the VersionedActorCell *host-side foundation only*, not guest-level enforcement.
-
-Before promoting these flags as general automatic detectors, integrate compiler/runtime memory-access hooks, actor mailbox/lock/suspend happens-before edges, coverage accounting, real guest controlled scheduling, cancellation/continuation generation checks, Java native-image parity, LLVM sanitizer builds, and cross-backend reproducible regression tests. The CLI must continue to fail closed in the absence of such instrumentation.
-
-
-
-## Experimental deadlock and schedule diagnostics (October 18, 2026)
-
-The canonical `oreslang test` wrapper now adds **opt-in**, bounded analysis
-without pretending that guest instrumentation is complete.
-
-```sh
-# Version-one JSONL trace from an instrumented runtime:
-oreslang test --deadlock --trace tests/traces/lock-orders.jsonl
-oreslang test --race --deadlock --trace tests/traces/instrumented.jsonl
-
-# Systematic bounded exploration of declarative actor-turn reference models:
-oreslang test --model-check --model tests/models/atomic-update.json
-
-# Or run a configured instrumented target automatically:
-oreslang test --deadlock
 ```
 
-The same `--deadlock --trace` command also accepts the Java/Graal
-`ORES_CONCURRENCY_TRACE_V1` checkpoint file. It reports explicit
-`deadlock-future-cycle` and `deadlock-mutex-cycle` receipts. A file containing
-only task-turn checkpoints is **inconclusive** (exit 2), because it provides no
-mutex/wait-graph evidence. Such checkpoint files contain no invocation nonce
-and may be used only for offline inspection, not trusted fresh-run attestation.
+`--fuzz` mutates and extends bounded seed corpora reproducibly with `--seed`, executes inputs in isolated subprocesses, classifies failure by exit code or timeout, replays failures twice, shrinks reproducible failures, and saves SHA-256-addressed reproductions under `.oreslang-test/failures/`. This is **mutation fuzzing**, not coverage-guided fuzzing; empty/unsupported corpus instrumentation does not establish coverage.
 
-A `[deadlock].command` (or existing `[race].command`) must emit a **fresh**
-ORES_RACE_V1 JSONL trace at `ORESLANG_RACE_TRACE`, echoing the random
-`ORESLANG_RACE_RUN_ID` in the begin/end records. A missing trace or no observed
-lock acquisitions/waits is *inconclusive* (status 2), not a PASS. The detector:
+## Race analysis
 
-- Recognizes potential lock-order inversion (successful nested acquisition
-  establishes A-before-B; another task establishes B-before-A).
-- Recognizes observed unresolved task wait cycles from `wait` records of the
-  form `{"op":"wait","task":"a","name":"lock-b"}`, discharged by
-  `{"op":"unwait","task":"a","name":"lock-b"}`. These are optional extensions
-  of the version-one trace vocabulary, for this analysis only.
-- Refuses inconsistent ownership, forged lock waits, malformed or stale runs,
-  and unbounded event/graph work. Lock-order cycles indicate **risk**; wait
-  cycles observed at trace end do not establish that cancellation or timeouts
-  can never resolve them. The analysis does not cover arbitrary remote RPC
-  waits, actor mailbox starvation, or all future program schedules.
-
-The Java/Graal compiler branch also offers experimental scheduler-turn
-perturbation and trace replay. To delegate to its new test launcher, configure
-the **actual** backend command rather than pretending the wrapper owns the
-language scheduler:
+`--race --trace` ingests ORES_RACE_V1 JSONL with matching `begin`/`end` nonces and strict event counts. It tracks happens-before vector clocks for task, fork, finish, join, reentrant mutex lock/unlock, send/recv and R/W memory accesses. A fresh capture from `[race].command` must write to `ORESLANG_RACE_TRACE` and include `ORESLANG_RACE_RUN_ID` in both markers.
 
 ```toml
+[race]
+command = ["/path/to/instrumented-oreslang", "tests/race_suite.ores"]
+```
+
+The race checker preserves per-task access histories and reports observed unsynchronized conflicts. It **cannot prove full race freedom** without complete compiler/runtime memory instrumentation. Missing or malformed traces are errors, not passes.
+
+## Deadlocks, logical models and schedules
+
+`--deadlock` analyzes bounded observed wait-for cycles and potential lock-order inversions from observed lock events, including Graal concurrency checkpoint receipts. A pure checkpoint stream without wait-graph evidence is inconclusive.
+
+`--model-check` and `--race --logical` enumerate bounded declarative actor-turn models from JSON fixtures; they are not compiled guest model checking. Hitting exploration budgets without a counterexample is **exit 2**.
+
+`--schedule-fuzz`/`--replay` delegate to `[schedule].command` and require real per-case ORES_TEST and ORES_CONCURRENCY receipts. Replay input must be the workspace-bound V3 trace, and newly generated output traces must agree with the runtime's event count. Fake summaries, zero coverage, bad hashes and stale traces must never produce a pass.
+
+```toml
+[logical]
+models = ["tests/models/atomic-update.json"]
 [schedule]
 command = ["/path/to/oreslang-compiler", "test", "tests/concurrency.ores"]
 ```
 
-```sh
-oreslang test --schedule-fuzz --seed 42 --iterations 20 --timeout 60
-oreslang test --schedule-fuzz --seed 42 --trace-output evidence.trace
-oreslang test --replay evidence.trace --timeout 60
-```
+## Exit codes
 
-The wrapper requires native Oreslang `ORES_TEST|SUMMARY` and
-`ORES_CONCURRENCY|RUN` receipts for every schedule run. Case-level PASS/FAIL/SKIP
-lines must precede each summary, match its counts, and include at least one
-actual PASS; fabricated summaries, duplicate metadata fields, and all-skipped
-runs fail closed. It checks
-per-iteration seeds, well-formed and consistent summary counts, nonzero
-checkpoint coverage, and zero observed deadlocks, and passes `--deadlock`
-to the Java runtime. Replay traces must be bounded and fully well-formed;
-when `--trace-output` is requested, its newly created V3 trace must exist
-and its seed and event count must match the backend receipt. Missing or
-stale traces cannot produce schedule PASS. `--replay`
-requires a V3 trace bound to the seed, entry-file SHA-256, bounded workspace
-source snapshot SHA-256, backend mode/platform and probe version. A workspace
-snapshot conservatively includes compiler/stdlib sources and schema manifests,
-but is not a fully resolved import graph, does not cover imports outside the
-workspace, and does not attest the deployed compiler binary. Exact Git-tree
-CI remains required for independently verifiable build provenance. It does **not**
-synthesize successful receipts, does not claim deterministic physical carrier
-ordering, and does not infer data-race freedom from scheduler perturbations.
+* **0:** Supported checks passed for the executed inputs/events only.
+* **1:** Confirmed test failure, detected observed race/cycle, model violation or reproducible fuzz counterexample.
+* **2:** Invalid arguments, unsupported tooling, malformed/stale traces, flaky fuzz case, inconclusive exploration or missing backend instrumentation.
 
-Cross-backend host analyzers now agree on important observed-trace contracts:
-`fork` creates a fresh logical task, `finish` marks its terminal state,
-`join` accepts only a finished direct child once, nested critical-section
-locks publish ordering only on the final unlock, and message IDs are globally
-single-use even after receipt. These are **analyzer contracts**, not guest
-compiler/runtime instrumentation or guaranteed replay of carrier threads.
+## Security and CI
 
-These modes complement the existing **actual** byte-corpus mutation fuzzing
-(`--fuzz`) and host-side vector-clock race analyzer (`--race`).
-Java/Graal `--race` still refuses an uninstrumented memory-safety verdict;
-LLVM guest memory hooks and complete source-level scheduling remain future
-work. Analyzed traces are evidence only for the accesses and waits recorded.
+The runner applies per-stream output caps, timeouts and process-group termination, rejects symlinked project-relative artifacts, bounds model/trace/corpus sizes, and does not invoke a shell internally. Unit and fixture tests run with `cargo test --all-targets`. `scripts/ci-verify-concurrency-p0.sh` requires an exact Git source tree SHA; previous Python CI checks have been replaced with Rust tests.
 
-## Audit hardening (2026-10-15)
-
-The hardening revision strengthens the host-only tool without claiming language-level instrumentation:
-
-- The vector-clock checker **retains all per-task, per-access-mode histories** (bounded to the last event in each task/mode), rather than silently dropping unordered reads/writes when another task writes. It caps printed conflict examples at 100 while retaining the total count.
-- The trace grammar adds `{"op":"finish","task":"..."}`. A `join` now requires a finished, directly forked child that has not already been joined. Any forked child left unfinished at trace termination, post-finish access, duplicate JSON key, or invalid encoding is a hard error.
-- Model files are limited to 2 MB, 16 actors, 64 turns, 4096 operations, and 256 state keys. Operation schemas and local references are validated before exploring interleavings.
-- Each test subprocess captures no more than 4 MB per stdout/stderr stream in memory; larger outputs fail. Timed-out process groups are terminated on POSIX hosts. A fuzz counterexample is re-executed twice before minimization and the reduced input is also checked twice; flaky first failures become an explicit non-success status.
-- `python -m unittest discover -s tests -v` includes race-history, task lifecycle, reentrant-lock, single-use-message, and schedule/replay adversarial cases. The suite's executable test count and outcome must come from an actual runner log, not from source inspection.
-
-The `finish` event is an extension of the v1 JSONL trace vocabulary. Existing traces with independent root tasks remain valid; actual `fork` traces should emit corresponding task completion events. This remains host-side analysis of observed events, and runtime coverage must be separately attested before claiming race freedom.
-
-### Exact-tree concurrency P0 gate
-
-On an authorized private runner, check out the exact PR tree (never a partial
-cherry-pick) and set `EXPECTED_SOURCE_TREE_SHA` to its verified Git tree SHA:
-
-```sh
-EXPECTED_SOURCE_TREE_SHA=<40-character-tree-sha> bash scripts/ci-verify-concurrency-p0.sh
-```
-
-The gate must execute the tests and print `ORES_CONCURRENCY_CI|...|result=PASS`
-only after success. Matching Git tree SHA and executable CI logs are required;
-failed pre-step GitHub Actions jobs do not count as test evidence. This
-script does not grant access to private source across organizations.
+Host-side analyzers, reference models and receipt verification must not be described as complete LLVM or GraalVM runtime instrumentation. Full guest memory hooks, controlled scheduler execution, native-image parity and cross-backend conformance tests remain integration milestones.
