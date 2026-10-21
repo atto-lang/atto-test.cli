@@ -214,7 +214,7 @@ echo "ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0"
 exit 0
 "#,
     );
-    let manifest = format!("[native]\nfiles=[\"tests/test_orphan.ores\"]\n");
+    let manifest = String::from("[native]\nfiles=[\"tests/test_orphan.ores\"]\n");
     write(&dir.path().join("oreslang-test.toml"), &manifest);
     let output = Command::new(binary())
         .arg("--root")
