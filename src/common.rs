@@ -83,7 +83,7 @@ fn parse_unique_object<'de, R: serde_json::de::Read<'de>>(de: &mut serde_json::D
             d.deserialize_map(self)
         }
     }
-    let v = Unique.deserialize(de).map_err(|e| e.to_string())?;
+    let v = Unique.deserialize(&mut *de).map_err(|e| e.to_string())?;
     de.end().map_err(|e| e.to_string())?;
     Ok(v)
 }
