@@ -139,3 +139,24 @@ fn security_fuzz_profile_injects_adversarial_cases_without_python() {
     assert_eq!(cli(root.path(), &["--fuzz-profile", "security"]).status.code(), Some(2));
     assert_eq!(cli(root.path(), &["--fuzz", "--fuzz-profile", "unknown"]).status.code(), Some(2));
 }
+
+#[test]
+fn offline_deadlock_graphs_report_cycles_and_refuse_no_lock_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let risky = concat!(
+        "{\"op\":\"begin\",\"version\":1,\"run_id\":\"r\",\"backend\":\"llvm\"}\n",
+        "{\"op\":\"task\",\"task\":\"a\"}\n",
+        "{\"op\":\"task\",\"task\":\"b\"}\n",
+        "{\"op\":\"lock\",\"task\":\"a\",\"name\":\"A\"}\n",
+        "{\"op\":\"lock\",\"task\":\"b\",\"name\":\"B\"}\n",
+        "{\"op\":\"wait\",\"task\":\"a\",\"name\":\"B\"}\n",
+        "{\"op\":\"wait\",\"task\":\"b\",\"name\":\"A\"}\n",
+        "{\"op\":\"end\",\"run_id\":\"r\",\"events\":6}\n",
+    );
+    fs::write(root.path().join("waiting.jsonl"), risky).unwrap();
+    let issue = cli(root.path(), &["--deadlock", "--trace", "waiting.jsonl"]);
+    assert_eq!(issue.status.code(), Some(1), "{issue:?}");
+    assert!(String::from_utf8_lossy(&issue.stdout).contains("OBSERVED WAIT CYCLE"));
+    assert_eq!(cli(root.path(), &["--deadlock"]).status.code(), Some(2));
+    assert_eq!(cli(root.path(), &["--race","--deadlock","--trace","waiting.jsonl"]).status.code(),Some(2));
+}
