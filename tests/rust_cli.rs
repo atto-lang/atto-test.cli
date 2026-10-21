@@ -87,24 +87,21 @@ echo "ORES_CHECK|PASS|sha256=$digest|phase=syntax-only"
         "[check]\ncommand=[\"sh\",\"check.sh\"]\n",
     );
     // A project-local script must never certify syntax, regardless of receipt.
-    let result=invoke(dir.path(),&["--check","unit.ores"]);
-    assert_eq!(code(&result),2);
+    let result = invoke(dir.path(), &["--check", "unit.ores"]);
+    assert_eq!(code(&result), 2);
     write(
         &dir.path().join("oreslang-test.toml"),
         "[check]\ncommand=[\"/bin/sh\"]\n",
     );
     // An absolute unpinned shell is still not an independently trusted parser.
-    let result=invoke(dir.path(),&["--check","unit.ores"]);
-    assert_eq!(code(&result),2);
+    let result = invoke(dir.path(), &["--check", "unit.ores"]);
+    assert_eq!(code(&result), 2);
 }
 
 #[test]
 fn fuzz_success_and_missing_command() {
     let dir = tempfile::tempdir().unwrap();
-    assert_eq!(
-        code(&invoke(dir.path(), &["--fuzz", "--cases", "3"])),
-        2
-    );
+    assert_eq!(code(&invoke(dir.path(), &["--fuzz", "--cases", "3"])), 2);
     write(
         &dir.path().join("pass.sh"),
         "#!/bin/sh\ncat >/dev/null\nexit 0\n",
@@ -165,10 +162,7 @@ fn deadlock_lock_order_cycle_is_failure() {
         r#"{{"op":"end","run_id":"fixture","events":{}}}"#,
         ops.len()
     ));
-    write(
-        &dir.path().join("events.jsonl"),
-        &(rows.join("\n") + "\n"),
-    );
+    write(&dir.path().join("events.jsonl"), &(rows.join("\n") + "\n"));
     assert_eq!(
         code(&invoke(
             dir.path(),
@@ -279,11 +273,7 @@ fn config_symlink_cannot_be_used_to_influence_runner() {
     let project = tempfile::tempdir().unwrap();
     let outside = tempfile::NamedTempFile::new().unwrap();
     fs::write(outside.path(), "[fuzz]\ncommand=[\"sh\"]\n").unwrap();
-    symlink(
-        outside.path(),
-        project.path().join("oreslang-test.toml"),
-    )
-    .unwrap();
+    symlink(outside.path(), project.path().join("oreslang-test.toml")).unwrap();
     assert_eq!(
         code(&invoke(project.path(), &["--fuzz", "--cases", "1"])),
         2
@@ -309,7 +299,12 @@ fn native_summary_integer_overflow_fails_without_panicking() {
         .env("ORESLANG_BIN", "sh")
         .output()
         .unwrap();
-    assert_eq!(code(&output), 1, "malformed child test counts must fail, not panic: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        code(&output),
+        1,
+        "malformed child test counts must fail, not panic: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -320,10 +315,13 @@ fn logical_model_rejects_nested_and_top_level_duplicate_json_keys() {
         r#"{"initial":{"counter":0},"initial":{"counter":1},"expected":{"counter":1},"actors":[]}"#,
     ];
     for document in cases {
-        write(&project.path().join("model.json"),document);
-        let output=invoke(project.path(),&["--model-check","--model","model.json"]);
-        assert_eq!(code(&output),2);
-        assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate JSON property"),
-            "unexpected validation error: {}",String::from_utf8_lossy(&output.stderr));
+        write(&project.path().join("model.json"), document);
+        let output = invoke(project.path(), &["--model-check", "--model", "model.json"]);
+        assert_eq!(code(&output), 2);
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("duplicate JSON property"),
+            "unexpected validation error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
