@@ -82,10 +82,6 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
         let _ = child.kill();
     }
     let _ = child.wait();
-    // Even when the direct child exits successfully, kill remaining members
-    // of its dedicated process group. Detached/new-session descendants need
-    // OS-level sandboxing; no whole-process-tree guarantee is asserted here.
-    kill_group(child.id());
     // A child may exit while descendants retain its stdout/stderr pipes.
     // Never block indefinitely joining a reader in that situation.
     let cutoff = Instant::now() + Duration::from_secs(1);
