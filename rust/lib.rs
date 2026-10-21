@@ -3,6 +3,7 @@ pub mod reactive;
 mod audit;
 pub mod race_evidence;
 mod race_offline;
+mod deadlock;
 mod runtime;
 
 use std::ffi::OsString;
