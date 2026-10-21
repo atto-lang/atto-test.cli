@@ -156,6 +156,37 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
 mod runner_security_tests {
     use super::*;
 
+    #[cfg(target_os="linux")]
+    #[test]
+    fn linux_reaps_child_and_preserves_real_exit_status() {
+        let root = std::env::temp_dir();
+        let args = vec!["sh".into(), "-c".into(), "printf 'ok\\n'; exit 17".into()];
+        let result = run(&args, &root, 3.0, None, &[])
+            .expect("execution should not fail")
+            .expect("child should exit");
+        assert_eq!(result.code, 17);
+        assert_eq!(result.stdout, "ok\\n");
+    }
+
+    #[cfg(target_os="linux")]
+    #[test]
+    fn linux_timeout_terminates_process_group() {
+        let root = std::env::temp_dir();
+        let args = vec!["sh".into(), "-c".into(), "sleep 3".into()];
+        assert!(run(&args, &root, 0.05, None, &[])
+            .expect("timeout should be reported")
+            .is_none());
+    }
+
+    #[cfg(target_os="linux")]
+    #[test]
+    fn linux_background_descendant_cannot_certify_a_clean_result() {
+        let root = std::env::temp_dir();
+        let args = vec!["sh".into(), "-c".into(), "sleep 3 & printf 'parent-exited\\n'".into()];
+        let outcome = run(&args, &root, 3.0, None, &[]);
+        assert!(outcome.is_err(), "descendant inherited stdout/stderr: {outcome:?}");
+    }
+
     #[test]
     fn guest_environment_only_includes_os_basics_and_explicit_trace_context() {
         let root = std::env::temp_dir();
