@@ -3,18 +3,18 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 fn cli(root: &Path, args: &[&str]) -> Output {
-    return Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
+    Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
         .arg("--root")
         .arg(root)
         .args(args)
         .output()
-        .unwrap();
+        .unwrap()
 }
 
 fn project(source: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("sample.ores"), source).unwrap();
-    return dir;
+    dir
 }
 
 #[test]
