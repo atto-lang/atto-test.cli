@@ -281,3 +281,28 @@ fn legacy_override_rejects_symlink_to_launcher() {
     assert_eq!(result.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&result.stderr).contains("recursion refused"));
 }
+
+#[cfg(unix)]
+#[test]
+fn legacy_override_rejects_path_alias() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    symlink(
+        env!("CARGO_BIN_EXE_oreslang-test"),
+        root.path().join("legacy-alias"),
+    )
+    .unwrap();
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(root.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+    )
+    .unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
+        .env("PATH", path)
+        .env("ORESLANG_TEST_LEGACY", "legacy-alias")
+        .arg("--race")
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("recursion refused"));
+}
