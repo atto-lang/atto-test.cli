@@ -185,30 +185,30 @@ fn lex(source: &str) -> Result<Vec<Token>, String> {
             result[*open].text, result[*open].line
         ));
     }
-    return Ok(result);
+    Ok(result)
 }
 
 fn ident(word: &str) -> bool {
     let mut chars = word.chars();
-    return chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
-        && chars.all(|c| c.is_alphanumeric() || c == '_');
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 fn effect(word: &str) -> Option<&'static str> {
-    return match word {
+    match word {
         "throw" => Some("throws"),
         "raise" => Some("raises"),
         "panic" => Some("panics"),
         _ => None,
-    };
+    }
 }
 
 fn annotation(word: &str) -> bool {
-    return matches!(word, "throws" | "raises" | "panics");
+    matches!(word, "throws" | "raises" | "panics")
 }
 
 fn word(tokens: &[Token], i: usize) -> &str {
-    return tokens.get(i).map_or("", |t| t.text.as_str());
+    tokens.get(i).map_or("", |t| t.text.as_str())
 }
 
 #[derive(Debug)]
@@ -229,7 +229,7 @@ fn signature(tokens: &[Token], start: usize, name_index: usize) -> Result<Callab
         )
     };
     if !ident(word(tokens, name_index)) {
-        return Err(fail());
+        Err(fail())
     }
     let name = word(tokens, name_index).to_string();
     let mut i = name_index + 1;
@@ -403,7 +403,7 @@ fn class_members(tokens: &[Token]) -> Result<Vec<(usize, usize, Option<usize>)>,
             ranges.push((header + 1, last, parent));
         }
     }
-    return Ok(ranges);
+    Ok(ranges)
 }
 
 pub fn analyze(source: &str) -> Result<Report, String> {
@@ -504,5 +504,5 @@ pub fn analyze(source: &str) -> Result<Report, String> {
         }
     }
     report.diagnostics.sort_by_key(|d| d.line);
-    return Ok(report);
+    Ok(report)
 }
