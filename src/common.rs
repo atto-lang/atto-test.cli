@@ -70,6 +70,12 @@ pub fn trace(path: &Path, expected: Option<&str>) -> Result<Vec<Value>> {
     }
     Ok(records)
 }
+/// Strictly decode a single JSON object, rejecting duplicate keys at any depth.
+pub fn strict_json_object(input: &[u8]) -> Result<Value> {
+    let mut parser = serde_json::Deserializer::from_slice(input);
+    parse_unique_object(&mut parser)
+}
+
 fn parse_unique_object<'de, R: serde_json::de::Read<'de>>(de: &mut serde_json::Deserializer<R>) -> Result<Value> {
     use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
     use std::fmt;
