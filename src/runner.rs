@@ -111,3 +111,33 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
         stderr: String::from_utf8_lossy(&stderr).to_string(),
     }))
 }
+
+#[cfg(all(test, unix))]
+mod runner_security_tests {
+    use super::*;
+
+    #[test]
+    fn guest_environment_only_includes_os_basics_and_explicit_trace_context() {
+        let root = std::env::temp_dir();
+        let args = vec!["/usr/bin/env".to_string()];
+        let extras = vec![("ORESLANG_RACE_RUN_ID".to_string(), "test-nonce".to_string())];
+        let output = run(&args, &root, 5.0, None, &extras)
+            .expect("guest invocation")
+            .expect("guest completed");
+        assert_eq!(output.code, 0);
+        let allowed = [
+            "PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE",
+            "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "PATHEXT", "ORESLANG_RACE_RUN_ID",
+        ];
+        let mut saw_explicit = false;
+        for entry in output.stdout.lines() {
+            let (name, value) = entry.split_once('=').expect("environment line");
+            assert!(allowed.contains(&name), "unexpected host environment variable: {name}");
+            if name == "ORESLANG_RACE_RUN_ID" {
+                assert_eq!(value, "test-nonce");
+                saw_explicit = true;
+            }
+        }
+        assert!(saw_explicit, "explicit trace context must reach guest");
+    }
+}
