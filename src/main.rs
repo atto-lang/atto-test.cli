@@ -270,11 +270,16 @@ fn native(root:&Path,cfg:&toml::Value,timeout:f64)->Result<u8>{
     }else{
         let dir=root.join("tests");
         if !dir.exists(){return Err("no tests folder and no [native].files".into());}
-        let entries=WalkDir::new(dir).into_iter()
-          .map(|e|e.map_err(|e|e.to_string()))
-          .collect::<Result<Vec<_>>>()?;
-        if entries.iter().any(|e|e.file_type().is_symlink()) {
-            return Err("native test discovery refuses symlink entries".into());
+        let mut entries = Vec::new();
+        for entry in WalkDir::new(dir).follow_links(false) {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.file_type().is_symlink() {
+                return Err("native test discovery refuses symlink entries".into());
+            }
+            if entries.len() >= 20_000 {
+                return Err("native test discovery exceeds 20000 filesystem entries".into());
+            }
+            entries.push(entry);
         }
         entries.into_iter()
           .filter(|e|e.file_type().is_file() &&
