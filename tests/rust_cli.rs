@@ -72,7 +72,7 @@ fn check_fails_closed_without_real_parser() {
 }
 
 #[test]
-fn syntax_only_compiler_receipt_must_bind_source_hash() {
+fn check_rejects_untrusted_project_local_compiler_even_with_matching_receipt() {
     let dir = tempfile::tempdir().unwrap();
     write(&dir.path().join("unit.ores"), "fnc test() {}");
     write(
@@ -84,18 +84,18 @@ echo "ORES_CHECK|PASS|sha256=$digest|phase=syntax-only"
     );
     write(
         &dir.path().join("oreslang-test.toml"),
-        r#"[check]
-command=["sh","check.sh"]
-"#,
+        "[check]\ncommand=[\"sh\",\"check.sh\"]\n",
     );
-    assert_eq!(code(&invoke(dir.path(), &["--check", "unit.ores"])), 0);
+    // A project-local script must never certify syntax, regardless of receipt.
+    let result=invoke(dir.path(),&["--check","unit.ores"]);
+    assert_eq!(code(&result),2);
     write(
-        &dir.path().join("check.sh"),
-        "#!/bin/sh\necho 'ORES_CHECK|PASS|sha256=forged|phase=syntax-only'\n",
+        &dir.path().join("oreslang-test.toml"),
+        "[check]\ncommand=[\"/bin/sh\"]\n",
     );
-    assert_eq!(code(&invoke(dir.path(), &["--check", "unit.ores"])), 2);
-    write(&dir.path().join("check.sh"), "#!/bin/sh\nexit 1\n");
-    assert_eq!(code(&invoke(dir.path(), &["--check", "unit.ores"])), 1);
+    // An absolute unpinned shell is still not an independently trusted parser.
+    let result=invoke(dir.path(),&["--check","unit.ores"]);
+    assert_eq!(code(&result),2);
 }
 
 #[test]
