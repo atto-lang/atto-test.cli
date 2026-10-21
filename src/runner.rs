@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[derive(Debug)]
 pub struct Outcome {
     pub code: i32,
     pub stdout: String,
