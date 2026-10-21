@@ -123,6 +123,27 @@ fn fuzz_success_and_missing_command() {
 }
 
 #[test]
+fn fuzz_rejects_oversized_and_non_file_corpus_entries() {
+    let project = tempfile::tempdir().unwrap();
+    let corpus = project.path().join("corpus");
+    fs::create_dir_all(&corpus).unwrap();
+    write(
+        &project.path().join("oreslang-test.toml"),
+        "[fuzz]\ncommand=[\"sh\",\"-c\",\"cat >/dev/null\"]\ncorpus=\"corpus\"\nmax_bytes=4\n",
+    );
+    fs::write(corpus.join("too-large.bin"), b"12345").unwrap();
+    let result = invoke(project.path(), &["--fuzz", "--cases", "1"]);
+    assert_eq!(code(&result), 2);
+    assert!(String::from_utf8_lossy(&result.stderr).contains("exceeds max_bytes"));
+
+    fs::remove_file(corpus.join("too-large.bin")).unwrap();
+    fs::create_dir(corpus.join("nested")).unwrap();
+    let result = invoke(project.path(), &["--fuzz", "--cases", "1"]);
+    assert_eq!(code(&result), 2);
+    assert!(String::from_utf8_lossy(&result.stderr).contains("not a regular file"));
+}
+
+#[test]
 fn deadlock_lock_order_cycle_is_failure() {
     let dir = tempfile::tempdir().unwrap();
     let ops = [
