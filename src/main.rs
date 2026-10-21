@@ -5,6 +5,7 @@ mod fuzz;
 mod model;
 mod deadlock;
 mod schedule;
+mod reactive;
 
 use clap::Parser;
 use common::{safe_path,table_command,Result};
