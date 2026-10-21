@@ -12,13 +12,13 @@ const MAX_FILES: usize = 2_000;
 const MAX_FINDINGS: usize = 10_000;
 
 #[derive(Clone, Copy, Debug)]
-pub enum Severity { Low, Medium, High, Critical }
+enum Severity { Low, Medium, High }
 impl Severity {
     fn level(self) -> u8 {
-        match self { Self::Low => 1, Self::Medium => 2, Self::High => 3, Self::Critical => 4 }
+        match self { Self::Low => 1, Self::Medium => 2, Self::High => 3 }
     }
     fn label(self) -> &'static str {
-        match self { Self::Low => "low", Self::Medium => "medium", Self::High => "high", Self::Critical => "critical" }
+        match self { Self::Low => "low", Self::Medium => "medium", Self::High => "high" }
     }
 }
 #[derive(Debug)]
