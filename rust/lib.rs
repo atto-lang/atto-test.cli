@@ -325,6 +325,36 @@ pub fn run(mut args: Vec<OsString>, core_launcher: bool) -> i32 {
     let legacy = std::env::var_os("ORESLANG_TEST_LEGACY")
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/legacy-oreslang-test"));
+    // Reject direct and symlinked aliases to this executable and its
+    // launch wrappers. This keeps a mistaken legacy override from spawning
+    // the same launcher indefinitely.
+    let target = if legacy.components().count() == 1 {
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(&legacy))
+                .find(|path| path.is_file())
+        })
+    } else {
+        Some(legacy.clone())
+    };
+    let resolved = target.and_then(|path| path.canonicalize().ok());
+    let current = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.canonicalize().ok());
+    let companion = current.as_ref().map(|path| {
+        path.with_file_name(if cfg!(windows) { "oreslang.exe" } else { "oreslang" })
+    });
+    let bin = Path::new(env!("CARGO_MANIFEST_DIR")).join("bin");
+    let known_wrappers = [
+        current,
+        companion,
+        bin.join("oreslang").canonicalize().ok(),
+        bin.join("oreslang-test").canonicalize().ok(),
+    ];
+    if resolved.is_some() && known_wrappers.contains(&resolved) {
+        eprintln!("ORESLANG_TEST_LEGACY resolves to wrapper; recursion refused");
+        return 2;
+    }
     let mut command = Command::new(legacy);
     command.args(args);
     return status(command);
