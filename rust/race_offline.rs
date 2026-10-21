@@ -191,6 +191,7 @@ pub fn analyze(text: &str) -> Result<Report, String> {
     let mut locks: BTreeMap<String, (Option<String>, Clock)> = BTreeMap::new();
     let mut messages = BTreeMap::<String,Clock>::new();
     let mut seen_messages = BTreeSet::<String>::new();
+    let mut pending_waits = BTreeMap::<String,String>::new();
     let mut history = BTreeMap::<String,MemoryHistory>::new();
     let mut conflicts = 0u64;
     let mut examples = Vec::new();
@@ -203,7 +204,7 @@ pub fn analyze(text: &str) -> Result<Report, String> {
         let allow = match op.as_str() {
             "task" | "finish" => &["op", "task"][..],
             "fork" | "join" => &["op","task","child"][..],
-            "lock" | "unlock" => &["op","task","name"][..],
+            "lock" | "unlock" | "wait" | "unwait" => &["op","task","name"][..],
             "send" | "recv" => &["op","task","message"][..],
             "access" => &["op","task","location","mode"][..],
             _ => return Err(format!("event {}: unsupported operation {op}", index+2)),
@@ -232,6 +233,9 @@ pub fn analyze(text: &str) -> Result<Report, String> {
                 parents.insert(child, task.clone());
             }
             "finish" => {
+                if pending_waits.contains_key(&task) {
+                    return Err("task finished while waiting on a lock".into());
+                }
                 if locks.values().any(|(owner,_)| owner.as_deref() == Some(task.as_str())) {
                     return Err("task finished while owning a lock".into());
                 }
@@ -246,6 +250,7 @@ pub fn analyze(text: &str) -> Result<Report, String> {
                 merge(&mut clock, clocks.get(child).ok_or("missing joined task clock")?);
             }
             "lock" => {
+                if pending_waits.contains_key(&task) { return Err("task acquired lock while waiting".into()); }
                 let name = e.text("name")?.to_owned();
                 let (owner, released) = locks.entry(name).or_insert((None, Clock::new()));
                 if owner.is_some() { return Err("lock acquired while owned".into()); }
@@ -253,11 +258,26 @@ pub fn analyze(text: &str) -> Result<Report, String> {
                 *owner = Some(task.clone());
             }
             "unlock" => {
+                if pending_waits.contains_key(&task) { return Err("task unlocked while waiting".into()); }
                 let name = e.text("name")?;
                 let (owner, released) = locks.get_mut(name).ok_or("unlock of unknown lock")?;
                 if owner.as_deref() != Some(task.as_str()) { return Err("unlock by non-owner".into()); }
                 *released = clock.clone();
                 *owner = None;
+            }
+            "wait" => {
+                let name = e.text("name")?.to_owned();
+                if pending_waits.contains_key(&task) || locks.get(&name).is_none_or(|(owner,_)| owner.is_none()) {
+                    return Err("lock wait without observed owner or duplicate wait".into());
+                }
+                pending_waits.insert(task.clone(),name);
+            }
+            "unwait" => {
+                let name = e.text("name")?;
+                if pending_waits.get(&task).map(String::as_str) != Some(name) {
+                    return Err("unmatched lock wait cancellation".into());
+                }
+                pending_waits.remove(&task);
             }
             "send" => {
                 let message = e.text("message")?.to_owned();
