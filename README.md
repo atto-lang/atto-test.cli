@@ -16,6 +16,8 @@ Put the repository's bin directory on PATH, with ORESLANG_BIN pointing to your *
     oreslang test --race
     oreslang test --race --trace tests/traces/recorded.jsonl
     oreslang test --race --logical --model tests/models/lost-update.json
+    oreslang test --fuzz --fuzz-profile security --seed 42 --cases 1000
+    oreslang test --audit --fail-on high --audit-format json
 
 A project must contain oreslang-test.toml. Native tests are automatically discovered as tests/**/test_*.ores and tests/**/*_test.ores, or listed via [native].files. The existing Oreslang stdlib/testing.ores machine protocol (ORES_TEST|...) is parsed and validated. An interpreter failure, absent summary or inconsistent counts makes the suite fail.
 
@@ -26,6 +28,10 @@ Run the included test suite with:
     python3 bin/oreslang test --race --logical --model tests/models/lost-update.json
 
 The two example invocations deliberately report detected defects.
+
+## Source security and anti-pattern audit
+
+The new --security, --anti-patterns and --audit flags provide a bounded, advisory static scan for possible hard-coded credentials, weak hashing, plaintext URLs, shell invocations, empty error handlers and non-cooperative busy loops. See [security-audit.md](docs/security-audit.md) for rule IDs, limitations, JSON format, output thresholds and the runtime/backend verification roadmap. These checks are not AST/HIR or whole-program security analysis and cannot prove that a program is free of vulnerabilities.
 
 ## Fuzzing
 
