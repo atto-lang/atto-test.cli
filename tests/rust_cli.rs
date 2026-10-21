@@ -268,3 +268,25 @@ fn config_symlink_cannot_be_used_to_influence_runner() {
         2
     );
 }
+
+#[test]
+fn native_summary_integer_overflow_fails_without_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("tests")).unwrap();
+    write(&dir.path().join("tests/test_counts.ores"), &format!(
+        "echo 'ORES_TEST|PASS|suite/case|'\necho 'ORES_TEST|SUMMARY|total=1|passed={}|failed={}|skipped=1|filtered=0'\n",
+        usize::MAX,
+        usize::MAX
+    ));
+    write(
+        &dir.path().join("oreslang-test.toml"),
+        "[native]\nfiles=[\"tests/test_counts.ores\"]\n",
+    );
+    let output = Command::new(binary())
+        .arg("--root")
+        .arg(dir.path())
+        .env("ORESLANG_BIN", "sh")
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 1, "malformed child test counts must fail, not panic: {}", String::from_utf8_lossy(&output.stderr));
+}
