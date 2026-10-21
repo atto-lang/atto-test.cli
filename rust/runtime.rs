@@ -19,6 +19,7 @@ struct Settings {
     root: PathBuf,
     fuzz: bool,
     security_fuzz: bool,
+    fuzz_profile_selected: bool,
     race: bool,
     trace: Option<String>,
     logical: bool,
@@ -30,7 +31,8 @@ struct Settings {
 
 fn parse(args: &[OsString]) -> Result<Settings, String> {
     let mut out = Settings {
-        root: PathBuf::from("."), fuzz: false, security_fuzz: false, race: false,
+        root: PathBuf::from("."), fuzz: false, security_fuzz: false,
+        fuzz_profile_selected: false, race: false,
         trace: None, logical: false, model: false,
         seed: 1, cases: 100, timeout: Duration::from_secs(5),
     };
@@ -50,6 +52,7 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
                 match key {
                     "--root" => out.root = PathBuf::from(value),
                     "--fuzz-profile" => {
+                        out.fuzz_profile_selected = true;
                         out.security_fuzz = match value.as_str() {
                             "basic" => false,
                             "security" => true,
@@ -77,8 +80,8 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
         i += 1;
     }
     if out.cases == 0 || out.cases > MAX_CASES { return Err("cases must be 1..1000000".into()); }
-    if out.security_fuzz && !out.fuzz {
-        return Err("--fuzz-profile security requires --fuzz".into());
+    if out.fuzz_profile_selected && !out.fuzz {
+        return Err("--fuzz-profile requires --fuzz".into());
     }
     if out.fuzz && (out.race || out.trace.is_some() || out.logical || out.model) {
         return Err("fuzz and race modes are exclusive".into());
