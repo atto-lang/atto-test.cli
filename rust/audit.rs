@@ -211,12 +211,12 @@ fn scan(out:&mut Vec<Finding>,file:&str,source:&str,security:bool,anti:bool)->Re
                 let tail=&lower.as_bytes()[pos+needle.len()..];
                 let Some(delim)=tail.iter().take(64).position(|ch| *ch==b'=' || *ch==b':') else {continue;};
                 let mut at=pos+needle.len()+delim+1;
-                while at<lower.len() && lower.as_bytes()[at].is_ascii_whitespace(){at+=1;}
+                while at<source.len() && source.as_bytes()[at].is_ascii_whitespace(){at+=1;}
                 // Optional type annotation: typed assignments include "Type =".
-                if lower.as_bytes().get(at).is_some_and(|x|x.is_ascii_alphabetic()) {
+                if source.as_bytes().get(at).is_some_and(|x|x.is_ascii_alphabetic()) {
                     if let Some(n)=lower[at..].find('=') {if n<48 {
                         at+=n+1;
-                        while at<lower.len() && lower.as_bytes()[at].is_ascii_whitespace(){at+=1;}
+                        while at<source.len() && source.as_bytes()[at].is_ascii_whitespace(){at+=1;}
                     }}
                 }
                 if let Some(q)=quoted.iter().find(|q|q.start==at) {
