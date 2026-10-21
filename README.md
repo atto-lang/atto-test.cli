@@ -52,6 +52,17 @@ command = ["/path/to/oreslang-compiler", "check"]
 
 This adapter deliberately does **not** substitute a second parser for Java/GraalVM, LLVM, WASM, JS or .NET. Canonical frontend conformance is pending those integrations.
 
+## Exceptional-effect advisory checking
+
+The separate Rust `--effects` mode incorporates the existing Rust source analyzer from exceptional-effects PR #6. It reports direct `throw`, `raise`, and `panic` syntax and annotation mismatches without claiming compiler-grade transitive effects or runtime correctness.
+
+```sh
+oreslang test --effects --file src/main.ores
+oreslang test --effects --effects-strict --file src/main.ores
+```
+
+Use `[effects].files = ["src/main.ores"]` or automatic source discovery. Advisory warnings exit `0` unless `--effects-strict` is used, which exits `1` for warnings. Inconclusive parsing or zero inspected callable bodies exits `2`. See `docs/exception-effects.md`.
+
 ## Fuzzing
 
 ```toml
