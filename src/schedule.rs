@@ -55,7 +55,7 @@ fn validate(stdout:&str,iterations:usize, seed:i64, replay_events:Option<usize>)
         let seen_seed=run[0].parse::<i64>().map_err(|e|e.to_string())?;
         let events=run[1].parse::<usize>().map_err(|e|e.to_string())?;
         let deadlocks=run[2].parse::<usize>().map_err(|e|e.to_string())?;
-        if nums[1]==0 || nums[2]!=0 || nums[0]!=nums[1]+nums[2]+nums[3] ||
+        if nums[1]==0 || nums[2]!=0 || nums[1].checked_add(nums[2]).and_then(|v|v.checked_add(nums[3]))!=Some(nums[0]) ||
            counted!=&[nums[1],nums[2],nums[3]] || seen_seed!=seed.checked_add(index as i64).ok_or("seed overflow")? ||
            events==0 || deadlocks!=0 || replay_events.is_some_and(|expected|events!=expected) {
             return Err("backend suite receipt inconsistent with case events".into());
