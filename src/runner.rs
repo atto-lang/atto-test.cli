@@ -40,18 +40,20 @@ fn poll_unreaped_exit(child: &std::process::Child) -> Result<bool, String> {
     // Unlike Child::try_wait(), WNOWAIT observes exit without reaping.
     // Keep the child's PID reserved until its whole process group is cleaned.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    let rc = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            child.id() as libc::id_t,
-            &mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    };
-    if rc != 0 {
-        return Err(format!("waitid failed: {}", std::io::Error::last_os_error()));
+    loop {
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if rc == 0 { return Ok(unsafe { info.si_pid() } != 0); }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::Interrupted { continue; }
+        return Err(format!("waitid failed: {error}"));
     }
-    Ok(unsafe { info.si_pid() } != 0)
 }
 
 pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
@@ -89,7 +91,18 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
     let code = loop {
         if output_limit.load(Ordering::SeqCst) { break None; }
         #[cfg(target_os="linux")]
-        let observed = if poll_unreaped_exit(&child)? { Some(0) } else { None };
+        let observed = match poll_unreaped_exit(&child) {
+            Ok(true) => Some(0),
+            Ok(false) => None,
+            Err(failure) => {
+                // Keep the unreaped PID reserved while cleaning up the group;
+                // never detach a live guest on a waitid monitoring failure.
+                kill_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(failure);
+            }
+        };
         #[cfg(not(target_os="linux"))]
         let observed = child.try_wait().map_err(|e| e.to_string())?
             .map(|status| status.code().unwrap_or(1));
