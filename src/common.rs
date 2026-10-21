@@ -238,6 +238,45 @@ pub fn table_command(v: &toml::Value, section: &str) -> Result<Vec<String>> {
         .ok_or_else(|| format!("[{section}].command requires nonempty argv array"))
 }
 
+#[cfg(all(test, unix))]
+mod bounded_read_security_tests {
+    use super::*;
+    use std::{fs, os::unix::fs::symlink};
+
+    #[test]
+    fn accepts_regular_file_but_refuses_all_symlink_components() {
+        let dir = tempfile::tempdir().unwrap();
+        // Canonicalize the ambient system temp root (e.g. macOS /var -> /private/var).
+        let root = dir.path().canonicalize().unwrap();
+        let normal = root.join("normal");
+        let outside = root.join("outside");
+        fs::create_dir_all(&normal).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(normal.join("input"), b"safe").unwrap();
+        fs::write(outside.join("input"), b"foreign").unwrap();
+        assert_eq!(bounded_read(&normal.join("input"), 64).unwrap(), b"safe");
+        symlink(&outside, root.join("linked-parent")).unwrap();
+        assert!(
+            bounded_read(&root.join("linked-parent/input"), 64).is_err(),
+            "intermediate symlinks must not select a different source"
+        );
+        symlink(normal.join("input"), root.join("linked-file")).unwrap();
+        assert!(bounded_read(&root.join("linked-file"), 64).is_err());
+        assert!(bounded_read(&normal.join("input"), 2).is_err());
+    }
+
+    #[test]
+    fn special_input_files_cannot_block_the_trace_reader() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap().join("pipe");
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        // O_NONBLOCK means an attacker cannot strand the reader opening a FIFO.
+        assert!(bounded_read(&path, 128).is_err());
+    }
+}
+
 #[cfg(test)]
 mod strict_json_regression {
     use super::*;
