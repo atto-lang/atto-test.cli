@@ -594,18 +594,19 @@ def main(argv=None):
         root = Path(args.root).resolve(strict=True)
         if not root.is_dir():
             raise UsageError("project root must be a directory")
+        if audit_requested:
+            # Static scan does not execute guests or require a valid test manifest.
+            return run_audit(root, security=args.audit or args.security,
+                             anti_patterns=args.audit or args.anti_patterns,
+                             files=args.audit_file,
+                             threshold=args.fail_on or "medium",
+                             output_format=args.audit_format or "text")
         manifest = root / "oreslang-test.toml"
         if manifest.is_file():
             with manifest.open("rb") as fh:
                 config = tomllib.load(fh)
         else:
             config = {}
-        if audit_requested:
-            return run_audit(root, security=args.audit or args.security,
-                             anti_patterns=args.audit or args.anti_patterns,
-                             files=args.audit_file,
-                             threshold=args.fail_on or "medium",
-                             output_format=args.audit_format or "text")
         if args.schedule_fuzz or args.replay:
             return schedule(root, config, args.seed, args.iterations,
                             args.timeout, args.replay, args.trace_output, args.inherit_env)
