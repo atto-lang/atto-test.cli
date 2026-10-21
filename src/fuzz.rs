@@ -38,12 +38,17 @@ pub fn fuzz(root: &Path, cfg: &toml::Value, seed: u64, cases: usize, timeout: f6
             if path.symlink_metadata().map_err(|e|e.to_string())?.file_type().is_symlink() {
                 return Err("fuzz corpus may not contain symlinks".into());
             }
-            if path.is_file() && path.metadata().map_err(|e|e.to_string())?.len() <= max as u64 {
-                let input=bounded_read(&path,max)?;
-                total_bytes=total_bytes.checked_add(input.len()).ok_or("corpus byte-size overflow")?;
-                if total_bytes > 16_777_216 { return Err("fuzz corpus exceeds 16 MiB".into()); }
-                corpus.push(input);
+            let metadata = path.symlink_metadata().map_err(|e| e.to_string())?;
+            if !metadata.file_type().is_file() {
+                return Err(format!("fuzz corpus entry is not a regular file: {}", path.display()));
             }
+            if metadata.len() > max as u64 {
+                return Err(format!("fuzz corpus seed exceeds max_bytes: {}", path.display()));
+            }
+            let input=bounded_read(&path,max)?;
+            total_bytes=total_bytes.checked_add(input.len()).ok_or("corpus byte-size overflow")?;
+            if total_bytes > 16_777_216 { return Err("fuzz corpus exceeds 16 MiB".into()); }
+            corpus.push(input);
         }
     }
     corpus.sort(); corpus.dedup();
