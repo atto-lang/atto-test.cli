@@ -1,5 +1,5 @@
 //! Strict bounded subprocess execution. No shell; finite output/time budgets.
-use std::io::{Read, Write, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,13 +12,18 @@ pub struct Outcome {
     pub stdout: String,
     pub stderr: String,
 }
-fn reader<R: Read + Send + 'static>(mut input: R, overflow: Arc<AtomicBool>) -> std::thread::JoinHandle<Result<Vec<u8>, String>> {
+fn reader<R: Read + Send + 'static>(
+    mut input: R,
+    overflow: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<Result<Vec<u8>, String>> {
     std::thread::spawn(move || {
         let mut collected = Vec::new();
         let mut chunk = [0u8; 65536];
         loop {
             let count = input.read(&mut chunk).map_err(|e| e.to_string())?;
-            if count == 0 { break; }
+            if count == 0 {
+                break;
+            }
             if count > 4_000_000usize.saturating_sub(collected.len()) {
                 overflow.store(true, Ordering::SeqCst);
                 return Err("test process emitted more than 4 MB stdout or stderr".into());
@@ -30,12 +35,14 @@ fn reader<R: Read + Send + 'static>(mut input: R, overflow: Arc<AtomicBool>) -> 
 }
 #[cfg(unix)]
 fn kill_group(id: u32) {
-    unsafe { libc::kill(-(id as libc::pid_t), libc::SIGKILL); }
+    unsafe {
+        libc::kill(-(id as libc::pid_t), libc::SIGKILL);
+    }
 }
 #[cfg(not(unix))]
 fn kill_group(_: u32) {}
 
-#[cfg(target_os="linux")]
+#[cfg(target_os = "linux")]
 fn poll_unreaped_exit(child: &std::process::Child) -> Result<bool, String> {
     // Unlike Child::try_wait(), WNOWAIT observes exit without reaping.
     // Keep the child's PID reserved until its whole process group is cleaned.
@@ -49,48 +56,85 @@ fn poll_unreaped_exit(child: &std::process::Child) -> Result<bool, String> {
                 libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
             )
         };
-        if rc == 0 { return Ok(unsafe { info.si_pid() } != 0); }
+        if rc == 0 {
+            return Ok(unsafe { info.si_pid() } != 0);
+        }
         let error = std::io::Error::last_os_error();
-        if error.kind() == std::io::ErrorKind::Interrupted { continue; }
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
         return Err(format!("waitid failed: {error}"));
     }
 }
 
-pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
-           extra_env: &[(String, String)]) -> Result<Option<Outcome>, String> {
-    if args.is_empty() || args[0].is_empty() { return Err("empty test command".into()); }
+pub fn run(
+    args: &[String],
+    root: &Path,
+    timeout: f64,
+    input: Option<&[u8]>,
+    extra_env: &[(String, String)],
+) -> Result<Option<Outcome>, String> {
+    if args.is_empty() || args[0].is_empty() {
+        return Err("empty test command".into());
+    }
     let mut cmd = Command::new(&args[0]);
-    cmd.args(&args[1..]).current_dir(root).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(&args[1..])
+        .current_dir(root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     // Guest tests must not inherit GitHub/CI credentials, SDK tokens, private
     // installation secrets or unrelated host settings. Retain only OS basics.
     cmd.env_clear();
     for key in [
-        "PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE",
-        "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "PATHEXT",
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SYSTEMROOT",
+        "WINDIR",
+        "SYSTEMDRIVE",
+        "PATHEXT",
     ] {
         if let Some(value) = std::env::var_os(key) {
             cmd.env(key, value);
         }
     }
-    for (key, value) in extra_env { cmd.env(key, value); }
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
     let mut file = tempfile::tempfile().map_err(|e| e.to_string())?;
-    if let Some(data) = input { file.write_all(data).map_err(|e| e.to_string())?; }
+    if let Some(data) = input {
+        file.write_all(data).map_err(|e| e.to_string())?;
+    }
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     cmd.stdin(Stdio::from(file));
     #[cfg(unix)]
-    unsafe { use std::os::unix::process::CommandExt; cmd.pre_exec(|| {
-        if libc::setsid() < 0 { return Err(std::io::Error::last_os_error()); }
-        Ok(())
-    }); }
-    let mut child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", args[0]))?;
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", args[0]))?;
     let output_limit = Arc::new(AtomicBool::new(false));
     let out = reader(child.stdout.take().unwrap(), output_limit.clone());
     let err = reader(child.stderr.take().unwrap(), output_limit.clone());
     let start = Instant::now();
     let mut timed_out = false;
     let code = loop {
-        if output_limit.load(Ordering::SeqCst) { break None; }
-        #[cfg(target_os="linux")]
+        if output_limit.load(Ordering::SeqCst) {
+            break None;
+        }
+        #[cfg(target_os = "linux")]
         let observed = match poll_unreaped_exit(&child) {
             Ok(true) => Some(0),
             Ok(false) => None,
@@ -103,10 +147,14 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
                 return Err(failure);
             }
         };
-        #[cfg(not(target_os="linux"))]
-        let observed = child.try_wait().map_err(|e| e.to_string())?
+        #[cfg(not(target_os = "linux"))]
+        let observed = child
+            .try_wait()
+            .map_err(|e| e.to_string())?
             .map(|status| status.code().unwrap_or(1));
-        if let Some(status) = observed { break Some(status); }
+        if let Some(status) = observed {
+            break Some(status);
+        }
         if start.elapsed() >= Duration::from_secs_f64(timeout) {
             timed_out = true;
             break None;
@@ -115,21 +163,25 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
     };
     // Linux: the child is deliberately still unreaped, so the process-group
     // identifier cannot have been reused by an unrelated process.
-    #[cfg(target_os="linux")]
+    #[cfg(target_os = "linux")]
     let had_inherited_pipes = if code.is_some() {
         let cutoff = Instant::now() + Duration::from_millis(200);
         while !(out.is_finished() && err.is_finished()) && Instant::now() < cutoff {
             std::thread::sleep(Duration::from_millis(10));
         }
         !(out.is_finished() && err.is_finished())
-    } else { false };
-    #[cfg(target_os="linux")]
+    } else {
+        false
+    };
+    #[cfg(target_os = "linux")]
     kill_group(child.id());
-    #[cfg(not(target_os="linux"))]
+    #[cfg(not(target_os = "linux"))]
     if code.is_none() && child.try_wait().map_err(|e| e.to_string())?.is_none() {
         kill_group(child.id());
     }
-    if code.is_none() { let _ = child.kill(); }
+    if code.is_none() {
+        let _ = child.kill();
+    }
     let exit_status = child.wait().map_err(|e| e.to_string())?;
     // A child may exit while descendants retain its stdout/stderr pipes.
     // Never block indefinitely joining a reader in that situation.
@@ -152,9 +204,13 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
     }
     let stdout = out.join().map_err(|_| "stdout reader panicked")??;
     let stderr = err.join().map_err(|_| "stderr reader panicked")??;
-    if output_limit.load(Ordering::SeqCst) { return Err("test output exceeds 4 MB".into()); }
-    if timed_out { return Ok(None); }
-    #[cfg(target_os="linux")]
+    if output_limit.load(Ordering::SeqCst) {
+        return Err("test output exceeds 4 MB".into());
+    }
+    if timed_out {
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
     if had_inherited_pipes {
         return Err("test process descendants kept stdout or stderr open".into());
     }
@@ -169,7 +225,7 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
 mod runner_security_tests {
     use super::*;
 
-    #[cfg(target_os="linux")]
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_reaps_child_and_preserves_real_exit_status() {
         let root = std::env::temp_dir();
@@ -181,7 +237,7 @@ mod runner_security_tests {
         assert_eq!(result.stdout, "ok\n");
     }
 
-    #[cfg(target_os="linux")]
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_timeout_terminates_process_group() {
         let root = std::env::temp_dir();
@@ -191,13 +247,20 @@ mod runner_security_tests {
             .is_none());
     }
 
-    #[cfg(target_os="linux")]
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_background_descendant_cannot_certify_a_clean_result() {
         let root = std::env::temp_dir();
-        let args = vec!["sh".into(), "-c".into(), "sleep 3 & printf 'parent-exited\\n'".into()];
+        let args = vec![
+            "sh".into(),
+            "-c".into(),
+            "sleep 3 & printf 'parent-exited\\n'".into(),
+        ];
         let outcome = run(&args, &root, 3.0, None, &[]);
-        assert!(outcome.is_err(), "descendant inherited stdout/stderr: {outcome:?}");
+        assert!(
+            outcome.is_err(),
+            "descendant inherited stdout/stderr: {outcome:?}"
+        );
     }
 
     #[test]
@@ -210,13 +273,27 @@ mod runner_security_tests {
             .expect("guest completed");
         assert_eq!(output.code, 0);
         let allowed = [
-            "PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE",
-            "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "PATHEXT", "ORESLANG_RACE_RUN_ID",
+            "PATH",
+            "HOME",
+            "TMPDIR",
+            "TEMP",
+            "TMP",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "SYSTEMROOT",
+            "WINDIR",
+            "SYSTEMDRIVE",
+            "PATHEXT",
+            "ORESLANG_RACE_RUN_ID",
         ];
         let mut saw_explicit = false;
         for entry in output.stdout.lines() {
             let (name, value) = entry.split_once('=').expect("environment line");
-            assert!(allowed.contains(&name), "unexpected host environment variable: {name}");
+            assert!(
+                allowed.contains(&name),
+                "unexpected host environment variable: {name}"
+            );
             if name == "ORESLANG_RACE_RUN_ID" {
                 assert_eq!(value, "test-nonce");
                 saw_explicit = true;
