@@ -253,3 +253,31 @@ fn migrated_file_discovery_and_total_source_budgets() {
     assert_eq!(result.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&result.stderr).contains("4 MiB"));
 }
+
+#[test]
+fn legacy_override_rejects_recursion() {
+    let binary = env!("CARGO_BIN_EXE_oreslang-test");
+    let result = Command::new(binary)
+        .env("ORESLANG_TEST_LEGACY", binary)
+        .arg("--race")
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("recursion refused"));
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_override_rejects_symlink_to_launcher() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let alias = root.path().join("legacy-alias");
+    symlink(env!("CARGO_BIN_EXE_oreslang-test"), &alias).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
+        .env("ORESLANG_TEST_LEGACY", alias)
+        .arg("--race")
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("recursion refused"));
+}
