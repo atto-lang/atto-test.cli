@@ -5,7 +5,6 @@ mod fuzz;
 mod model;
 mod deadlock;
 mod schedule;
-mod reactive;
 mod effects_cli;
 
 use clap::Parser;
