@@ -145,7 +145,7 @@ max_bytes=65536
         let dir=project.path().join("corpus");
         std::fs::create_dir(&dir).unwrap();
         for n in 0..513 {
-            std::fs::write(dir.join(format!("{n:04}.bin")), []).unwrap();
+            std::fs::write(dir.join(format!("{n:04}.bin")), b"").unwrap();
         }
         let error=fuzz(project.path(), &cfg(), 1, 1, 1.0).unwrap_err();
         assert!(error.contains("512 entries"), "{error}");
