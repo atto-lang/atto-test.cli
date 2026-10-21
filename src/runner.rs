@@ -12,8 +12,8 @@ pub struct Outcome {
     pub stdout: String,
     pub stderr: String,
 }
-fn reader<R: Read>(mut input: R, overflow: Arc<AtomicBool>) -> std::thread::JoinHandle<Result<Vec<u8>, String>>
-where R: Send + 'static {
+fn reader<R>(mut input: R, overflow: Arc<AtomicBool>) -> std::thread::JoinHandle<Result<Vec<u8>, String>>
+where R: Read + Send + 'static {
     std::thread::spawn(move || {
         let mut collected = Vec::new();
         let mut chunk = [0u8; 65536];
