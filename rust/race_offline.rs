@@ -16,29 +16,29 @@ type Clock = BTreeMap<String, u64>;
 #[derive(Clone, Debug)]
 enum Value { Text(String), Integer(u64) }
 #[derive(Clone, Debug)]
-struct Event { fields: BTreeMap<String, Value> }
+pub(crate) struct Event { fields: BTreeMap<String, Value> }
 impl Event {
-    fn text(&self, key: &str) -> Result<&str, String> {
+    pub(crate) fn text(&self, key: &str) -> Result<&str, String> {
         match self.fields.get(key) {
             Some(Value::Text(s)) if !s.is_empty() && s.len() <= 512
                 && !s.chars().any(char::is_control) => Ok(s.as_str()),
             _ => Err(format!("missing/invalid text field {key}")),
         }
     }
-    fn number(&self, key: &str) -> Result<u64, String> {
+    pub(crate) fn number(&self, key: &str) -> Result<u64, String> {
         match self.fields.get(key) {
             Some(Value::Integer(n)) => Ok(*n),
             _ => Err(format!("missing/invalid integer field {key}")),
         }
     }
-    fn keys(&self, required: &[&str]) -> Result<(), String> {
+    pub(crate) fn keys(&self, required: &[&str]) -> Result<(), String> {
         if self.fields.len() != required.len() || required.iter().any(|k| !self.fields.contains_key(*k)) {
             return Err(format!("invalid fields for {}", self.text("op")?));
         }
         Ok(())
     }
 }
-struct Parser<'a> { text: &'a str, at: usize }
+pub(crate) struct Parser<'a> { text: &'a str, at: usize }
 impl<'a> Parser<'a> {
     fn peek(&self) -> Option<char> { self.text[self.at..].chars().next() }
     fn take(&mut self) -> Option<char> {
@@ -121,7 +121,7 @@ impl<'a> Parser<'a> {
             _ => Err("unsupported JSON event field type".into()),
         }
     }
-    fn object(text: &'a str) -> Result<Event, String> {
+    pub(crate) fn object(text: &'a str) -> Result<Event, String> {
         let mut p = Parser { text, at: 0 };
         p.ws();
         p.expect('{')?;
@@ -308,7 +308,7 @@ pub fn analyze(text: &str) -> Result<Report, String> {
     Ok(Report {events: lines.len()-2, accesses, conflicts, examples, backend})
 }
 
-fn relative_trace(root: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+pub(crate) fn relative_trace(root: &Path, name: &str) -> Result<std::path::PathBuf, String> {
     let path = Path::new(name);
     if path.as_os_str().is_empty() || path.is_absolute() ||
         path.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
