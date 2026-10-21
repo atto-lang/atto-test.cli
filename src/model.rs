@@ -48,31 +48,39 @@ fn apply(ops:&[Value],state:&mut State,local:&mut State)->Result<()> {
     }
     Ok(())
 }
-fn dfs(actors:&[Actor],expected:&State, indices:&[usize], state:&State,locals:&[State],
-       path:&[String], limit:usize, report:&mut ModelReport, nodes:&mut usize)->Result<()> {
-    *nodes+=1;
-    if *nodes>10_000_000 { return Err("inconclusive: exploration node budget exhausted".into()); }
-    if indices.iter().enumerate().all(|(i,index)|*index==actors[i].turns.len()) {
-        if report.schedules>=limit {return Err(format!("inconclusive: reached schedule limit {limit}"));}
-        report.schedules+=1;
-        if expected.iter().any(|(k,v)|state.get(k)!=Some(v)) {
-            report.violation=Some(format!("schedule={path:?} final={state:?} expected={expected:?}"));
+struct Search<'a> {
+    actors: &'a [Actor],
+    expected: &'a State,
+    limit: usize,
+    report: &'a mut ModelReport,
+    nodes: &'a mut usize,
+}
+impl Search<'_> {
+    fn dfs(&mut self, indices:&[usize], state:&State, locals:&[State], path:&[String])->Result<()> {
+        *self.nodes+=1;
+        if *self.nodes>10_000_000 { return Err("inconclusive: exploration node budget exhausted".into()); }
+        if indices.iter().enumerate().all(|(i,index)|*index==self.actors[i].turns.len()) {
+            if self.report.schedules>=self.limit {return Err(format!("inconclusive: reached schedule limit {}", self.limit));}
+            self.report.schedules+=1;
+            if self.expected.iter().any(|(k,v)|state.get(k)!=Some(v)) {
+                self.report.violation=Some(format!("schedule={path:?} final={state:?} expected={:?}", self.expected));
+            }
+            return Ok(());
         }
-        return Ok(());
+        if self.report.violation.is_some(){return Ok(());}
+        if self.report.schedules>=self.limit{return Err(format!("inconclusive: reached schedule limit {}", self.limit));}
+        for (i,actor) in self.actors.iter().enumerate(){
+            if indices[i]>=actor.turns.len(){continue;}
+            let mut next_state=state.clone();
+            let mut next_locals=locals.to_vec();
+            apply(&actor.turns[indices[i]],&mut next_state,&mut next_locals[i])?;
+            let mut next_indices=indices.to_vec();next_indices[i]+=1;
+            let mut next_path=path.to_vec();next_path.push(format!("{}:{}",actor.name,indices[i]));
+            self.dfs(&next_indices,&next_state,&next_locals,&next_path)?;
+            if self.report.violation.is_some(){break;}
+        }
+        Ok(())
     }
-    if report.violation.is_some(){return Ok(());}
-    if report.schedules>=limit{return Err(format!("inconclusive: reached schedule limit {limit}"));}
-    for (i,actor) in actors.iter().enumerate(){
-        if indices[i]>=actor.turns.len(){continue;}
-        let mut next_state=state.clone();
-        let mut next_locals=locals.to_vec();
-        apply(&actor.turns[indices[i]],&mut next_state,&mut next_locals[i])?;
-        let mut next_indices=indices.to_vec();next_indices[i]+=1;
-        let mut next_path=path.to_vec();next_path.push(format!("{}:{}",actor.name,indices[i]));
-        dfs(actors,expected,&next_indices,&next_state,&next_locals,&next_path,limit,report,nodes)?;
-        if report.violation.is_some(){break;}
-    }
-    Ok(())
 }
 pub fn explore(path:&Path,limit:usize)->Result<ModelReport>{
     if !(1..=1_000_000).contains(&limit){return Err("invalid schedule limit".into());}
@@ -129,7 +137,7 @@ pub fn explore(path:&Path,limit:usize)->Result<ModelReport>{
     if turns>64 || operations>4096 {return Err("model exceeds turns/operations limit".into());}
     let mut report=ModelReport{schedules:0,violation:None};
     let mut nodes=0;
-    dfs(&actors,&expected,&vec![0;actors.len()],&state,&vec![State::new();actors.len()],&[],
-        limit,&mut report,&mut nodes)?;
+    let mut search=Search{actors:&actors,expected:&expected,limit,report:&mut report,nodes:&mut nodes};
+    search.dfs(&vec![0;actors.len()],&state,&vec![State::new();actors.len()],&[])?;
     Ok(report)
 }
