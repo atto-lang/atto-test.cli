@@ -28,6 +28,9 @@ fn discover(root:&Path)->Result<Vec<String>> {
     Ok(found)
 }
 pub fn run(root:&Path,cfg:&toml::Value,provided:&[String],strict:bool)->Result<u8>{
+    if cfg.get("effects").is_some_and(|v|!v.is_table()) {
+        return Err("[effects] must be a TOML table".into());
+    }
     let files:Vec<String>=if !provided.is_empty(){provided.to_vec()}else if let Some(list)=cfg.get("effects").and_then(|v|v.get("files")){
         let items=list.as_array().ok_or("[effects].files must be an array of strings")?;
         if items.is_empty(){return Err("[effects].files must not be empty".into());}
