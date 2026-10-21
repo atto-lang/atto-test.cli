@@ -124,3 +124,18 @@ fn symlinked_corpus_ancestors_and_output_directories_are_rejected() {
     assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
 }
 
+
+#[cfg(unix)]
+#[test]
+fn security_fuzz_profile_injects_adversarial_cases_without_python() {
+    let root = tempfile::tempdir().unwrap();
+    let oracle = guest(root.path(), "path-oracle",
+        "#!/bin/sh\ncase \"$(cat)\" in ../*) exit 7;; esac\nexit 0\n");
+    fs::write(root.path().join("oreslang-test.toml"),
+        format!("[fuzz]\ncommand = ['{}']\nmax_bytes = 64\n", oracle.display())).unwrap();
+    let result = cli(root.path(), &["--fuzz", "--fuzz-profile", "security", "--cases", "1", "--seed", "9"]);
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(String::from_utf8_lossy(&result.stdout).contains("FUZZ FAILURE"));
+    assert_eq!(cli(root.path(), &["--fuzz-profile", "security"]).status.code(), Some(2));
+    assert_eq!(cli(root.path(), &["--fuzz", "--fuzz-profile", "unknown"]).status.code(), Some(2));
+}
