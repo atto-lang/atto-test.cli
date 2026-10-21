@@ -290,3 +290,19 @@ fn native_summary_integer_overflow_fails_without_panicking() {
         .unwrap();
     assert_eq!(code(&output), 1, "malformed child test counts must fail, not panic: {}", String::from_utf8_lossy(&output.stderr));
 }
+
+#[test]
+fn logical_model_rejects_nested_and_top_level_duplicate_json_keys() {
+    let project = tempfile::tempdir().unwrap();
+    let cases = [
+        r#"{"initial":{"counter":0,"counter":1},"expected":{"counter":1},"actors":[]}"#,
+        r#"{"initial":{"counter":0},"initial":{"counter":1},"expected":{"counter":1},"actors":[]}"#,
+    ];
+    for document in cases {
+        write(&project.path().join("model.json"),document);
+        let output=invoke(project.path(),&["--model-check","--model","model.json"]);
+        assert_eq!(code(&output),2);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate JSON property"),
+            "unexpected validation error: {}",String::from_utf8_lossy(&output.stderr));
+    }
+}
