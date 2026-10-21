@@ -57,7 +57,7 @@ pub fn fuzz(root: &Path, cfg: &toml::Value, seed: u64, cases: usize, timeout: f6
         };
         if let Some(reason)=classify(&cmd,root,timeout,&case)? {
             for _ in 0..2 {
-                if classify(&cmd,root,timeout,&case)?.as_deref()!=Some(&reason) {
+                if classify(&cmd,root,timeout,&case)?.as_deref()!=Some(reason.as_str()) {
                     eprintln!("FUZZ FLAKY seed={seed} iteration={iteration} reason={reason}");
                     return Ok(2);
                 }
