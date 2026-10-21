@@ -1,5 +1,6 @@
 pub mod effects;
 pub mod race_evidence;
+mod race_offline;
 mod runtime;
 
 use std::ffi::OsString;
