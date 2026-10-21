@@ -135,8 +135,29 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     } else {
         PathBuf::from(first)
     };
-    if program.canonicalize().ok().as_ref() == Some(&wrapper) {
-        return Err("test executable resolves to this wrapper (recursion refused)".into());
+    // Bare executable names resolve through PATH, including shell launchers.
+    // Otherwise --fuzz [fuzz].command=["oreslang-test"] can recursively invoke
+    // this CLI until host process/file budgets are exhausted.
+    let candidate = if program.components().count() == 1 {
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|directory| directory.join(&program))
+                .find(|path| path.is_file())
+        })
+    } else {
+        Some(program.clone())
+    };
+    let forbidden = [
+        wrapper,
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang-test"),
+    ];
+    if candidate.as_ref().and_then(|path| path.canonicalize().ok())
+        .is_some_and(|actual| forbidden.iter().any(|path| {
+            path.canonicalize().ok().as_ref() == Some(&actual)
+        }))
+    {
+        return Err("test executable resolves to a Rust CLI wrapper (recursion refused)".into());
     }
     let mut c = Command::new(program);
     c.args(&cmd[1..]).current_dir(root).env_clear();
@@ -240,6 +261,10 @@ fn test_receipt(output: &str) -> Result<Counts, String> {
         total: fields["total"], passed: fields["passed"],
         failed: fields["failed"], skipped: fields["skipped"], filtered: fields["filtered"],
     };
+    if c.total == 0 {
+        // A missing test discovery path must not be reported as green.
+        return Err("machine receipt executed zero tests".into());
+    }
     if c.passed.checked_add(c.failed).and_then(|n| n.checked_add(c.skipped)) != Some(c.total) {
         return Err("inconsistent test counts".into());
     }
@@ -560,6 +585,7 @@ mod tests {
         assert!(test_receipt(&format!("{good}{good}")).is_err());
         assert!(test_receipt("ORES_TEST|SUMMARY|total=0|passed=0|passed=0|failed=0|skipped=0|filtered=0").is_err());
         assert!(test_receipt("ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0").is_err());
+        assert!(test_receipt("ORES_TEST|SUMMARY|total=0|passed=0|failed=0|skipped=0|filtered=0").is_err());
         assert!(test_receipt("ORES_TEST|PASS|one\nORES_TEST|SUMMARY|total=2|passed=1|failed=0|skipped=0|filtered=0").is_err());
     }
 }
