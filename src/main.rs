@@ -83,7 +83,7 @@ fn check(root:&Path,cfg:&toml::Value,source:Option<&str>,types:bool,timeout:f64)
         files.push(selected);
     } else if selected.is_dir() {
         for entry in WalkDir::new(&selected).follow_links(false).into_iter()
-            .filter_entry(|e|![".git","target",".oreslang-test"].iter().any(|s|e.file_name()==*s))
+            .filter_entry(|e|![".git","target",".oreslang-test"].iter().any(|s|e.file_name().to_string_lossy()==*s))
         {
             let entry=entry.map_err(|e|e.to_string())?;
             if entry.file_type().is_symlink(){return Err("source tree contains symbolic link".into());}
@@ -273,7 +273,7 @@ fn run(o:Opt)->Result<u8>{
     let cfg:toml::Value=if manifest.exists(){
         let raw=std::fs::read_to_string(manifest).map_err(|e|e.to_string())?;
         toml::from_str(&raw).map_err(|e|e.to_string())?
-    }else{toml::from_str("").map_err(|e|e.to_string())?};
+    }else{toml::Value::Table(toml::map::Map::new())};
     if o.check||o.check_types {return check(&root,&cfg,o.source.as_deref(),o.check_types,o.timeout);}
     if o.schedule_fuzz||o.replay.is_some() {
         return schedule::schedule(&root,&cfg,o.seed,o.iterations,o.timeout,o.replay.as_deref(),o.trace_output.as_deref());
