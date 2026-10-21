@@ -285,8 +285,9 @@ fn run(o:Opt)->Result<u8>{
     if !root.is_dir(){return Err("project root must be directory".into());}
     let manifest=root.join("oreslang-test.toml");
     let cfg:toml::Value=if manifest.exists(){
-        let raw=std::fs::read_to_string(manifest).map_err(|e|e.to_string())?;
-        toml::from_str(&raw).map_err(|e|e.to_string())?
+        let raw=common::bounded_read(&manifest,1_048_576)?;
+        let raw=std::str::from_utf8(&raw).map_err(|e|e.to_string())?;
+        toml::from_str(raw).map_err(|e|e.to_string())?
     }else{toml::Value::Table(toml::map::Map::new())};
     if o.check||o.check_types {return check(&root,&cfg,o.source.as_deref(),o.check_types,o.timeout);}
     if o.effects {return effects_cli::run(&root,&cfg,&o.file,o.effects_strict);}
