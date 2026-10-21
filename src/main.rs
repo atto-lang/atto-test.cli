@@ -129,6 +129,9 @@ fn check(root:&Path,cfg:&toml::Value,source:Option<&str>,types:bool,timeout:f64)
     // A binary which cannot emit a source-bound no-codegen receipt is inconclusive.
     let cmd=table_command(cfg,"check")
         .map_err(|_|"no [check].command configured; refusing syntax PASS without the canonical compiler parser".to_string())?;
+    let trusted_sha = std::env::var("ORESLANG_TRUSTED_CHECK_COMPILER_SHA256")
+        .map_err(|_| "missing independent ORESLANG_TRUSTED_CHECK_COMPILER_SHA256 pin; no compiler PASS allowed".to_string())?;
+    digest_trusted_compiler(&cmd, &trusted_sha)?;
     let selected=safe_path(root,source.unwrap_or("."))?;
     if !selected.exists(){return Err("syntax-check source does not exist".into());}
     let mut files=Vec::new();
@@ -167,6 +170,9 @@ fn check(root:&Path,cfg:&toml::Value,source:Option<&str>,types:bool,timeout:f64)
         if out.stdout.lines().filter(|line|*line==receipt).count()!=1 {
             return Err(format!("{} did not produce source-bound {phase} receipt; cannot assert check-only success",file.display()));
         }
+        // Detect compiler replacement after invocation; the binary SHA is
+        // independently controlled by the trusted caller, never by the project.
+        digest_trusted_compiler(&cmd, &trusted_sha)?;
     }
     println!("CHECK PASS: {} .ores sources ({}) using compiler frontend, no codegen requested",files.len(),
         if types{"typecheck"}else{"syntax"});
