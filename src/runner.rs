@@ -178,7 +178,7 @@ mod runner_security_tests {
             .expect("execution should not fail")
             .expect("child should exit");
         assert_eq!(result.code, 17);
-        assert_eq!(result.stdout, "ok\\n");
+        assert_eq!(result.stdout, "ok\n");
     }
 
     #[cfg(target_os="linux")]
