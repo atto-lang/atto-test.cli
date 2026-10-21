@@ -1,5 +1,6 @@
 pub mod effects;
 pub mod race_evidence;
+mod runtime;
 
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -267,7 +268,7 @@ fn status(mut command: Command) -> i32 {
     }
 }
 
-/// Public process boundary. Legacy native/race/fuzz engines remain migration debt.
+/// Rust-only public launcher. No legacy Python delegation.
 pub fn run(mut args: Vec<OsString>, core_launcher: bool) -> i32 {
     if core_launcher {
         if args.first().is_some_and(|arg| arg == "test") {
@@ -303,7 +304,7 @@ pub fn run(mut args: Vec<OsString>, core_launcher: bool) -> i32 {
         }
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("usage: oreslang test [--root DIR] [--effects [--effects-strict] [--file SOURCE]...]\n       oreslang test [--fuzz | --race [--logical]] [legacy runner options]\n\n--effects: bounded advisory direct-syntax hints. Effects/call targets remain unknown; no compiler, catch coverage or actor-runtime proof.\nExit 0: advisory scan completed; 1: strict warnings; 2: invalid/inconclusive.\nNative/race/fuzz modes currently delegate to the legacy runner.");
+        println!("usage: oreslang test [--root DIR] [--effects [--effects-strict] [--file SOURCE]...]\n       oreslang test --fuzz [--seed N] [--cases N] [--timeout SECONDS]\n       oreslang test --race [options] (inconclusive until Rust analyzer/host runtime admission)\n\n--effects: bounded advisory direct-syntax hints.\n--fuzz: Rust-native bounded seeded byte mutation, no Python subprocess.\nNative tests: Rust-owned ORES_TEST machine receipts; ORESLANG_BIN identifies the Oreslang compiler.\nExit 0: observed pass; 1: detected failure; 2: unsupported/inconclusive.\nNo Python compatibility launcher is invoked.");
         return 0;
     }
     if args.iter().any(|a| {
@@ -323,10 +324,5 @@ pub fn run(mut args: Vec<OsString>, core_launcher: bool) -> i32 {
             }
         }
     }
-    let legacy = std::env::var_os("ORESLANG_TEST_LEGACY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/legacy-oreslang-test"));
-    let mut command = Command::new(legacy);
-    command.args(args);
-    return status(command);
+    return runtime::run(&args);
 }
