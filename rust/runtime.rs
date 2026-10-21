@@ -289,12 +289,35 @@ impl Rng {
         (self.next() % upper as u64) as usize
     }
 }
+/// Reject path escapes and symlinked ancestors before accessing project-owned
+/// input/output. This is a preflight boundary check, not an atomic openat2
+/// guarantee against a concurrently malicious local filesystem writer.
+fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(name);
+    if relative.as_os_str().is_empty() || relative.is_absolute()
+        || relative.components().any(|c| !matches!(c,
+            std::path::Component::Normal(_) | std::path::Component::CurDir))
+    {
+        return Err("unsafe project-relative path".into());
+    }
+    let mut result = root.to_path_buf();
+    for part in relative.components() {
+        result.push(part);
+        match fs::symlink_metadata(&result) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!("symlinked project path refused: {}", result.display()));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(result)
+}
+
 fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec<u8>>, String> {
     let name = params.get("corpus").map(|v| v.as_str().ok_or("fuzz.corpus must be a relative path")).transpose()?.unwrap_or("tests/corpus");
-    if name.is_empty() || Path::new(name).is_absolute() || Path::new(name).components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return Err("fuzz corpus must stay under project root".into());
-    }
-    let path = root.join(name);
+    let path = checked_project_path(root, name)?;
     let mut cases = vec![vec![], vec![0], vec![255]];
     match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cases),
@@ -314,7 +337,10 @@ fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec
     names.sort();
     let mut consumed = 0usize;
     for path in names {
-        let meta = path.metadata().map_err(|e| e.to_string())?;
+        let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            return Err("corpus changed type or became a symlink".into());
+        }
         if meta.len() > max_bytes as u64 { return Err("corpus case exceeds max_bytes".into()); }
         consumed = consumed.checked_add(meta.len() as usize).ok_or("corpus byte budget overflow")?;
         if consumed > MAX_CORPUS_BYTES { return Err("corpus byte budget exceeded".into()); }
@@ -335,8 +361,10 @@ fn candidate(cmd: &[String], root: &Path, timeout: Duration, bytes: &[u8]) -> Re
 }
 
 fn write_failure(root: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
-    let folder = root.join(".oreslang-test/failures");
+    let folder = checked_project_path(root, ".oreslang-test/failures")?;
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    // A preexisting symlink at either parent is never an acceptable target.
+    checked_project_path(root, ".oreslang-test/failures")?;
     // Deterministic identity; do NOT claim FNV is a cryptographic digest.
     let h = bytes.iter().fold(0xcbf29ce484222325u64, |h, x| (h ^ u64::from(*x)).wrapping_mul(0x100000001b3));
     let path = folder.join(format!("fuzz-{h:016x}-{}.bin", bytes.len()));
