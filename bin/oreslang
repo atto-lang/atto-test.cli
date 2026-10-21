@@ -1,21 +1,16 @@
-#!/usr/bin/env python3
-"""Compatibility dispatcher: oreslang test without changing the core launcher."""
-import os
-from pathlib import Path
-import sys
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-
-if len(sys.argv) >= 2 and sys.argv[1] == "test":
-    from oreslang_test.cli import main
-    sys.exit(main(sys.argv[2:]))
-
-core = os.environ.get("ORESLANG_BIN", "oreslang-core")
-if Path(core).resolve() == Path(__file__).resolve():
-    print("ORESLANG_BIN resolves to wrapper; recursion refused", file=sys.stderr)
-    sys.exit(2)
-try:
-    os.execvp(core, [core, *sys.argv[1:]])
-except OSError as exc:
-    print(f"cannot delegate to Oreslang core: {exc}", file=sys.stderr)
-    sys.exit(2)
+#!/bin/sh
+# Preserve the "oreslang test" command without depending on Python.
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ $# -gt 0 ] && [ "$1" = "test" ]; then
+    shift
+    exec "$here/oreslang-test" "$@"
+fi
+core=${ORESLANG_BIN:-oreslang-core}
+self="$here/oreslang"
+resolved=$(command -v "$core" 2>/dev/null || true)
+if [ "$resolved" = "$self" ] || [ "$core" = "$self" ]; then
+    echo "ORESLANG_BIN points to the test wrapper" >&2
+    exit 2
+fi
+exec "$core" "$@"
