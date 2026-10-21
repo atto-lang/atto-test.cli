@@ -77,7 +77,9 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
             None => std::thread::sleep(Duration::from_millis(10)),
         }
     };
-    if code.is_none() {
+    if code.is_none() && child.try_wait().map_err(|e| e.to_string())?.is_none() {
+        // try_wait observed an unreaped child. Its PID remains reserved until
+        // the wait below, even if it exits between this check and the signal.
         kill_group(child.id());
         let _ = child.kill();
     }
@@ -89,8 +91,8 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
         std::thread::sleep(Duration::from_millis(10));
     }
     if !(out.is_finished() && err.is_finished()) {
-        kill_group(child.id());
-        let _ = child.kill();
+        // The direct child has already been reaped. Do NOT signal its
+        // numeric PID/PGID: it may now identify an unrelated process.
         let cutoff = Instant::now() + Duration::from_secs(1);
         while !(out.is_finished() && err.is_finished()) && Instant::now() < cutoff {
             std::thread::sleep(Duration::from_millis(10));
