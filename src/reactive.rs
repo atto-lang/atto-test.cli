@@ -3,7 +3,12 @@ use serde_json::Value;
 use std::collections::{HashMap,HashSet};
 use crate::common::Result;
 #[derive(Default)]
-pub struct Report {pub events:usize,pub subscriptions:usize,pub next:usize,pub terminals:usize,pub active:usize}
+pub struct Report {
+    // Exposed to future telemetry consumers; not read by the binary CLI yet.
+    #[allow(dead_code)]
+    pub events:usize,
+    pub subscriptions:usize,pub next:usize,pub terminals:usize,pub active:usize
+}
 struct Subscriber {source:String,mode:String,requested:u32,terminal:bool,disposed:bool}
 pub fn analyze(events:&[Value])->Result<Report> {
     if events.len()>100_000{return Err("reactive trace too large".into());}
