@@ -71,7 +71,25 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
         let _ = child.kill();
     }
     let _ = child.wait();
-    // Reap readers; process-group kill handles children keeping pipes open.
+    // A child may exit while descendants retain its stdout/stderr pipes.
+    // Never block indefinitely joining a reader in that situation.
+    let cutoff = Instant::now() + Duration::from_secs(1);
+    while !(out.is_finished() && err.is_finished()) && Instant::now() < cutoff {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !(out.is_finished() && err.is_finished()) {
+        kill_group(child.id());
+        let _ = child.kill();
+        let cutoff = Instant::now() + Duration::from_secs(1);
+        while !(out.is_finished() && err.is_finished()) && Instant::now() < cutoff {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !(out.is_finished() && err.is_finished()) {
+            // Dropping join handles detaches them instead of hanging the CLI.
+            return Err("test process descendants outlived the runner".into());
+        }
+        return Err("test process descendants held output pipes open".into());
+    }
     let stdout = out.join().map_err(|_| "stdout reader panicked")??;
     let stderr = err.join().map_err(|_| "stderr reader panicked")??;
     if output_limit.load(Ordering::SeqCst) { return Err("test output exceeds 4 MB".into()); }
