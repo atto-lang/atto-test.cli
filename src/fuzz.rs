@@ -14,40 +14,71 @@ fn failure(output: Option<runner::Outcome>) -> Option<String> {
     }
 }
 fn classify(cmd: &[String], root: &Path, timeout: f64, data: &[u8]) -> Result<Option<String>> {
-    Ok(failure(runner::run(cmd,root,timeout,Some(data),&[])?))
+    Ok(failure(runner::run(cmd, root, timeout, Some(data), &[])?))
 }
 pub fn fuzz(root: &Path, cfg: &toml::Value, seed: u64, cases: usize, timeout: f64) -> Result<u8> {
-    if !(1..=1_000_000).contains(&cases) { return Err("--cases must be 1..1000000".into()); }
-    let cmd=table_command(cfg,"fuzz")?;
-    let max=cfg.get("fuzz").and_then(|v|v.get("max_bytes")).and_then(|v|v.as_integer()).unwrap_or(256);
-    if !(1..=65536).contains(&max) {return Err("fuzz.max_bytes must be 1..65536".into());}
-    let max=max as usize;
-    let corpus_name=cfg.get("fuzz").and_then(|v|v.get("corpus")).and_then(|v|v.as_str()).unwrap_or("tests/corpus");
-    let dir=safe_path(root,corpus_name)?;
-    let mut corpus:Vec<Vec<u8>>=vec![vec![],vec![0],vec![255]];
+    if !(1..=1_000_000).contains(&cases) {
+        return Err("--cases must be 1..1000000".into());
+    }
+    let cmd = table_command(cfg, "fuzz")?;
+    let max = cfg
+        .get("fuzz")
+        .and_then(|v| v.get("max_bytes"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(256);
+    if !(1..=65536).contains(&max) {
+        return Err("fuzz.max_bytes must be 1..65536".into());
+    }
+    let max = max as usize;
+    let corpus_name = cfg
+        .get("fuzz")
+        .and_then(|v| v.get("corpus"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("tests/corpus");
+    let dir = safe_path(root, corpus_name)?;
+    let mut corpus: Vec<Vec<u8>> = vec![vec![], vec![0], vec![255]];
     if dir.exists() {
-        if !dir.is_dir() {return Err("fuzz corpus is not a directory".into());}
-        let mut paths=Vec::new();
-        for entry in std::fs::read_dir(dir).map_err(|e|e.to_string())? {
-            if paths.len() >= 4096 { return Err("fuzz corpus exceeds 4096 entries".into()); }
-            paths.push(entry.map_err(|e|e.to_string())?.path());
+        if !dir.is_dir() {
+            return Err("fuzz corpus is not a directory".into());
+        }
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+            if paths.len() >= 4096 {
+                return Err("fuzz corpus exceeds 4096 entries".into());
+            }
+            paths.push(entry.map_err(|e| e.to_string())?.path());
         }
         paths.sort();
-        let mut total_bytes=0usize;
+        let mut total_bytes = 0usize;
         for path in paths {
-            if path.symlink_metadata().map_err(|e|e.to_string())?.file_type().is_symlink() {
+            if path
+                .symlink_metadata()
+                .map_err(|e| e.to_string())?
+                .file_type()
+                .is_symlink()
+            {
                 return Err("fuzz corpus may not contain symlinks".into());
             }
             let metadata = path.symlink_metadata().map_err(|e| e.to_string())?;
             if !metadata.file_type().is_file() {
-                return Err(format!("fuzz corpus entry is not a regular file: {}", path.display()));
+                return Err(format!(
+                    "fuzz corpus entry is not a regular file: {}",
+                    path.display()
+                ));
             }
             if metadata.len() > max as u64 {
-                return Err(format!("fuzz corpus seed exceeds max_bytes: {}", path.display()));
+                return Err(format!(
+                    "fuzz corpus seed exceeds max_bytes: {}",
+                    path.display()
+                ));
             }
-            let input=bounded_read(&path,max)?;
-            total_bytes=total_bytes.checked_add(input.len()).ok_or("corpus byte-size overflow")?;
-            if total_bytes > 16_777_216 { return Err("fuzz corpus exceeds 16 MiB".into()); }
+            let input = bounded_read(&path, max)?;
+            total_bytes = total_bytes
+                .checked_add(input.len())
+                .ok_or("corpus byte-size overflow")?;
+            if total_bytes > 16_777_216 {
+                return Err("fuzz corpus exceeds 16 MiB".into());
+            }
             corpus.push(input);
         }
     }
