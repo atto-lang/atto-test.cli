@@ -41,6 +41,11 @@ pub fn analyze(events:&[Value])->Result<Report> {
         let state=subs.get_mut(id).ok_or("reactive event before subscribe")?;
         if op=="dispose"{
             if state.disposed || !state.terminal{return Err("duplicate disposal or no terminal cause".into());}
+            // Disposal is a lifecycle barrier: release this source claim so a
+            // later sequential subscriber can acquire a hot_single source.
+            // A missing claim is inconsistent evidence and must fail closed.
+            let owners=sources.get_mut(&state.source).ok_or("missing source ownership record")?;
+            if !owners.remove(id){return Err("missing subscriber ownership claim".into());}
             state.disposed=true;continue;
         }
         if state.terminal{return Err("event after terminal".into());}
@@ -81,4 +86,34 @@ mod tests {
         ];
         assert!(analyze(&events).is_err());
     }
+
+    #[test]
+    fn hot_single_rejects_overlapping_subscribers() {
+        let events=vec![
+            serde_json::json!({"op":"subscribe","subscription":"first","source":"hot","mode":"hot_single"}),
+            serde_json::json!({"op":"subscribe","subscription":"second","source":"hot","mode":"hot_single"}),
+        ];
+        assert!(analyze(&events).is_err());
+    }
+
+    #[test]
+    fn hot_single_allows_sequential_subscription_after_disposal() {
+        let events=vec![
+            serde_json::json!({"op":"subscribe","subscription":"first","source":"hot","mode":"hot_single"}),
+            serde_json::json!({"op":"complete","subscription":"first"}),
+            serde_json::json!({"op":"dispose","subscription":"first"}),
+            serde_json::json!({"op":"subscribe","subscription":"second","source":"hot","mode":"hot_single"}),
+            serde_json::json!({"op":"request","subscription":"second","count":1}),
+            serde_json::json!({"op":"next","subscription":"second","payload":42}),
+            serde_json::json!({"op":"complete","subscription":"second"}),
+            serde_json::json!({"op":"dispose","subscription":"second"}),
+        ];
+        let report=analyze(&events).expect("sequential hot subscribers must be valid");
+        assert_eq!(report.events,events.len());
+        assert_eq!(report.subscriptions,2);
+        assert_eq!(report.next,1);
+        assert_eq!(report.terminals,2);
+        assert_eq!(report.active,0);
+    }
+
 }
