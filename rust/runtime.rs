@@ -18,6 +18,7 @@ const MAX_CORPUS_BYTES: usize = 4 * 1024 * 1024;
 struct Settings {
     root: PathBuf,
     fuzz: bool,
+    security_fuzz: bool,
     race: bool,
     trace: Option<String>,
     logical: bool,
@@ -29,7 +30,7 @@ struct Settings {
 
 fn parse(args: &[OsString]) -> Result<Settings, String> {
     let mut out = Settings {
-        root: PathBuf::from("."), fuzz: false, race: false,
+        root: PathBuf::from("."), fuzz: false, security_fuzz: false, race: false,
         trace: None, logical: false, model: false,
         seed: 1, cases: 100, timeout: Duration::from_secs(5),
     };
@@ -41,13 +42,20 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
             "--fuzz" if inline.is_none() => out.fuzz = true,
             "--race" if inline.is_none() => out.race = true,
             "--logical" if inline.is_none() => out.logical = true,
-            "--root" | "--seed" | "--cases" | "--timeout" | "--trace" | "--model" | "--max-schedules" => {
+            "--root" | "--seed" | "--cases" | "--timeout" | "--fuzz-profile" | "--trace" | "--model" | "--max-schedules" => {
                 let value = if let Some(v) = inline { v.to_owned() } else {
                     i += 1;
                     args.get(i).and_then(|a| a.to_str()).ok_or_else(|| format!("{key} needs a value"))?.to_owned()
                 };
                 match key {
                     "--root" => out.root = PathBuf::from(value),
+                    "--fuzz-profile" => {
+                        out.security_fuzz = match value.as_str() {
+                            "basic" => false,
+                            "security" => true,
+                            _ => return Err("fuzz profile must be basic or security".into()),
+                        };
+                    },
                     "--seed" => out.seed = value.parse::<u64>().map_err(|_| "invalid --seed")?,
                     "--cases" => out.cases = value.parse::<usize>().map_err(|_| "invalid --cases")?,
                     "--timeout" => {
@@ -69,6 +77,9 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
         i += 1;
     }
     if out.cases == 0 || out.cases > MAX_CASES { return Err("cases must be 1..1000000".into()); }
+    if out.security_fuzz && !out.fuzz {
+        return Err("--fuzz-profile security requires --fuzz".into());
+    }
     if out.fuzz && (out.race || out.trace.is_some() || out.logical || out.model) {
         return Err("fuzz and race modes are exclusive".into());
     }
@@ -389,6 +400,28 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
     };
     if !(1..=65_536).contains(&max_bytes) { return Err("fuzz.max_bytes must be 1..65536".into()); }
     let mut samples = corpus(root, params, max_bytes as usize)?;
+    if settings.security_fuzz {
+        // Adversarial inputs are *stimuli*, never standalone proof of a bug.
+        // Put these before the ordinary corpus so a bounded --cases also
+        // exercises the security profile with a deterministic order.
+        let mut security = vec![
+            b"../".repeat(10), b"..%2f..%2f".to_vec(),
+            b"%00%00".to_vec(), vec![0xff, 0xfe, 0xc0, 0xaf],
+            b"\\u0000\\uD800".to_vec(),
+            b"<script>alert(1)</script>".to_vec(),
+            b"' OR 1=1 --".to_vec(), b"../../etc/passwd".to_vec(),
+            vec![b'A'; max_bytes as usize],
+            vec![b'['; max_bytes as usize],
+        ];
+        for sample in &mut security {
+            sample.truncate(max_bytes as usize);
+        }
+        security.retain(|s| !s.is_empty());
+        security.extend(samples);
+        let mut seen = BTreeSet::new();
+        security.retain(|sample| seen.insert(sample.clone()));
+        samples = security;
+    }
     let mut rng = Rng::new(settings.seed);
     for i in 0..settings.cases {
         let case = if i < samples.len() { samples[i].clone() } else {
