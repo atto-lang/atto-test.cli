@@ -160,3 +160,35 @@ fn offline_deadlock_graphs_report_cycles_and_refuse_no_lock_evidence() {
     assert_eq!(cli(root.path(), &["--deadlock"]).status.code(), Some(2));
     assert_eq!(cli(root.path(), &["--race","--deadlock","--trace","waiting.jsonl"]).status.code(),Some(2));
 }
+
+#[cfg(unix)]
+#[test]
+fn machine_summary_with_no_executed_tests_cannot_pass() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("tests")).unwrap();
+    fs::write(root.path().join("tests/test_noop.ores"), "").unwrap();
+    let compiler = guest(root.path(), "zero-test-compiler",
+        "#!/bin/sh\nprintf 'ORES_TEST|SUMMARY|total=0|passed=0|failed=0|skipped=0|filtered=0\\n'\n");
+    let status = Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
+        .env("ORESLANG_BIN", compiler)
+        .arg("--root").arg(root.path()).output().unwrap();
+    assert_eq!(status.status.code(), Some(1), "{status:?}");
+    assert!(String::from_utf8_lossy(&status.stderr).contains("zero tests"));
+}
+
+#[cfg(unix)]
+#[test]
+fn bare_path_alias_to_own_cli_cannot_invoke_recursively() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    symlink(env!("CARGO_BIN_EXE_oreslang-test"), root.path().join("loop-exec")).unwrap();
+    fs::write(root.path().join("oreslang-test.toml"),
+        "[fuzz]\ncommand = ['loop-exec']\nmax_bytes = 16\n").unwrap();
+    let paths = std::env::join_paths([root.path(),
+        std::path::Path::new("/usr/bin"), std::path::Path::new("/bin")]).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
+        .env("PATH", paths).arg("--root").arg(root.path())
+        .args(["--fuzz", "--cases", "1"]).output().unwrap();
+    assert_eq!(result.status.code(), Some(2), "{result:?}");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("recursion refused"));
+}
