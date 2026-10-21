@@ -139,3 +139,33 @@ pub fn table_command(v: &toml::Value, section: &str) -> Result<Vec<String>> {
     let cmd: Option<Vec<_>> = a.iter().map(|x| x.as_str().filter(|s| !s.is_empty()).map(str::to_owned)).collect();
     cmd.filter(|v| !v.is_empty()).ok_or_else(|| format!("[{section}].command requires nonempty argv array"))
 }
+
+#[cfg(test)]
+mod strict_json_regression {
+    use super::*;
+
+    fn parse(line: &str) -> Result<Value> {
+        let mut decoder = serde_json::Deserializer::from_str(line);
+        parse_unique_object(&mut decoder)
+    }
+
+    #[test]
+    fn nested_and_unicode_equivalent_duplicate_properties_are_rejected() {
+        for source in [
+            r#"{"op":"begin","meta":{"nested":[{"x":1,"x":2}]}}"#,
+            r#"{"op":"begin","meta":[{"a":{"key":0,"key":1}}]}"#,
+            r#"{"op":"begin","name":"first","\\u006eame":"second"}"#,
+        ] {
+            assert!(parse(source).is_err(), "accepted duplicate keys: {source}");
+        }
+    }
+
+    #[test]
+    fn nested_distinct_keys_and_json_scalars_remain_supported() {
+        let record = parse(r#"{"op":"begin","meta":[{"a":1,"b":2.5},null,true,false,"ok"]}"#)
+            .expect("valid nested JSON");
+        assert_eq!(record["meta"][0]["a"], 1);
+        assert_eq!(record["meta"][0]["b"], 2.5);
+        assert!(parse(r#"[{"x":1}]"#).is_err(), "trace top-level must be an object");
+    }
+}
