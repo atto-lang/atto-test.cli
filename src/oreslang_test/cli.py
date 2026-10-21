@@ -212,7 +212,7 @@ def fuzz(root, config, seed, cases, timeout, inherit_env=False, profile="general
         corpus.extend(payload[:max_bytes] for payload in (
             b"../../etc/passwd", b"..\\..\\windows\\system.ini",
             b"%00", b"%2e%2e%2f", b"' OR '1'='1",
-            b"<script>alert(1)</script>", b"\\xff\\xfe",
+            b"<script>alert(1)</script>", bytes((255, 254)),
             b"\x00" * 256, b"A" * 4096, b'{"x":' + b"[" * 128 + b"0" + b"]" * 128 + b"}"
         ))
     if corpus_path.exists():
