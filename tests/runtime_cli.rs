@@ -98,3 +98,29 @@ fn fuzz_timeouts_are_inconclusive_and_do_not_report_pass() {
     assert_eq!(result.status.code(), Some(2));
     assert!(!String::from_utf8_lossy(&result.stdout).contains("FUZZ PASS"));
 }
+
+#[cfg(unix)]
+#[test]
+fn symlinked_corpus_ancestors_and_output_directories_are_rejected() {
+    use std::os::unix::fs::symlink;
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("seeds")).unwrap();
+    let property = guest(root.path(), "safe-property", "#!/bin/sh\nexit 0\n");
+    fs::write(root.path().join("oreslang-test.toml"),
+        format!("[fuzz]\ncommand = ['{}']\ncorpus = 'link/subdir'\nmax_bytes = 32\n", property.display())).unwrap();
+    symlink(outside.path(), root.path().join("link")).unwrap();
+    let traversal = cli(root.path(), &["--fuzz", "--cases", "1"]);
+    assert_eq!(traversal.status.code(), Some(2), "{traversal:?}");
+    fs::remove_file(root.path().join("link")).unwrap();
+    fs::write(root.path().join("oreslang-test.toml"),
+        format!("[fuzz]\ncommand = ['{}']\ncorpus = 'seeds'\nmax_bytes = 32\n", property.display())).unwrap();
+    let failing = guest(root.path(), "failing-property", "#!/bin/sh\nexit 7\n");
+    fs::write(root.path().join("oreslang-test.toml"),
+        format!("[fuzz]\ncommand = ['{}']\ncorpus = 'seeds'\nmax_bytes = 32\n", failing.display())).unwrap();
+    symlink(outside.path(), root.path().join(".oreslang-test")).unwrap();
+    let unsafe_output = cli(root.path(), &["--fuzz", "--cases", "1"]);
+    assert_eq!(unsafe_output.status.code(), Some(2), "{unsafe_output:?}");
+    assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
+}
+
