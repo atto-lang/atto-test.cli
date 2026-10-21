@@ -111,3 +111,7 @@ command = ["/path/to/oreslang-compiler", "test", "tests/concurrency.ores"]
 The runner applies per-stream output caps, timeouts and process-group termination, rejects symlinked project-relative artifacts, bounds model/trace/corpus sizes, and does not invoke a shell internally. Unit and fixture tests run with `cargo test --all-targets`. `scripts/ci-verify-concurrency-p0.sh` requires an exact Git source tree SHA; previous Python CI checks have been replaced with Rust tests.
 
 Host-side analyzers, reference models and receipt verification must not be described as complete LLVM or GraalVM runtime instrumentation. Full guest memory hooks, controlled scheduler execution, native-image parity and cross-backend conformance tests remain integration milestones.
+
+## Engineering policy: Rust-only host tooling
+
+Python is prohibited in this repository and across the `ores-truffle-oreslang` organization for host tooling, scripts, tests, generators, CI helpers, analyzers, and automation. Do not add `.py`, `.pyi`, `.ipynb`, Python dependency manifests, `python`/`python3` execution, `pip`, `pytest`, `poetry`, `uv`, or `actions/setup-python`. If equivalent functionality exists in Python elsewhere in the organization, migrate it to Rust while preserving semantics, security properties, fixtures, and test coverage. Rust replacements must be covered by `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` as appropriate.
