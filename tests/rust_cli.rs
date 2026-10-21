@@ -62,7 +62,7 @@ fn deadlock_lock_order_cycle_is_failure(){
         r#"{"op":"unlock","task":"b","name":"y"}"#,
     ];
     let mut rows=vec![r#"{"op":"begin","version":1,"run_id":"fixture","backend":"test"}"#.to_owned()];
-    rows.extend(ops.into_iter().map(str::to_owned));
+    rows.extend(ops.iter().map(|s|s.to_string()));
     rows.push(format!(r#"{{"op":"end","run_id":"fixture","events":{}}}"#,ops.len()));
     write(&dir.path().join("events.jsonl"),&(rows.join("\n")+"\n"));
     assert_eq!(code(&invoke(dir.path(),&["--deadlock","--trace","events.jsonl"])),1);
