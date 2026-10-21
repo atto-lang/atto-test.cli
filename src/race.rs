@@ -62,7 +62,7 @@ fn analyze_records(records: &[Value], backend: String) -> Result<Report> {
             "lock" => {
                 let key = field(event,"name")?.to_owned();
                 let entry = locks.entry(key).or_insert_with(|| (None,0,Clock::new()));
-                if entry.0.as_deref().is_some_and(|o|o!=task) || entry.1 == u32::MAX { return Err("lock already held by other task or reentrancy limit".into()); }
+                if entry.0.as_deref().is_some_and(|o|o != task.as_str()) || entry.1 == u32::MAX { return Err("lock already held by other task or reentrancy limit".into()); }
                 if entry.0.is_none() { merge(&mut clock,&entry.2); entry.0 = Some(task.clone()); entry.1 = 1; }
                 else { entry.1 += 1; }
             },
