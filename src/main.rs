@@ -79,6 +79,51 @@ fn nonce()->String {
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b|format!("{b:02x}")).collect()
 }
+// Strict check-only claims require an independently pinned compiler binary;
+// a project manifest may choose source files, but cannot nominate any script
+// as a trusted compiler by printing a matching receipt.
+fn digest_trusted_compiler(command: &[String], expected: &str) -> Result<String> {
+    if command.len() != 1 {
+        return Err("[check].command must contain only an absolute compiler executable; no shell or wrapper argv".into());
+    }
+    let path = Path::new(&command[0]);
+    if !path.is_absolute() {
+        return Err("trusted check compiler must be an absolute executable path".into());
+    }
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("ORESLANG_TRUSTED_CHECK_COMPILER_SHA256 must be a 64-character SHA-256 hex digest".into());
+    }
+    let before = path.symlink_metadata().map_err(|e| e.to_string())?;
+    if !before.is_file() || before.file_type().is_symlink() || before.len() > (1u64 << 30) {
+        return Err("trusted check compiler must be a bounded regular file, not a symlink".into());
+    }
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let actual = file.metadata().map_err(|e| e.to_string())?;
+    if !actual.is_file() || actual.len() != before.len() {
+        return Err("trusted check compiler changed during validation".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != actual.dev() || before.ino() != actual.ino() {
+            return Err("trusted check compiler was replaced during validation".into());
+        }
+    }
+    let mut hasher = Sha256::new();
+    let mut block = [0u8; 65536];
+    use std::io::Read;
+    loop {
+        let n = file.read(&mut block).map_err(|e| e.to_string())?;
+        if n == 0 { break; }
+        hasher.update(&block[..n]);
+    }
+    let actual_sha = format!("{:x}", hasher.finalize());
+    if actual_sha != expected.to_ascii_lowercase() {
+        return Err("trusted check compiler SHA-256 does not match independent pin".into());
+    }
+    Ok(actual_sha)
+}
+
 fn check(root:&Path,cfg:&toml::Value,source:Option<&str>,types:bool,timeout:f64)->Result<u8>{
     // No separate Rust parser: compiler frontend is the only syntax authority.
     // A binary which cannot emit a source-bound no-codegen receipt is inconclusive.
