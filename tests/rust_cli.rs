@@ -85,8 +85,7 @@ echo "ORES_CONCURRENCY|RUN|seed=7|events=2|deadlocks=0|schedule=perturbed|race_c
 fn rejects_orphan_output_pipe_and_forged_clean_native_summary(){
     let dir=tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("tests")).unwrap();
-    write(&dir.path().join("tests/test_orphan.ores"),"// fixture");
-    write(&dir.path().join("run.sh"),r#"#!/bin/sh
+    write(&dir.path().join("tests/test_orphan.ores"),r#"#!/bin/sh
 sleep 4 &
 echo "ORES_TEST|PASS|suite/case|"
 echo "ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0"
