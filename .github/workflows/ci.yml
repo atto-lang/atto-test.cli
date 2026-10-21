@@ -19,14 +19,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Rust formatting
-        run: cargo fmt --all --check
-      - name: Rust lints
-        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Rust unit and integration tests
         run: cargo test --locked
       - name: Build both Rust entrypoints
         run: cargo build --locked --bins
+      - name: Rust lints
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Rust formatting
+        run: cargo fmt --all --check
       - name: Offline observed ordered trace
         run: cargo run --locked --bin oreslang -- test --root . --race --trace tests/traces/ordered.jsonl
       - name: Observed data race must exit 1
