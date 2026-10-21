@@ -40,6 +40,17 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
     if args.is_empty() || args[0].is_empty() { return Err("empty test command".into()); }
     let mut cmd = Command::new(&args[0]);
     cmd.args(&args[1..]).current_dir(root).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Guest tests must not inherit GitHub/CI credentials, SDK tokens, private
+    // installation secrets or unrelated host settings. Retain only OS basics.
+    cmd.env_clear();
+    for key in [
+        "PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "LC_CTYPE",
+        "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "PATHEXT",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
     for (key, value) in extra_env { cmd.env(key, value); }
     let mut file = tempfile::tempfile().map_err(|e| e.to_string())?;
     if let Some(data) = input { file.write_all(data).map_err(|e| e.to_string())?; }
