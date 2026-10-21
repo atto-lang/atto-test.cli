@@ -20,6 +20,8 @@ pub const REQUIRED_SURFACES: [&str; 9] = [
     "core_native",
 ];
 const MAX_SCOPES: usize = 65_536;
+const MAX_EVENTS: u64 = 10_000_000;
+const MAX_RUN_ID: usize = 128;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Binding<'a> {
@@ -49,7 +51,16 @@ pub struct Summary<'a> {
 
 fn is_hex_digest(value: &str) -> bool {
     return (value.len() == 40 || value.len() == 64)
-        && value.as_bytes().iter().all(u8::is_ascii_hexdigit);
+        && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
+        && value.as_bytes().iter().any(|byte| *byte != b'0');
+}
+
+fn is_bounded_run_id(value: &str) -> bool {
+    return !value.is_empty()
+        && value.len() <= MAX_RUN_ID
+        && value.as_bytes().iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+        });
 }
 
 /// Checks bounded receipt invariants only. A caller must *independently*
@@ -60,7 +71,7 @@ pub fn validate_shape(receipt: &Summary<'_>, host: &Binding<'_>) -> Result<(), &
     if receipt.version != VERSION {
         return Err("unsupported trusted evidence protocol version");
     }
-    if receipt.run_id.is_empty() || receipt.run_id != host.run_id {
+    if !is_bounded_run_id(host.run_id) || receipt.run_id != host.run_id {
         return Err("missing or mismatched host run identity");
     }
     if !matches!(receipt.backend, "llvm" | "graalvm" | "wasm" | "js" | "dotnet")
@@ -77,7 +88,8 @@ pub fn validate_shape(receipt: &Summary<'_>, host: &Binding<'_>) -> Result<(), &
     if !receipt.complete || receipt.dropped != 0 {
         return Err("incomplete runtime event coverage");
     }
-    if receipt.emitted == 0 || receipt.emitted != receipt.stored
+    if receipt.emitted == 0 || receipt.emitted > MAX_EVENTS
+        || receipt.emitted != receipt.stored
         || receipt.emitted != receipt.final_sequence
     {
         return Err("missing, duplicated or inconsistent events");
@@ -90,6 +102,9 @@ pub fn validate_shape(receipt: &Summary<'_>, host: &Binding<'_>) -> Result<(), &
         if *scope == 0 || !seen_scopes.insert(*scope) {
             return Err("zero or duplicate host-local memory scope identity");
         }
+    }
+    if receipt.covered_surfaces.len() != REQUIRED_SURFACES.len() {
+        return Err("unsupported or incomplete instrumentation surface count");
     }
     let mut seen_coverage = BTreeSet::new();
     for surface in receipt.covered_surfaces {
@@ -177,6 +192,22 @@ mod tests {
         assert!(validate_shape(&r, &binding()).is_err());
         r.scope_ids = &[0];
         assert!(validate_shape(&r, &binding()).is_err());
+    }
+    #[test]
+    fn input_budgets_and_unsafe_host_identity_fail() {
+        let mut r = receipt();
+        r.emitted = MAX_EVENTS + 1;
+        r.stored = r.emitted;
+        r.final_sequence = r.emitted;
+        assert!(validate_shape(&r, &binding()).is_err());
+        let mut unsafe_host = binding();
+        unsafe_host.run_id = "run-id\nforged";
+        r = receipt();
+        r.run_id = unsafe_host.run_id;
+        assert!(validate_shape(&r, &unsafe_host).is_err());
+        unsafe_host.run_id = binding().run_id;
+        unsafe_host.runtime_build = "0000000000000000000000000000000000000000";
+        assert!(validate_shape(&r, &unsafe_host).is_err());
     }
     #[test]
     fn unsupported_version_and_duplicate_surface_fail() {
