@@ -206,6 +206,7 @@ mod tests {
         r.run_id = unsafe_host.run_id;
         assert!(validate_shape(&r, &unsafe_host).is_err());
         unsafe_host.run_id = binding().run_id;
+        r.run_id = unsafe_host.run_id;
         unsafe_host.runtime_build = "0000000000000000000000000000000000000000";
         assert!(validate_shape(&r, &unsafe_host).is_err());
     }
