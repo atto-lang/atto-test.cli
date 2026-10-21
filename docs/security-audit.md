@@ -68,6 +68,11 @@ Select files explicitly for oversized workspaces.
   instrumented. Missing/inconsistent evidence is inconclusive (exit 2).
 - Fuzzing is black-box mutation fuzzing, not coverage-guided fuzzing. A passing
   harness certifies only the tested inputs and properties it checks.
+- --fuzz --fuzz-profile security adds deterministic adversarial byte seeds
+  (path traversal, encoded NUL, invalid UTF-8, HTML/SQL-looking strings,
+  oversized values and deep JSON). The configured harness must decide whether
+  an input violates an application property; encountering a suspicious input
+  by itself is not evidence of a security bug.
 
 **Exit codes:** 0 = selected checks completed without threshold failures;
 1 = threshold findings or reproducible counterexamples; 2 = incomplete,
