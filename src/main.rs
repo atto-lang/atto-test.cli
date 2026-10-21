@@ -79,11 +79,59 @@ fn nonce()->String {
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b|format!("{b:02x}")).collect()
 }
+// Strict check-only claims require an independently pinned compiler binary;
+// a project manifest may choose source files, but cannot nominate any script
+// as a trusted compiler by printing a matching receipt.
+fn digest_trusted_compiler(command: &[String], expected: &str) -> Result<String> {
+    if command.len() != 1 {
+        return Err("[check].command must contain only an absolute compiler executable; no shell or wrapper argv".into());
+    }
+    let path = Path::new(&command[0]);
+    if !path.is_absolute() {
+        return Err("trusted check compiler must be an absolute executable path".into());
+    }
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("ORESLANG_TRUSTED_CHECK_COMPILER_SHA256 must be a 64-character SHA-256 hex digest".into());
+    }
+    let before = path.symlink_metadata().map_err(|e| e.to_string())?;
+    if !before.is_file() || before.file_type().is_symlink() || before.len() > (1u64 << 30) {
+        return Err("trusted check compiler must be a bounded regular file, not a symlink".into());
+    }
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let actual = file.metadata().map_err(|e| e.to_string())?;
+    if !actual.is_file() || actual.len() != before.len() {
+        return Err("trusted check compiler changed during validation".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != actual.dev() || before.ino() != actual.ino() {
+            return Err("trusted check compiler was replaced during validation".into());
+        }
+    }
+    let mut hasher = Sha256::new();
+    let mut block = [0u8; 65536];
+    use std::io::Read;
+    loop {
+        let n = file.read(&mut block).map_err(|e| e.to_string())?;
+        if n == 0 { break; }
+        hasher.update(&block[..n]);
+    }
+    let actual_sha = format!("{:x}", hasher.finalize());
+    if actual_sha != expected.to_ascii_lowercase() {
+        return Err("trusted check compiler SHA-256 does not match independent pin".into());
+    }
+    Ok(actual_sha)
+}
+
 fn check(root:&Path,cfg:&toml::Value,source:Option<&str>,types:bool,timeout:f64)->Result<u8>{
     // No separate Rust parser: compiler frontend is the only syntax authority.
     // A binary which cannot emit a source-bound no-codegen receipt is inconclusive.
     let cmd=table_command(cfg,"check")
         .map_err(|_|"no [check].command configured; refusing syntax PASS without the canonical compiler parser".to_string())?;
+    let trusted_sha = std::env::var("ORESLANG_TRUSTED_CHECK_COMPILER_SHA256")
+        .map_err(|_| "missing independent ORESLANG_TRUSTED_CHECK_COMPILER_SHA256 pin; no compiler PASS allowed".to_string())?;
+    digest_trusted_compiler(&cmd, &trusted_sha)?;
     let selected=safe_path(root,source.unwrap_or("."))?;
     if !selected.exists(){return Err("syntax-check source does not exist".into());}
     let mut files=Vec::new();
@@ -122,6 +170,9 @@ fn check(root:&Path,cfg:&toml::Value,source:Option<&str>,types:bool,timeout:f64)
         if out.stdout.lines().filter(|line|*line==receipt).count()!=1 {
             return Err(format!("{} did not produce source-bound {phase} receipt; cannot assert check-only success",file.display()));
         }
+        // Detect compiler replacement after invocation; the binary SHA is
+        // independently controlled by the trusted caller, never by the project.
+        digest_trusted_compiler(&cmd, &trusted_sha)?;
     }
     println!("CHECK PASS: {} .ores sources ({}) using compiler frontend, no codegen requested",files.len(),
         if types{"typecheck"}else{"syntax"});
@@ -219,8 +270,13 @@ fn native(root:&Path,cfg:&toml::Value,timeout:f64)->Result<u8>{
     }else{
         let dir=root.join("tests");
         if !dir.exists(){return Err("no tests folder and no [native].files".into());}
-        WalkDir::new(dir).into_iter().map(|e|e.map_err(|e|e.to_string()))
-          .collect::<Result<Vec<_>>>()?.into_iter()
+        let entries=WalkDir::new(dir).into_iter()
+          .map(|e|e.map_err(|e|e.to_string()))
+          .collect::<Result<Vec<_>>>()?;
+        if entries.iter().any(|e|e.file_type().is_symlink()) {
+            return Err("native test discovery refuses symlink entries".into());
+        }
+        entries.into_iter()
           .filter(|e|e.file_type().is_file() &&
             e.path().extension().is_some_and(|x|x=="ores") &&
             (e.file_name().to_string_lossy().starts_with("test_") ||
@@ -280,8 +336,9 @@ fn run(o:Opt)->Result<u8>{
     if !root.is_dir(){return Err("project root must be directory".into());}
     let manifest=root.join("oreslang-test.toml");
     let cfg:toml::Value=if manifest.exists(){
-        let raw=std::fs::read_to_string(manifest).map_err(|e|e.to_string())?;
-        toml::from_str(&raw).map_err(|e|e.to_string())?
+        let raw=common::bounded_read(&manifest,1_048_576)?;
+        let raw=std::str::from_utf8(&raw).map_err(|e|e.to_string())?;
+        toml::from_str(raw).map_err(|e|e.to_string())?
     }else{toml::Value::Table(toml::map::Map::new())};
     if o.check||o.check_types {return check(&root,&cfg,o.source.as_deref(),o.check_types,o.timeout);}
     if o.effects {return effects_cli::run(&root,&cfg,&o.file,o.effects_strict);}
@@ -303,4 +360,40 @@ fn main(){
         Err(err)=>{eprintln!("oreslang test: {err}");2}
     };
     std::process::exit(exit.into());
+}
+
+#[cfg(test)]
+mod check_compiler_trust_tests {
+    use super::*;
+
+    #[test]
+    fn only_independently_pinned_absolute_regular_compiler_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fake-compiler");
+        std::fs::write(&path, b"abc").unwrap();
+        let command = vec![path.to_str().unwrap().to_owned()];
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(digest_trusted_compiler(&command, expected).unwrap(), expected);
+        assert!(digest_trusted_compiler(&command, &"0".repeat(64)).is_err(),
+            "a forged receipt cannot substitute for an independently pinned binary");
+        assert!(digest_trusted_compiler(&["sh".to_string()], expected).is_err());
+        assert!(digest_trusted_compiler(&[command[0].clone(), "-c".into()], expected).is_err());
+        assert!(digest_trusted_compiler(&command, "not-a-sha").is_err());
+        std::fs::write(&path, b"abd").unwrap();
+        assert!(digest_trusted_compiler(&command, expected).is_err(),
+            "modifying the compiler after pinning must invalidate admission");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_compiler_is_rejected_even_when_its_target_digest_matches() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("compiler");
+        let alias = dir.path().join("alias");
+        std::fs::write(&target, b"abc").unwrap();
+        symlink(&target, &alias).unwrap();
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(digest_trusted_compiler(&[alias.to_str().unwrap().to_owned()], expected).is_err());
+    }
 }

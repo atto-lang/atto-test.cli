@@ -164,7 +164,8 @@ mod strict_json_regression {
         for source in [
             r#"{"op":"begin","meta":{"nested":[{"x":1,"x":2}]}}"#,
             r#"{"op":"begin","meta":[{"a":{"key":0,"key":1}}]}"#,
-            r#"{"op":"begin","name":"first","\\u006eame":"second"}"#,
+            r#"{"op":"begin","name":"first","\u006eame":"second"}"#,
+            r#"{"op":"begin","meta":{"x":1,"\u0078":2}}"#,
         ] {
             assert!(parse(source).is_err(), "accepted duplicate keys: {source}");
         }

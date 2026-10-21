@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[derive(Debug)]
 pub struct Outcome {
     pub code: i32,
     pub stdout: String,
@@ -34,6 +35,25 @@ fn kill_group(id: u32) {
 }
 #[cfg(not(unix))]
 fn kill_group(_: u32) {}
+
+#[cfg(target_os="linux")]
+fn poll_unreaped_exit(child: &std::process::Child) -> Result<bool, String> {
+    // Unlike Child::try_wait(), WNOWAIT observes exit without reaping.
+    // Keep the child's PID reserved until its whole process group is cleaned.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if rc != 0 {
+        return Err(format!("waitid failed: {}", std::io::Error::last_os_error()));
+    }
+    Ok(unsafe { info.si_pid() } != 0)
+}
 
 pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
            extra_env: &[(String, String)]) -> Result<Option<Outcome>, String> {
@@ -69,23 +89,36 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
     let mut timed_out = false;
     let code = loop {
         if output_limit.load(Ordering::SeqCst) { break None; }
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) => break Some(status.code().unwrap_or(1)),
-            None if start.elapsed() >= Duration::from_secs_f64(timeout) => {
-                timed_out = true; break None;
-            },
-            None => std::thread::sleep(Duration::from_millis(10)),
+        #[cfg(target_os="linux")]
+        let observed = if poll_unreaped_exit(&child)? { Some(0) } else { None };
+        #[cfg(not(target_os="linux"))]
+        let observed = child.try_wait().map_err(|e| e.to_string())?
+            .map(|status| status.code().unwrap_or(1));
+        if let Some(status) = observed { break Some(status); }
+        if start.elapsed() >= Duration::from_secs_f64(timeout) {
+            timed_out = true;
+            break None;
         }
+        std::thread::sleep(Duration::from_millis(10));
     };
-    if code.is_none() {
-        kill_group(child.id());
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-    // Even when the direct child exits successfully, kill remaining members
-    // of its dedicated process group. Detached/new-session descendants need
-    // OS-level sandboxing; no whole-process-tree guarantee is asserted here.
+    // Linux: the child is deliberately still unreaped, so the process-group
+    // identifier cannot have been reused by an unrelated process.
+    #[cfg(target_os="linux")]
+    let had_inherited_pipes = if code.is_some() {
+        let cutoff = Instant::now() + Duration::from_millis(200);
+        while !(out.is_finished() && err.is_finished()) && Instant::now() < cutoff {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        !(out.is_finished() && err.is_finished())
+    } else { false };
+    #[cfg(target_os="linux")]
     kill_group(child.id());
+    #[cfg(not(target_os="linux"))]
+    if code.is_none() && child.try_wait().map_err(|e| e.to_string())?.is_none() {
+        kill_group(child.id());
+    }
+    if code.is_none() { let _ = child.kill(); }
+    let exit_status = child.wait().map_err(|e| e.to_string())?;
     // A child may exit while descendants retain its stdout/stderr pipes.
     // Never block indefinitely joining a reader in that situation.
     let cutoff = Instant::now() + Duration::from_secs(1);
@@ -93,8 +126,8 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
         std::thread::sleep(Duration::from_millis(10));
     }
     if !(out.is_finished() && err.is_finished()) {
-        kill_group(child.id());
-        let _ = child.kill();
+        // The direct child has already been reaped. Do NOT signal its
+        // numeric PID/PGID: it may now identify an unrelated process.
         let cutoff = Instant::now() + Duration::from_secs(1);
         while !(out.is_finished() && err.is_finished()) && Instant::now() < cutoff {
             std::thread::sleep(Duration::from_millis(10));
@@ -109,8 +142,12 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
     let stderr = err.join().map_err(|_| "stderr reader panicked")??;
     if output_limit.load(Ordering::SeqCst) { return Err("test output exceeds 4 MB".into()); }
     if timed_out { return Ok(None); }
+    #[cfg(target_os="linux")]
+    if had_inherited_pipes {
+        return Err("test process descendants kept stdout or stderr open".into());
+    }
     Ok(Some(Outcome {
-        code: code.unwrap_or(1),
+        code: exit_status.code().unwrap_or(1),
         stdout: String::from_utf8_lossy(&stdout).to_string(),
         stderr: String::from_utf8_lossy(&stderr).to_string(),
     }))
@@ -119,6 +156,37 @@ pub fn run(args: &[String], root: &Path, timeout: f64, input: Option<&[u8]>,
 #[cfg(all(test, unix))]
 mod runner_security_tests {
     use super::*;
+
+    #[cfg(target_os="linux")]
+    #[test]
+    fn linux_reaps_child_and_preserves_real_exit_status() {
+        let root = std::env::temp_dir();
+        let args = vec!["sh".into(), "-c".into(), "printf 'ok\\n'; exit 17".into()];
+        let result = run(&args, &root, 3.0, None, &[])
+            .expect("execution should not fail")
+            .expect("child should exit");
+        assert_eq!(result.code, 17);
+        assert_eq!(result.stdout, "ok\\n");
+    }
+
+    #[cfg(target_os="linux")]
+    #[test]
+    fn linux_timeout_terminates_process_group() {
+        let root = std::env::temp_dir();
+        let args = vec!["sh".into(), "-c".into(), "sleep 3".into()];
+        assert!(run(&args, &root, 0.05, None, &[])
+            .expect("timeout should be reported")
+            .is_none());
+    }
+
+    #[cfg(target_os="linux")]
+    #[test]
+    fn linux_background_descendant_cannot_certify_a_clean_result() {
+        let root = std::env::temp_dir();
+        let args = vec!["sh".into(), "-c".into(), "sleep 3 & printf 'parent-exited\\n'".into()];
+        let outcome = run(&args, &root, 3.0, None, &[]);
+        assert!(outcome.is_err(), "descendant inherited stdout/stderr: {outcome:?}");
+    }
 
     #[test]
     fn guest_environment_only_includes_os_basics_and_explicit_trace_context() {
