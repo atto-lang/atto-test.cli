@@ -98,3 +98,16 @@ exit 0
     // An orphaned process still holding pipes can never certify success.
     assert_eq!(code(&output),2);
 }
+
+#[cfg(unix)]
+#[test]
+fn native_test_discovery_rejects_symlinked_entries(){
+    use std::os::unix::fs::symlink;
+    let dir=tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("tests")).unwrap();
+    write(&dir.path().join("tests/test_ok.ores"),"// valid source for discovery");
+    symlink(dir.path().join("tests/test_ok.ores"),dir.path().join("tests/test_alias.ores")).unwrap();
+    let result=invoke(dir.path(),&[]);
+    assert_eq!(code(&result),2,"{}",String::from_utf8_lossy(&result.stderr));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("symlink"));
+}
