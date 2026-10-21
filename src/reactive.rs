@@ -4,7 +4,7 @@ use std::collections::{HashMap,HashSet};
 use crate::common::Result;
 #[derive(Default)]
 pub struct Report {pub events:usize,pub subscriptions:usize,pub next:usize,pub terminals:usize,pub active:usize}
-struct Subscriber {source:String,mode:String,requested:u32,terminal:bool,disposed:bool}
+struct Subscriber {mode:String,requested:u32,terminal:bool,disposed:bool}
 pub fn analyze(events:&[Value])->Result<Report> {
     if events.len()>100_000{return Err("reactive trace too large".into());}
     let mut sources:HashMap<String,HashSet<String>>=HashMap::new();
@@ -35,7 +35,7 @@ pub fn analyze(events:&[Value])->Result<Report> {
                 return Err("mixed source cardinality modes".into());
             }
             assigned.insert(id.into());
-            subs.insert(id.into(),Subscriber{source:source.into(),mode:mode.into(),requested:0,terminal:false,disposed:false});
+            subs.insert(id.into(),Subscriber{mode:mode.into(),requested:0,terminal:false,disposed:false});
             continue;
         }
         let state=subs.get_mut(id).ok_or("reactive event before subscribe")?;
