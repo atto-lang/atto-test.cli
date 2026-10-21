@@ -25,6 +25,47 @@ pub fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
     }
     Ok(target)
 }
+#[cfg(unix)]
+fn open_no_symlink_components(path: &Path) -> Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    // Start at an owned directory FD, not a pathname that can be renamed
+    // between component validation and the final read.
+    let start = if path.is_absolute() { "/" } else { "." };
+    let mut directory: OwnedFd = std::fs::File::open(start)
+        .map_err(|e| e.to_string())?
+        .into();
+    let mut parts = path.components().peekable();
+    while let Some(part) = parts.next() {
+        match part {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => {
+                let name = CString::new(name.as_bytes())
+                    .map_err(|_| "NUL byte in input path")?;
+                let is_last = parts.peek().is_none();
+                let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK
+                    | if is_last { 0 } else { libc::O_DIRECTORY };
+                let opened = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+                if opened < 0 {
+                    return Err(format!(
+                        "cannot open input without symlink traversal: {}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                // SAFETY: successful openat transfers a fresh owned fd to us.
+                directory = unsafe { OwnedFd::from_raw_fd(opened) };
+            }
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err("parent traversal in input path is forbidden".into());
+            }
+        }
+    }
+    Ok(std::fs::File::from(directory))
+}
+
 pub fn bounded_read(path: &Path, max: usize) -> Result<Vec<u8>> {
     if path
         .symlink_metadata()
@@ -34,17 +75,11 @@ pub fn bounded_read(path: &Path, max: usize) -> Result<Vec<u8>> {
     {
         return Err("trace/corpus symlink is forbidden".into());
     }
-    // The lstat precheck is not sufficient against a final-component symlink
-    // swap between validation and open. Refuse following that link atomically.
+    // Every path component is opened relative to the preceding directory
+    // handle. O_NOFOLLOW prevents intermediate-directory substitution, not
+    // just a last-component symlink swap.
     #[cfg(unix)]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)
-            .map_err(|e| e.to_string())?
-    };
+    let file = open_no_symlink_components(path)?;
     #[cfg(not(unix))]
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let meta = file.metadata().map_err(|e| e.to_string())?;
