@@ -21,6 +21,7 @@ struct Settings {
     security_fuzz: bool,
     fuzz_profile_selected: bool,
     race: bool,
+    deadlock: bool,
     trace: Option<String>,
     logical: bool,
     model: bool,
@@ -32,7 +33,7 @@ struct Settings {
 fn parse(args: &[OsString]) -> Result<Settings, String> {
     let mut out = Settings {
         root: PathBuf::from("."), fuzz: false, security_fuzz: false,
-        fuzz_profile_selected: false, race: false,
+        fuzz_profile_selected: false, race: false, deadlock: false,
         trace: None, logical: false, model: false,
         seed: 1, cases: 100, timeout: Duration::from_secs(5),
     };
@@ -43,6 +44,7 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
         match key {
             "--fuzz" if inline.is_none() => out.fuzz = true,
             "--race" if inline.is_none() => out.race = true,
+            "--deadlock" if inline.is_none() => out.deadlock = true,
             "--logical" if inline.is_none() => out.logical = true,
             "--root" | "--seed" | "--cases" | "--timeout" | "--fuzz-profile" | "--trace" | "--model" | "--max-schedules" => {
                 let value = if let Some(v) = inline { v.to_owned() } else {
@@ -83,11 +85,14 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
     if out.fuzz_profile_selected && !out.fuzz {
         return Err("--fuzz-profile requires --fuzz".into());
     }
-    if out.fuzz && (out.race || out.trace.is_some() || out.logical || out.model) {
+    if out.fuzz && (out.race || out.deadlock || out.trace.is_some() || out.logical || out.model) {
         return Err("fuzz and race modes are exclusive".into());
     }
-    if (out.trace.is_some() || out.logical || out.model) && !out.race {
-        return Err("--trace/--model/--logical requires --race".into());
+    if out.trace.is_some() && !out.race && !out.deadlock {
+        return Err("--trace requires --race and/or --deadlock".into());
+    }
+    if (out.logical || out.model) && !out.race {
+        return Err("--logical/--model requires --race".into());
     }
     Ok(out)
 }
@@ -495,6 +500,20 @@ pub fn run(args: &[OsString]) -> i32 {
         let root = settings.root.canonicalize().map_err(|e| e.to_string())?;
         if !root.is_dir() { return Err("project root must be a directory".into()); }
         let cfg = manifest(&root)?;
+        if settings.deadlock {
+            if settings.logical || settings.model {
+                return Err("combined deadlock and logical-model checking is not implemented".into());
+            }
+            if let Some(name) = &settings.trace {
+                let deadlocks = super::deadlock::offline(&root,name)?;
+                if settings.race {
+                    let races = super::race_offline::offline(&root,name)?;
+                    return Ok(deadlocks.max(races));
+                }
+                return Ok(deadlocks);
+            }
+            return Err("runtime --deadlock is INCONCLUSIVE without an explicit offline --trace; trusted live event capture is unavailable".into());
+        }
         if settings.race {
             if settings.logical || settings.model {
                 return Err("runtime --race --logical is INCONCLUSIVE: Rust controlled-scheduler model support is pending".into());
