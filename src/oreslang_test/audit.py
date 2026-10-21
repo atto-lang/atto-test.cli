@@ -221,7 +221,9 @@ def analyze(root, *, security=True, anti_patterns=True, files=None):
                 emit("SEC004", relative, line(match.start()))
             for pos, value in strings:
                 for match in HTTP.finditer(value):
-                    hostname = match.group(1).split(":", 1)[0].lower().strip("[]")
+                    authority = match.group(1).lower()
+                    hostname = (authority.split("]", 1)[0][1:] if authority.startswith("[")
+                                else authority.split(":", 1)[0])
                     if hostname not in ("localhost", "127.0.0.1", "::1") and not hostname.startswith("127."):
                         emit("SEC003", relative, line(pos))
         if anti_patterns:
