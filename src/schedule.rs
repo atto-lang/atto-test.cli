@@ -120,6 +120,19 @@ mod tests {
     assert!(validate(out,1,7,None).is_err());
   }
   #[test]
+  fn overflowing_scheduler_summary_is_rejected_not_panicked(){
+    let out=format!(
+      "ORES_TEST|PASS|case\nORES_TEST|SUMMARY|total={}|passed={}|failed=1|skipped=0|filtered=0\nORES_CONCURRENCY|RUN|seed=7|events=1|deadlocks=0|schedule=perturbed|race_coverage=none\n",
+      usize::MAX, usize::MAX
+    );
+    assert!(validate(&out,1,7,None).is_err());
+  }
+  #[test]
+  fn mismatched_suite_receipt_fails_closed(){
+    let out="ORES_TEST|PASS|case\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\nORES_CONCURRENCY|RUN|seed=8|events=1|deadlocks=0|schedule=perturbed|race_coverage=none\n";
+    assert!(validate(out,1,7,None).is_err());
+  }
+  #[test]
   fn validated_case_receipts(){
     let out="ORES_TEST|PASS|case\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\nORES_CONCURRENCY|RUN|seed=7|events=1|deadlocks=0|schedule=perturbed|race_coverage=none\n";
     assert!(validate(out,1,7,None).is_ok());
