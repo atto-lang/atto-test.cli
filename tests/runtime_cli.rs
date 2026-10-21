@@ -1,0 +1,100 @@
+//! End-to-end Rust executable tests; no Python interpreter is involved.
+use std::fs;
+use std::path::Path;
+use std::process::{Command, Output};
+
+fn cli(root: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
+        .arg("--root").arg(root).args(args).output().unwrap()
+}
+
+#[test]
+fn pure_rust_offline_race_engine_exposes_observed_conflicts() {
+    let root = tempfile::tempdir().unwrap();
+    let racy = include_str!("traces/racy.jsonl");
+    let ordered = include_str!("traces/ordered.jsonl");
+    fs::write(root.path().join("racy.jsonl"), racy).unwrap();
+    fs::write(root.path().join("ordered.jsonl"), ordered).unwrap();
+    let found = cli(root.path(), &["--race", "--trace", "racy.jsonl"]);
+    assert_eq!(found.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&found.stdout).contains("OFFLINE TRACE FINDINGS"));
+    let clean = cli(root.path(), &["--race", "--trace", "ordered.jsonl"]);
+    assert_eq!(clean.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&clean.stdout).contains("not a trusted runtime race-free certificate"));
+}
+
+#[test]
+fn uninstrumented_runtime_and_invalid_jsonl_are_inconclusive() {
+    let root = tempfile::tempdir().unwrap();
+    assert_eq!(cli(root.path(), &["--race"]).status.code(), Some(2));
+    assert_eq!(cli(root.path(), &["--race", "--logical"]).status.code(), Some(2));
+    for s in [
+        "{\"op\":\"begin\",\"version\":1,\"run_id\":\"r\",\"backend\":\"llvm\"}\n",
+        "{\"op\":\"begin\",\"version\":1,\"run_id\":\"r\",\"backend\":\"llvm\"}\n{\"op\":\"task\",\"task\":\"a\",\"task\":\"b\"}\n{\"op\":\"end\",\"run_id\":\"r\",\"events\":1}\n",
+        "{\"op\":\"begin\",\"version\":1,\"run_id\":\"r\",\"backend\":\"llvm\"}\n{\"op\":\"end\",\"run_id\":\"r\",\"events\":0}\n",
+    ] {
+        fs::write(root.path().join("invalid.jsonl"), s).unwrap();
+        let result = cli(root.path(), &["--race", "--trace", "invalid.jsonl"]);
+        assert_eq!(result.status.code(), Some(2), "{s}");
+    }
+}
+
+#[cfg(unix)]
+fn guest(root: &Path, name: &str, source: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join(name);
+    fs::write(&path, source).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o700);
+    fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn machine_receipts_are_checked_by_native_rust_runner() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("tests")).unwrap();
+    fs::write(root.path().join("tests/test_hello.ores"), "").unwrap();
+    let compiler = guest(root.path(), "fake-compiler", "#!/bin/sh\nprintf 'ORES_TEST|PASS|test1\\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\\n'\n");
+    let ok = Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
+        .env("ORESLANG_BIN", &compiler)
+        .arg("--root").arg(root.path()).output().unwrap();
+    assert_eq!(ok.status.code(), Some(0), "{:?}", ok);
+    assert!(String::from_utf8_lossy(&ok.stdout).contains("PASS"));
+    let invalid = guest(root.path(), "invalid-compiler", "#!/bin/sh\nprintf 'ORES_TEST|PASS|test1\\nORES_TEST|SUMMARY|total=2|passed=2|failed=0|skipped=0|filtered=0\\n'\n");
+    let bad = Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
+        .env("ORESLANG_BIN", invalid)
+        .arg("--root").arg(root.path()).output().unwrap();
+    assert_eq!(bad.status.code(), Some(1));
+}
+
+#[cfg(unix)]
+#[test]
+fn seeded_fuzzer_minimizes_reproducible_failure_without_python() {
+    let root = tempfile::tempdir().unwrap();
+    let property = guest(root.path(), "property", "#!/bin/sh\nif [ -s /dev/stdin ]; then exit 7; fi\nexit 0\n");
+    fs::write(root.path().join("oreslang-test.toml"),
+        format!("[fuzz]\ncommand = ['{}']\nmax_bytes = 16\n", property.display())).unwrap();
+    let result = cli(root.path(), &["--fuzz", "--seed", "42", "--cases", "8"]);
+    assert_eq!(result.status.code(), Some(1), "{:?}", result);
+    let out = String::from_utf8_lossy(&result.stdout);
+    assert!(out.contains("FUZZ FAILURE"));
+    assert!(out.contains("minimized=1"));
+    let failures = root.path().join(".oreslang-test/failures");
+    let names: Vec<_> = fs::read_dir(failures).unwrap().collect();
+    assert_eq!(names.len(), 1);
+    assert_eq!(fs::read(names[0].as_ref().unwrap().path()).unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_timeouts_are_inconclusive_and_do_not_report_pass() {
+    let root = tempfile::tempdir().unwrap();
+    let property = guest(root.path(), "property", "#!/bin/sh\nsleep 5\nexit 0\n");
+    fs::write(root.path().join("oreslang-test.toml"),
+        format!("[fuzz]\ncommand = ['{}']\nmax_bytes = 16\n", property.display())).unwrap();
+    let result = cli(root.path(), &["--fuzz", "--cases", "1", "--timeout", "0.02"]);
+    assert_eq!(result.status.code(), Some(2));
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("FUZZ PASS"));
+}
