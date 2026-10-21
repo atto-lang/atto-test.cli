@@ -48,6 +48,9 @@ fn apply(ops:&[Value],state:&mut State,local:&mut State)->Result<()> {
     }
     Ok(())
 }
+// Explicitly carry bounded model-checker state through DFS instead of hiding
+// execution state in globals or mutable closures.
+#[allow(clippy::too_many_arguments)]
 fn dfs(actors:&[Actor],expected:&State, indices:&[usize], state:&State,locals:&[State],
        path:&[String], limit:usize, report:&mut ModelReport, nodes:&mut usize)->Result<()> {
     *nodes+=1;
