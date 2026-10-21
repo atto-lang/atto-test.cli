@@ -111,7 +111,22 @@ def _safe_read(root, path):
                 raise AuditError(f"symlinked audit input rejected: {rel}")
         if path.suffix != ".ores":
             raise AuditError(f"not an Oreslang source file: {rel}")
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        # Use descriptor-relative traversal on POSIX so concurrent directory
+        # symlink replacement cannot escape the workspace after prechecking.
+        if os.name == "posix":
+            directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                for piece in rel.parts[:-1]:
+                    next_dir = os.open(piece, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                                       | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+                    os.close(directory)
+                    directory = next_dir
+                fd = os.open(rel.parts[-1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                             dir_fd=directory)
+            finally:
+                os.close(directory)
+        else:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as src:
             mode = os.fstat(src.fileno())
             if not stat.S_ISREG(mode.st_mode) or mode.st_size > MAX_FILE_BYTES:
@@ -138,8 +153,14 @@ def _discover(root, explicit):
             paths.append(path)
     else:
         paths = []
-        for directory, dirs, files in os.walk(root, followlinks=False):
+        def walk_error(exc):
+            raise AuditError(f"cannot traverse audit directory: {exc}")
+
+        for directory, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
             dirs[:] = sorted(d for d in dirs if d not in EXCLUDED_DIRS and not d.startswith("."))
+            for name in dirs:
+                if (Path(directory) / name).is_symlink():
+                    raise AuditError(f"symlinked audit directory rejected: {Path(directory) / name}")
             for name in sorted(files):
                 if name.endswith(".ores"):
                     paths.append(Path(directory) / name)
