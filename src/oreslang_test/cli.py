@@ -19,6 +19,7 @@ import uuid
 from .race import TraceError, analyze_trace
 from .logical import ModelError, explore
 from .deadlock import analyze_deadlocks
+from .audit import AuditError, run as run_audit
 
 
 class UsageError(ValueError):
@@ -43,7 +44,16 @@ def _command(value, label):
     return value
 
 
-def _run(command, root, timeout, data=None, env=None):
+def _guest_env(inherit_env=False):
+    """Do not disclose unrelated CI credentials to guest test programs by default."""
+    if inherit_env:
+        return dict(os.environ)
+    allowed = {"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL",
+               "LC_CTYPE", "SYSTEMROOT", "WINDIR"}
+    return {key: value for key, value in os.environ.items() if key in allowed}
+
+
+def _run(command, root, timeout, data=None, env=None, inherit_env=False):
     # Drain each output pipe into bounded memory while the guest is running.
     # Post-exit file-size checks permit unlimited disk growth before admission.
     limit = 4_000_000
@@ -85,7 +95,7 @@ def _run(command, root, timeout, data=None, env=None):
             stdin.write(data)
             stdin.seek(0)
         try:
-            process = subprocess.Popen(command, cwd=root, env=env, stdin=stdin,
+            process = subprocess.Popen(command, cwd=root, env=(_guest_env(inherit_env) if env is None else env), stdin=stdin,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        start_new_session=(os.name == "posix"))
         except OSError as exc:
@@ -127,7 +137,7 @@ def _decode(output):
     return output.decode("utf-8", errors="replace")[:8000]
 
 
-def run_native(root, config, timeout):
+def run_native(root, config, timeout, inherit_env=False):
     native = config.get("native", {})
     files = native.get("files")
     if files is None:
@@ -143,7 +153,7 @@ def run_native(root, config, timeout):
         path = _relative(root, name)
         if not path.is_file() or path.suffix != ".ores":
             raise UsageError(f"not an Oreslang test file: {name}")
-        result = _run([executable, str(path)], root, timeout)
+        result = _run([executable, str(path)], root, timeout, inherit_env=inherit_env)
         if result is None:
             print(f"TIMEOUT {name}")
             failed += 1
@@ -183,7 +193,7 @@ def _failure(result):
     return f"exit:{result.returncode}" if result.returncode else None
 
 
-def fuzz(root, config, seed, cases, timeout):
+def fuzz(root, config, seed, cases, timeout, inherit_env=False):
     params = config.get("fuzz", {})
     cmd = _command(params.get("command"), "fuzz")
     if not 1 <= cases <= 1_000_000:
@@ -191,17 +201,34 @@ def fuzz(root, config, seed, cases, timeout):
     max_bytes = params.get("max_bytes", 256)
     if type(max_bytes) is not int or not 1 <= max_bytes <= 65536:
         raise UsageError("fuzz.max_bytes must be between 1 and 65536")
+    if seed < -(2 ** 63) or seed > 2 ** 63 - 1:
+        raise UsageError("--seed must fit in signed 64-bit range")
     rng = random.Random(seed)
     corpus_path = _relative(root, params.get("corpus", "tests/corpus"))
     corpus = [b"", b"\x00", b"\xff"]
     if corpus_path.exists():
-        if not corpus_path.is_dir():
-            raise UsageError("fuzz corpus is not a directory")
+        if corpus_path.is_symlink() or not corpus_path.is_dir():
+            raise UsageError("fuzz corpus must be a real directory")
+        total_corpus_bytes = 0
+        seen_corpus_files = 0
         for p in sorted(corpus_path.iterdir()):
             if p.is_symlink():
                 raise UsageError("fuzz corpus cannot contain symlinks")
-            if p.is_file() and p.stat().st_size <= max_bytes:
-                corpus.append(p.read_bytes())
+            if p.is_file():
+                seen_corpus_files += 1
+                if seen_corpus_files > 4096:
+                    raise UsageError("fuzz corpus has more than 4096 files")
+                if p.stat().st_size > max_bytes:
+                    continue
+                flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                with os.fdopen(os.open(p, flags), "rb") as stream:
+                    value = stream.read(max_bytes + 1)
+                if len(value) > max_bytes:
+                    continue
+                total_corpus_bytes += len(value)
+                if total_corpus_bytes > 16_000_000:
+                    raise UsageError("fuzz corpus exceeds 16 MB")
+                corpus.append(value)
     else:
         print("No corpus directory; using built-in seed cases")
     unique = list(dict.fromkeys(corpus))
@@ -217,12 +244,12 @@ def fuzz(root, config, seed, cases, timeout):
                     idx = rng.randrange(len(base))
                     base[idx] ^= rng.randrange(256)
                 case = bytes(base[:max_bytes])
-        result = _run(cmd, root, timeout, data=case)
+        result = _run(cmd, root, timeout, data=case, inherit_env=inherit_env)
         failure = _failure(result)
         if failure:
             # A reproducible counterexample must fail more than once. Do not
             # minimize a flaky invocation or silently treat it as success.
-            if any(_failure(_run(cmd, root, timeout, data=case)) != failure for _ in range(2)):
+            if any(_failure(_run(cmd, root, timeout, data=case, inherit_env=inherit_env)) != failure for _ in range(2)):
                 print(f"FUZZ FLAKY seed={seed} iteration={i} reason={failure}; cannot minimize")
                 return 2
             print(f"FUZZ FAILURE seed={seed} iteration={i} reason={failure} size={len(case)}")
@@ -235,7 +262,7 @@ def fuzz(root, config, seed, cases, timeout):
                 shorter = False
                 for candidate in candidates:
                     budget -= 1
-                    if _failure(_run(cmd, root, timeout, data=candidate)) == failure:
+                    if _failure(_run(cmd, root, timeout, data=candidate, inherit_env=inherit_env)) == failure:
                         minimized, granularity, shorter = candidate, 2, True
                         break
                     if budget == 0:
@@ -244,7 +271,7 @@ def fuzz(root, config, seed, cases, timeout):
                     if granularity >= len(minimized):
                         break
                     granularity = min(len(minimized), granularity * 2)
-            if any(_failure(_run(cmd, root, timeout, data=minimized)) != failure for _ in range(2)):
+            if any(_failure(_run(cmd, root, timeout, data=minimized, inherit_env=inherit_env)) != failure for _ in range(2)):
                 print("FUZZ FLAKY minimized case changed behavior; retaining original counterexample")
                 minimized = case
             dest_dir = _relative(root, ".oreslang-test/failures")
@@ -266,7 +293,7 @@ def fuzz(root, config, seed, cases, timeout):
     return 0
 
 
-def race(root, config, trace, logical, model, timeout, max_schedules):
+def race(root, config, trace, logical, model, timeout, max_schedules, inherit_env=False):
     params = config.get("race", {})
     status = 0
     analyses = 0
@@ -279,7 +306,7 @@ def race(root, config, trace, logical, model, timeout, max_schedules):
         run_id = uuid.uuid4().hex
         with tempfile.TemporaryDirectory(prefix="oreslang-race-") as d:
             path = Path(d) / "events.jsonl"
-            env = dict(os.environ, ORESLANG_RACE_TRACE=str(path), ORESLANG_RACE_RUN_ID=run_id)
+            env = dict(_guest_env(inherit_env), ORESLANG_RACE_TRACE=str(path), ORESLANG_RACE_RUN_ID=run_id)
             result = _run(cmd, root, timeout, env=env)
             if result is None or result.returncode != 0:
                 raise UsageError("instrumented race test failed or timed out; cannot certify trace")
@@ -305,7 +332,7 @@ def race(root, config, trace, logical, model, timeout, max_schedules):
     return status
 
 
-def deadlock(root, config, trace, timeout):
+def deadlock(root, config, trace, timeout, inherit_env=False):
     """Analyze lock order risk and unresolved wait cycles in actual trace events."""
     if trace:
         report = analyze_deadlocks(_relative(root, trace))
@@ -319,7 +346,7 @@ def deadlock(root, config, trace, timeout):
         run_id = uuid.uuid4().hex
         with tempfile.TemporaryDirectory(prefix="oreslang-deadlock-") as d:
             path = Path(d) / "events.jsonl"
-            env = dict(os.environ, ORESLANG_RACE_TRACE=str(path),
+            env = dict(_guest_env(inherit_env), ORESLANG_RACE_TRACE=str(path),
                        ORESLANG_RACE_RUN_ID=run_id)
             result = _run(cmd, root, timeout, env=env)
             if result is None or result.returncode != 0:
@@ -375,7 +402,7 @@ def _schedule_trace(path):
     return int(match.group(1)), len(lines) - 1
 
 
-def schedule(root, config, seed, iterations, timeout, replay, trace_output):
+def schedule(root, config, seed, iterations, timeout, replay, trace_output, inherit_env=False):
     """Delegate schedule perturbation/replay to the explicitly configured runtime."""
     if not 1 <= iterations <= 1_000:
         raise UsageError("--iterations must be between 1 and 1000")
@@ -410,7 +437,7 @@ def schedule(root, config, seed, iterations, timeout, replay, trace_output):
         if replay is not None and output_trace == trace_path:
             raise UsageError("schedule trace output cannot overwrite replay input")
         args += ["--trace-output=" + str(output_trace)]
-    result = _run(cmd + args, root, timeout)
+    result = _run(cmd + args, root, timeout, inherit_env=inherit_env)
     if result is None:
         print("SCHEDULE TIMEOUT")
         return 1
@@ -500,6 +527,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="oreslang test")
     parser.add_argument("--root", default=".")
     parser.add_argument("--fuzz", action="store_true")
+    parser.add_argument("--audit", action="store_true", help="advisory security and anti-pattern source scan")
+    parser.add_argument("--security", action="store_true", help="advisory security scan only")
+    parser.add_argument("--anti-patterns", action="store_true", help="advisory code anti-pattern scan only")
+    parser.add_argument("--audit-file", action="append", default=[], help="project-relative Oreslang source; repeatable")
+    parser.add_argument("--fail-on", choices=["none", "low", "medium", "high", "critical"])
+    parser.add_argument("--audit-format", choices=["text", "json"])
+    parser.add_argument("--inherit-env", action="store_true",
+                        help="allow guest test commands to inherit all host environment variables")
     parser.add_argument("--race", action="store_true")
     parser.add_argument("--deadlock", action="store_true")
     parser.add_argument("--model-check", action="store_true")
@@ -516,6 +551,16 @@ def main(argv=None):
     parser.add_argument("--max-schedules", type=int, default=10000)
     args = parser.parse_args(argv)
     try:
+        audit_requested = args.audit or args.security or args.anti_patterns
+        if audit_requested and (args.fuzz or args.race or args.deadlock or args.model_check
+                                or args.logical or args.model or args.trace or args.schedule_fuzz
+                                or args.replay or args.trace_output or args.iterations != 1):
+            raise UsageError("source audit must be run separately from runtime/model testing")
+        if not audit_requested and (args.audit_file or args.fail_on is not None
+                                    or args.audit_format is not None):
+            raise UsageError("--audit-file/--fail-on/--audit-format require --audit, --security or --anti-patterns")
+        if audit_requested and args.inherit_env:
+            raise UsageError("--inherit-env applies to guest execution, not static audits")
         if args.fuzz and (args.race or args.deadlock or args.model_check or args.logical
                           or args.model or args.trace or args.schedule_fuzz):
             raise UsageError("--fuzz cannot combine with other testing modes")
@@ -542,26 +587,32 @@ def main(argv=None):
                 config = tomllib.load(fh)
         else:
             config = {}
+        if audit_requested:
+            return run_audit(root, security=args.audit or args.security,
+                             anti_patterns=args.audit or args.anti_patterns,
+                             files=args.audit_file,
+                             threshold=args.fail_on or "medium",
+                             output_format=args.audit_format or "text")
         if args.schedule_fuzz or args.replay:
             return schedule(root, config, args.seed, args.iterations,
-                            args.timeout, args.replay, args.trace_output)
+                            args.timeout, args.replay, args.trace_output, args.inherit_env)
         if args.fuzz:
-            return fuzz(root, config, args.seed, args.cases, args.timeout)
+            return fuzz(root, config, args.seed, args.cases, args.timeout, args.inherit_env)
         if args.model_check:
             # The existing bounded reference-model explorer, not full guest
             # compiler model checking. The output explicitly identifies scope.
             return race(root, config, None, True, args.model,
-                        args.timeout, args.max_schedules)
+                        args.timeout, args.max_schedules, args.inherit_env)
         status = 0
         if args.race:
             status |= race(root, config, args.trace, args.logical, args.model,
-                           args.timeout, args.max_schedules)
+                           args.timeout, args.max_schedules, args.inherit_env)
         if args.deadlock:
-            status |= deadlock(root, config, args.trace, args.timeout)
+            status |= deadlock(root, config, args.trace, args.timeout, args.inherit_env)
         if args.race or args.deadlock:
             return status
-        return run_native(root, config, args.timeout)
-    except (UsageError, TraceError, ModelError, OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+        return run_native(root, config, args.timeout, args.inherit_env)
+    except (UsageError, TraceError, ModelError, AuditError, OSError, ValueError, tomllib.TOMLDecodeError) as exc:
         print(f"oreslang test: {exc}", file=sys.stderr)
         return 2
 
