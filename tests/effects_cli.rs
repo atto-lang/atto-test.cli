@@ -184,26 +184,18 @@ fn file_and_parent_symlinks_are_refused() {
     }
 }
 
-#[cfg(unix)]
 #[test]
-fn legacy_non_success_status_is_preserved() {
-    use std::os::unix::fs::PermissionsExt;
+fn legacy_python_delegate_is_not_invoked() {
     let root = project("fnc f() {}");
-    let script = root.path().join("legacy");
-    fs::write(
-        &script,
-        "#!/bin/sh\n[ \"$1\" = --root ] || exit 8\n[ \"$3\" = --race ] || exit 9\nexit 7\n",
-    )
-    .unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
-        .env("ORESLANG_TEST_LEGACY", script)
+        .env("ORESLANG_TEST_LEGACY", "/not/a/real/python/runner")
         .arg("--root")
         .arg(root.path())
         .arg("--race")
         .output()
         .unwrap();
-    assert_eq!(result.status.code(), Some(7));
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("INCONCLUSIVE"));
 }
 
 #[test]
