@@ -151,6 +151,40 @@ max_bytes=65536
         assert!(error.contains("512 entries"), "{error}");
     }
 
+
+    #[test]
+    fn rejects_oversized_individual_corpus_item_before_invoking_guest() {
+        let project=tempfile::tempdir().unwrap();
+        let dir=project.path().join("corpus");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("oversized.bin"), vec![0u8;65537]).unwrap();
+        let error=fuzz(project.path(), &cfg(), 1, 1, 1.0).unwrap_err();
+        assert!(error.contains("oversized") || error.contains("budget"), "{error}");
+    }
+
+    #[test]
+    fn rejects_non_file_corpus_item_before_invoking_guest() {
+        let project=tempfile::tempdir().unwrap();
+        let dir=project.path().join("corpus");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir(dir.join("subdirectory")).unwrap();
+        let error=fuzz(project.path(), &cfg(), 1, 1, 1.0).unwrap_err();
+        assert!(error.contains("regular files only"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_corpus_item_before_invoking_guest() {
+        use std::os::unix::fs::symlink;
+        let project=tempfile::tempdir().unwrap();
+        let dir=project.path().join("corpus");
+        std::fs::create_dir(&dir).unwrap();
+        let outside=project.path().join("private.bin");
+        std::fs::write(&outside, b"private").unwrap();
+        symlink(outside, dir.join("symlink.bin")).unwrap();
+        let error=fuzz(project.path(), &cfg(), 1, 1, 1.0).unwrap_err();
+        assert!(error.contains("symlinks"), "{error}");
+    }
     #[test]
     fn rejects_oversized_aggregate_corpus_before_invoking_guest() {
         let project=tempfile::tempdir().unwrap();
