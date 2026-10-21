@@ -229,7 +229,7 @@ fn signature(tokens: &[Token], start: usize, name_index: usize) -> Result<Callab
         )
     };
     if !ident(word(tokens, name_index)) {
-        Err(fail())
+        return Err(fail());
     }
     let name = word(tokens, name_index).to_string();
     let mut i = name_index + 1;
@@ -358,7 +358,7 @@ fn signature(tokens: &[Token], start: usize, name_index: usize) -> Result<Callab
         }
         i += 1;
     }
-    return Err(fail());
+    Err(fail())
 }
 
 /// Class member ranges for recognizing optional `method` without treating calls as declarations.
