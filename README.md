@@ -147,3 +147,16 @@ mode found warnings, and **2** means invalid or inconclusive input. Exit 0,
 including with every marker present, never certifies effect freedom or runtime
 admission. The requested [effect semantics and remaining compiler/runtime
 gates](docs/exception-effects.md) are tracked separately.
+
+
+## Trusted backend race evidence (under development)
+
+See [docs/RACE_EVIDENCE_V1.md](docs/RACE_EVIDENCE_V1.md) for the proposed
+LLVM/GraalVM admission contract. The Rust-only `rust/race_evidence.rs`
+module checks bounded receipt *shape* (build/run binding, event counters,
+memory scopes, complete surface manifest and sticky overflow). It deliberately
+does **not** certify a runtime: no authenticated host-only event channel,
+backend scheduler coverage or source-to-binary provenance handoff has been
+implemented yet. The current `--race --trace` paths are **offline trace
+analysis**, not a trusted-run race-free certificate. Do not wire a successful
+shape check to CLI exit 0 until those backend admission gates exist.
