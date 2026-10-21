@@ -27,15 +27,22 @@ pub fn fuzz(root: &Path, cfg: &toml::Value, seed: u64, cases: usize, timeout: f6
     let mut corpus:Vec<Vec<u8>>=vec![vec![],vec![0],vec![255]];
     if dir.exists() {
         if !dir.is_dir() {return Err("fuzz corpus is not a directory".into());}
-        let mut paths:Vec<_>=std::fs::read_dir(dir).map_err(|e|e.to_string())?
-            .map(|e|e.map(|f|f.path()).map_err(|e|e.to_string())).collect::<Result<_>>()?;
+        let mut paths=Vec::new();
+        for entry in std::fs::read_dir(dir).map_err(|e|e.to_string())? {
+            if paths.len() >= 4096 { return Err("fuzz corpus exceeds 4096 entries".into()); }
+            paths.push(entry.map_err(|e|e.to_string())?.path());
+        }
         paths.sort();
+        let mut total_bytes=0usize;
         for path in paths {
             if path.symlink_metadata().map_err(|e|e.to_string())?.file_type().is_symlink() {
                 return Err("fuzz corpus may not contain symlinks".into());
             }
             if path.is_file() && path.metadata().map_err(|e|e.to_string())?.len() <= max as u64 {
-                corpus.push(bounded_read(&path,max)?);
+                let input=bounded_read(&path,max)?;
+                total_bytes=total_bytes.checked_add(input.len()).ok_or("corpus byte-size overflow")?;
+                if total_bytes > 16_777_216 { return Err("fuzz corpus exceeds 16 MiB".into()); }
+                corpus.push(input);
             }
         }
     }
