@@ -1,4 +1,5 @@
 pub mod effects;
+pub mod race_evidence;
 
 use std::ffi::OsString;
 use std::fs::{self, File};
