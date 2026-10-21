@@ -19,7 +19,7 @@ struct Settings {
     root: PathBuf,
     fuzz: bool,
     race: bool,
-    trace: bool,
+    trace: Option<String>,
     logical: bool,
     model: bool,
     seed: u64,
@@ -30,7 +30,7 @@ struct Settings {
 fn parse(args: &[OsString]) -> Result<Settings, String> {
     let mut out = Settings {
         root: PathBuf::from("."), fuzz: false, race: false,
-        trace: false, logical: false, model: false,
+        trace: None, logical: false, model: false,
         seed: 1, cases: 100, timeout: Duration::from_secs(5),
     };
     let mut i = 0;
@@ -55,7 +55,7 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
                         if !t.is_finite() || !(0.01..=600.0).contains(&t) { return Err("timeout must be 0.01..600 seconds".into()); }
                         out.timeout = Duration::from_secs_f64(t);
                     },
-                    "--trace" => out.trace = true,
+                    "--trace" => out.trace = Some(value),
                     "--model" => out.model = true,
                     "--max-schedules" => {
                         let n = value.parse::<usize>().map_err(|_| "invalid --max-schedules")?;
@@ -69,10 +69,10 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
         i += 1;
     }
     if out.cases == 0 || out.cases > MAX_CASES { return Err("cases must be 1..1000000".into()); }
-    if out.fuzz && (out.race || out.trace || out.logical || out.model) {
+    if out.fuzz && (out.race || out.trace.is_some() || out.logical || out.model) {
         return Err("fuzz and race modes are exclusive".into());
     }
-    if (out.trace || out.logical || out.model) && !out.race {
+    if (out.trace.is_some() || out.logical || out.model) && !out.race {
         return Err("--trace/--model/--logical requires --race".into());
     }
     Ok(out)
@@ -432,7 +432,13 @@ pub fn run(args: &[OsString]) -> i32 {
         if !root.is_dir() { return Err("project root must be a directory".into()); }
         let cfg = manifest(&root)?;
         if settings.race {
-            return Err("runtime --race is INCONCLUSIVE: Rust backend trace analyzer and trusted instrumentation admission are not yet implemented; Python fallback forbidden".into());
+            if settings.logical || settings.model {
+                return Err("runtime --race --logical is INCONCLUSIVE: Rust controlled-scheduler model support is pending".into());
+            }
+            if let Some(path) = &settings.trace {
+                return super::race_offline::offline(&root, path);
+            }
+            return Err("runtime --race is INCONCLUSIVE: trusted backend trace admission is not implemented; use --trace for explicitly offline Rust analysis".into());
         }
         if settings.fuzz { fuzz(&root, &cfg, &settings) }
         else { native(&root, &cfg, settings.timeout) }
@@ -449,6 +455,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_race_without_python_fallback() {
         assert_eq!(run(&["--race".into()]), 2);
+        assert_eq!(run(&["--race".into(), "--logical".into()]), 2);
     }
     #[test]
     fn rejects_missing_arguments_and_invalid_timeouts() {
