@@ -75,6 +75,21 @@ while true { await receive(); }
             with self.assertRaisesRegex(AuditError, "symlinked"):
                 analyze(p)
 
+    def test_symlink_directory_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.project(d, "let x = 2;")
+            (p / "alias").symlink_to(p / "src", target_is_directory=True)
+            with self.assertRaisesRegex(AuditError, "symlinked audit directory"):
+                analyze(p)
+
+    def test_static_scan_does_not_require_parseable_runtime_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.project(d, 'let website = "http://example.org";')
+            (p / "oreslang-test.toml").write_text("broken = [", encoding="utf8")
+            status, out, err = self.call("--root", d, "--audit", "--audit-format", "json")
+            self.assertEqual(status, 0, err)
+            self.assertEqual(json.loads(out)["files_scanned"], 1)
+
     def test_path_traversal_rejected(self):
         with tempfile.TemporaryDirectory() as d:
             p = self.project(d, "let x = 2;")
