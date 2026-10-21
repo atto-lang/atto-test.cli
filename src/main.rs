@@ -170,6 +170,12 @@ fn check(root:&Path,cfg:&toml::Value,source:Option<&str>,types:bool,timeout:f64)
         if out.stdout.lines().filter(|line|*line==receipt).count()!=1 {
             return Err(format!("{} did not produce source-bound {phase} receipt; cannot assert check-only success",file.display()));
         }
+        // The parser must have checked the exact source bytes for which the
+        // receipt is published; deny mutable-source swaps during invocation.
+        let after = common::bounded_read(file, 4_000_000)?;
+        if format!("{:x}", Sha256::digest(&after)) != digest {
+            return Err(format!("{} changed during compiler check; receipt is stale", file.display()));
+        }
         // Detect compiler replacement after invocation; the binary SHA is
         // independently controlled by the trusted caller, never by the project.
         digest_trusted_compiler(&cmd, &trusted_sha)?;
