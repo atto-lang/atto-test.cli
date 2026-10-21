@@ -3,7 +3,11 @@ use std::path::{Component, Path, PathBuf};
 pub type Result<T> = std::result::Result<T, String>;
 pub fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
     let p = Path::new(relative);
-    if p.is_absolute() || relative.is_empty() || p.components().any(|c| matches!(c, Component::ParentDir | Component::Prefix(_))) {
+    if p.is_absolute()
+        || relative.is_empty()
+        || p.components()
+            .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+    {
         return Err(format!("path must be project-relative: {relative}"));
     }
     // Reject link traversal (including intermediate parents) without following links.
@@ -11,7 +15,10 @@ pub fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
     for part in p.components() {
         if let Component::Normal(name) = part {
             target.push(name);
-            if target.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) {
+            if target
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+            {
                 return Err(format!("source symlink refused: {relative}"));
             }
         }
@@ -19,7 +26,12 @@ pub fn safe_path(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(target)
 }
 pub fn bounded_read(path: &Path, max: usize) -> Result<Vec<u8>> {
-    if path.symlink_metadata().map_err(|e| e.to_string())?.file_type().is_symlink() {
+    if path
+        .symlink_metadata()
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_symlink()
+    {
         return Err("trace/corpus symlink is forbidden".into());
     }
     // The lstat precheck is not sufficient against a final-component symlink
@@ -27,25 +39,35 @@ pub fn bounded_read(path: &Path, max: usize) -> Result<Vec<u8>> {
     #[cfg(unix)]
     let file = {
         use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new().read(true)
+        std::fs::OpenOptions::new()
+            .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path).map_err(|e| e.to_string())?
+            .open(path)
+            .map_err(|e| e.to_string())?
     };
     #[cfg(not(unix))]
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let meta = file.metadata().map_err(|e| e.to_string())?;
-    if !meta.is_file() || meta.len() > max as u64 { return Err("invalid or oversized input".into()); }
+    if !meta.is_file() || meta.len() > max as u64 {
+        return Err("invalid or oversized input".into());
+    }
     use std::io::Read;
     let mut bytes = Vec::new();
-    file.take(max as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    if bytes.len() > max { return Err("input exceeds size budget".into()); }
+    file.take(max as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > max {
+        return Err("input exceeds size budget".into());
+    }
     Ok(bytes)
 }
 pub fn trace(path: &Path, expected: Option<&str>) -> Result<Vec<Value>> {
     let raw = bounded_read(path, 10_000_000)?;
     let s = std::str::from_utf8(&raw).map_err(|e| e.to_string())?;
     let lines: Vec<&str> = s.lines().collect();
-    if !(2..=100_002).contains(&lines.len()) { return Err("trace requires begin/end and <=100000 events".into()); }
+    if !(2..=100_002).contains(&lines.len()) {
+        return Err("trace requires begin/end and <=100000 events".into());
+    }
     // serde_json defaults to last duplicate key; reject duplicate properties before parsing.
     let mut records = Vec::with_capacity(lines.len());
     for line in lines {
@@ -56,8 +78,11 @@ pub fn trace(path: &Path, expected: Option<&str>) -> Result<Vec<Value>> {
     }
     let start = &records[0];
     let end = records.last().unwrap();
-    if start["op"] != "begin" || start["version"].as_u64() != Some(1) ||
-       start["version"].is_boolean() || end["op"] != "end" {
+    if start["op"] != "begin"
+        || start["version"].as_u64() != Some(1)
+        || start["version"].is_boolean()
+        || end["op"] != "end"
+    {
         return Err("missing ORES_RACE_V1 begin/end".into());
     }
     let run_id = field(start, "run_id")?;
@@ -76,7 +101,9 @@ pub fn strict_json_object(input: &[u8]) -> Result<Value> {
     parse_unique_object(&mut parser)
 }
 
-fn parse_unique_object<'de, R: serde_json::de::Read<'de>>(de: &mut serde_json::Deserializer<R>) -> Result<Value> {
+fn parse_unique_object<'de, R: serde_json::de::Read<'de>>(
+    de: &mut serde_json::Deserializer<R>,
+) -> Result<Value> {
     use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
     use std::fmt;
     struct Unique;
@@ -111,7 +138,10 @@ fn parse_unique_object<'de, R: serde_json::de::Read<'de>>(de: &mut serde_json::D
         fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Value, E> {
             Ok(Value::Null)
         }
-        fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> std::result::Result<Value, D::Error> {
+        fn visit_some<D: serde::Deserializer<'de>>(
+            self,
+            d: D,
+        ) -> std::result::Result<Value, D::Error> {
             Unique.deserialize(d)
         }
         fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Value, A::Error> {
@@ -135,25 +165,42 @@ fn parse_unique_object<'de, R: serde_json::de::Read<'de>>(de: &mut serde_json::D
     }
     impl<'de> DeserializeSeed<'de> for Unique {
         type Value = Value;
-        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> std::result::Result<Value, D::Error> {
+        fn deserialize<D: serde::Deserializer<'de>>(
+            self,
+            d: D,
+        ) -> std::result::Result<Value, D::Error> {
             d.deserialize_any(self)
         }
     }
     let value = Unique.deserialize(&mut *de).map_err(|e| e.to_string())?;
     de.end().map_err(|e| e.to_string())?;
-    if !value.is_object() { return Err("race trace record must be a JSON object".into()); }
+    if !value.is_object() {
+        return Err("race trace record must be a JSON object".into());
+    }
     Ok(value)
 }
 pub fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
-    let s = v.get(key).and_then(Value::as_str).ok_or_else(|| format!("invalid {key}"))?;
-    if s.is_empty() || s.len() > 512 || s.chars().any(|c| c < ' ') { return Err(format!("invalid {key}")); }
+    let s = v
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("invalid {key}"))?;
+    if s.is_empty() || s.len() > 512 || s.chars().any(|c| c < ' ') {
+        return Err(format!("invalid {key}"));
+    }
     Ok(s)
 }
 pub fn table_command(v: &toml::Value, section: &str) -> Result<Vec<String>> {
-    let a = v.get(section).and_then(|s| s.get("command")).and_then(|v| v.as_array())
+    let a = v
+        .get(section)
+        .and_then(|s| s.get("command"))
+        .and_then(|v| v.as_array())
         .ok_or_else(|| format!("[{section}].command required"))?;
-    let cmd: Option<Vec<_>> = a.iter().map(|x| x.as_str().filter(|s| !s.is_empty()).map(str::to_owned)).collect();
-    cmd.filter(|v| !v.is_empty()).ok_or_else(|| format!("[{section}].command requires nonempty argv array"))
+    let cmd: Option<Vec<_>> = a
+        .iter()
+        .map(|x| x.as_str().filter(|s| !s.is_empty()).map(str::to_owned))
+        .collect();
+    cmd.filter(|v| !v.is_empty())
+        .ok_or_else(|| format!("[{section}].command requires nonempty argv array"))
 }
 
 #[cfg(test)]
@@ -183,6 +230,9 @@ mod strict_json_regression {
             .expect("valid nested JSON");
         assert_eq!(record["meta"][0]["a"], 1);
         assert_eq!(record["meta"][0]["b"], 2.5);
-        assert!(parse(r#"[{"x":1}]"#).is_err(), "trace top-level must be an object");
+        assert!(
+            parse(r#"[{"x":1}]"#).is_err(),
+            "trace top-level must be an object"
+        );
     }
 }
