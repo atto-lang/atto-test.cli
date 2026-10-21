@@ -27,19 +27,31 @@ pub fn fuzz(root: &Path, cfg: &toml::Value, seed: u64, cases: usize, timeout: f6
     let mut corpus:Vec<Vec<u8>>=vec![vec![],vec![0],vec![255]];
     if dir.exists() {
         if !dir.is_dir() {return Err("fuzz corpus is not a directory".into());}
-        let mut paths:Vec<_>=std::fs::read_dir(dir).map_err(|e|e.to_string())?
-            .map(|e|e.map(|f|f.path()).map_err(|e|e.to_string())).collect::<Result<_>>()?;
+        // Bound enumeration before allocating a path list, then bound aggregate
+        // corpus bytes. Oversized/non-file members fail closed instead of
+        // being silently excluded from coverage.
+        let mut paths=Vec::new();
+        for entry in std::fs::read_dir(&dir).map_err(|e|e.to_string())? {
+            if paths.len() >= 512 {return Err("fuzz corpus exceeds 512 entries".into());}
+            paths.push(entry.map_err(|e|e.to_string())?.path());
+        }
         paths.sort();
+        let mut corpus_bytes=0usize;
         for path in paths {
-            if path.symlink_metadata().map_err(|e|e.to_string())?.file_type().is_symlink() {
-                return Err("fuzz corpus may not contain symlinks".into());
+            let kind=path.symlink_metadata().map_err(|e|e.to_string())?.file_type();
+            if kind.is_symlink() {return Err("fuzz corpus may not contain symlinks".into());}
+            if !kind.is_file() {return Err("fuzz corpus must contain regular files only".into());}
+            let bytes=bounded_read(&path,max)?;
+            corpus_bytes=corpus_bytes.checked_add(bytes.len())
+                .ok_or("fuzz corpus size overflow")?;
+            if corpus_bytes > 4*1024*1024 {
+                return Err("fuzz corpus exceeds 4 MiB aggregate input".into());
             }
-            if path.is_file() && path.metadata().map_err(|e|e.to_string())?.len() <= max as u64 {
-                corpus.push(bounded_read(&path,max)?);
-            }
+            corpus.push(bytes);
         }
     }
     corpus.sort(); corpus.dedup();
+    let mut pool_bytes=corpus.iter().map(Vec::len).sum::<usize>();
     let mut rng=StdRng::seed_from_u64(seed);
     for iteration in 0..cases {
         let case=if iteration < corpus.len() {corpus[iteration].clone()} else {
@@ -102,8 +114,53 @@ pub fn fuzz(root: &Path, cfg: &toml::Value, seed: u64, cases: usize, timeout: f6
             eprintln!("Minimized to {} bytes: {}",reduced.len(),dest.display());
             return Ok(1);
         }
-        if corpus.len()<4096 && !corpus.contains(&case) {corpus.push(case);}
+        // The 4,096-case historical count limit alone could retain 256 MiB
+        // when fuzz.max_bytes=65536; cap the live mutation pool by bytes too.
+        if corpus.len()<4096
+            && pool_bytes.saturating_add(case.len()) <= 16*1024*1024
+            && !corpus.contains(&case) {
+            pool_bytes+=case.len();
+            corpus.push(case);
+        }
     }
     println!("FUZZ PASS cases={cases} seed={seed} (tested inputs only; no coverage claim)");
     Ok(0)
+}
+
+#[cfg(test)]
+mod corpus_limit_tests {
+    use super::*;
+
+    fn cfg() -> toml::Value {
+        r#"[fuzz]
+command=["unavailable-fuzz-command-for-preflight"]
+corpus="corpus"
+max_bytes=65536
+"#.parse().unwrap()
+    }
+
+    #[test]
+    fn rejects_unbounded_corpus_entry_count_before_invoking_guest() {
+        let project=tempfile::tempdir().unwrap();
+        let dir=project.path().join("corpus");
+        std::fs::create_dir(&dir).unwrap();
+        for n in 0..513 {
+            std::fs::write(dir.join(format!("{n:04}.bin")), []).unwrap();
+        }
+        let error=fuzz(project.path(), &cfg(), 1, 1, 1.0).unwrap_err();
+        assert!(error.contains("512 entries"), "{error}");
+    }
+
+    #[test]
+    fn rejects_oversized_aggregate_corpus_before_invoking_guest() {
+        let project=tempfile::tempdir().unwrap();
+        let dir=project.path().join("corpus");
+        std::fs::create_dir(&dir).unwrap();
+        let data=vec![0u8;65536];
+        for n in 0..65 {
+            std::fs::write(dir.join(format!("{n:04}.bin")), &data).unwrap();
+        }
+        let error=fuzz(project.path(), &cfg(), 1, 1, 1.0).unwrap_err();
+        assert!(error.contains("4 MiB aggregate"), "{error}");
+    }
 }
