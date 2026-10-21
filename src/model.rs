@@ -1,5 +1,5 @@
 //! Bounded logical actor-turn reference model explorer (not guest scheduler control).
-use crate::common::{bounded_read, Result};
+use crate::common::{bounded_read, strict_json_object, Result};
 use serde_json::Value;
 use std::{collections::{BTreeMap,HashSet},path::Path};
 type State=BTreeMap<String,i64>;
@@ -85,7 +85,7 @@ impl Search<'_> {
 pub fn explore(path:&Path,limit:usize)->Result<ModelReport>{
     if !(1..=1_000_000).contains(&limit){return Err("invalid schedule limit".into());}
     let bytes=bounded_read(path,2_000_000)?;
-    let model:Value=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
+    let model:Value=strict_json_object(&bytes)?;
     if !model.is_object() {return Err("model must be a JSON object".into());}
     let state=object_state(model.get("initial").ok_or("model missing initial")?)?;
     let expected=object_state(model.get("expected").ok_or("model missing expected")?)?;
