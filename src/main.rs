@@ -6,6 +6,7 @@ mod model;
 mod deadlock;
 mod schedule;
 mod reactive;
+mod effects_cli;
 
 use clap::Parser;
 use common::{safe_path,table_command,Result};
@@ -20,6 +21,9 @@ struct Opt {
     #[arg(long,default_value=".")] root:PathBuf,
     #[arg(long)] check:bool,
     #[arg(long)] check_types:bool,
+    #[arg(long)] effects:bool,
+    #[arg(long)] effects_strict:bool,
+    #[arg(long="file")] file:Vec<String>,
     #[arg(long)] fuzz:bool,
     #[arg(long)] race:bool,
     #[arg(long)] deadlock:bool,
@@ -41,6 +45,10 @@ struct Opt {
 fn validate(o:&Opt)->Result<()> {
     let schedule=o.schedule_fuzz || o.replay.is_some();
     let checking=o.check||o.check_types;
+    if (o.effects_strict || !o.file.is_empty()) && !o.effects {return Err("--effects-strict and --file require --effects".into());}
+    if o.effects && (checking||o.fuzz||o.race||o.deadlock||o.model_check||o.logical||schedule||o.trace.is_some()||o.model.is_some()||o.source.is_some()) {
+        return Err("--effects is a separate advisory source mode".into());
+    }
     if o.check && o.check_types {return Err("--check and --check-types are separate modes".into());}
     if checking && (o.fuzz||o.race||o.deadlock||o.model_check||o.logical||schedule||o.trace.is_some()||o.model.is_some()) {
         return Err("--check/--check-types cannot combine with test modes".into());
@@ -276,6 +284,7 @@ fn run(o:Opt)->Result<u8>{
         toml::from_str(&raw).map_err(|e|e.to_string())?
     }else{toml::Value::Table(toml::map::Map::new())};
     if o.check||o.check_types {return check(&root,&cfg,o.source.as_deref(),o.check_types,o.timeout);}
+    if o.effects {return effects_cli::run(&root,&cfg,&o.file,o.effects_strict);}
     if o.schedule_fuzz||o.replay.is_some() {
         return schedule::schedule(&root,&cfg,o.seed,o.iterations,o.timeout,o.replay.as_deref(),o.trace_output.as_deref());
     }
