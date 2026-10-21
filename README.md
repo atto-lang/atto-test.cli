@@ -72,7 +72,7 @@ corpus = "tests/corpus/my-property"
 max_bytes = 256
 ```
 
-`--fuzz` mutates and extends bounded seed corpora reproducibly with `--seed`, executes inputs in isolated subprocesses, classifies failure by exit code or timeout, replays failures twice, shrinks reproducible failures, and saves SHA-256-addressed reproductions under `.oreslang-test/failures/`. This is **mutation fuzzing**, not coverage-guided fuzzing; empty/unsupported corpus instrumentation does not establish coverage.
+`--fuzz` mutates and extends bounded seed corpora reproducibly with `--seed`, executes inputs in bounded subprocesses, classifies failure by exit code or timeout, replays failures twice, shrinks reproducible failures, and saves SHA-256-addressed reproductions under `.oreslang-test/failures/`. This is **mutation fuzzing**, not coverage-guided fuzzing; empty/unsupported corpus instrumentation does not establish coverage.
 
 ## Race analysis
 
@@ -107,6 +107,30 @@ command = ["/path/to/oreslang-compiler", "test", "tests/concurrency.ores"]
 * **2:** Invalid arguments, unsupported tooling, malformed/stale traces, flaky fuzz case, inconclusive exploration or missing backend instrumentation.
 
 ## Security and CI
+
+### Untrusted test commands are not OS-sandboxed
+
+The Rust CLI launches configured commands as ordinary host processes. Its
+`env_clear`, process-group cleanup, output limits, and path checks do **not**
+prevent a guest command from reading files accessible to the current user,
+accessing the network, starting detached processes, or modifying the checkout.
+`[race].command`, `[fuzz].command`, `[native]` compiler selection and other
+project-controlled commands must therefore be treated as **executable code**,
+not inert test data. Do not execute unreviewed third-party project manifests
+on a privileged CI runner or anywhere with secrets, private credentials,
+writable deployment state, or ambient cloud service permissions. Use a fresh,
+independently configured operating-system/container/VM security boundary
+when testing untrusted projects; setting `HOME` or clearing environment
+variables alone is not a filesystem or network isolation mechanism.
+
+A test destination in another GitHub organization does not become authorized
+merely because it has funded Actions minutes or receives the Git tree without
+a cross-organization checkout token. Private-source mirroring requires
+independent policy approval of the exact destination repository **and numeric
+repository ID**, current protected-ref checks, a pinned source tree,
+short-lived private refs, and source/destination tree verification. Without
+that authorization, run tests in the source organization or report **not
+executed**; do not manufacture a passing CI attestation.
 
 The runner applies per-stream output caps, timeouts and process-group termination, rejects symlinked project-relative artifacts, bounds model/trace/corpus sizes, and does not invoke a shell internally. Unit and fixture tests run with `cargo test --all-targets`. `scripts/ci-verify-concurrency-p0.sh` requires an exact Git source tree SHA; previous Python CI checks have been replaced with Rust tests.
 
