@@ -61,31 +61,72 @@ pub fn trace(path: &Path, expected: Option<&str>) -> Result<Vec<Value>> {
     Ok(records)
 }
 fn parse_unique_object<'de, R: serde_json::de::Read<'de>>(de: &mut serde_json::Deserializer<R>) -> Result<Value> {
-    use serde::de::{DeserializeSeed, MapAccess, Visitor};
+    use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
     use std::fmt;
     struct Unique;
     impl<'de> Visitor<'de> for Unique {
         type Value = Value;
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("a JSON object") }
-        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a JSON value without duplicate object properties")
+        }
+        fn visit_bool<E: serde::de::Error>(self, value: bool) -> std::result::Result<Value, E> {
+            Ok(Value::Bool(value))
+        }
+        fn visit_i64<E: serde::de::Error>(self, value: i64) -> std::result::Result<Value, E> {
+            Ok(Value::Number(value.into()))
+        }
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> std::result::Result<Value, E> {
+            Ok(Value::Number(value.into()))
+        }
+        fn visit_f64<E: serde::de::Error>(self, value: f64) -> std::result::Result<Value, E> {
+            serde_json::Number::from_f64(value)
+                .map(Value::Number)
+                .ok_or_else(|| E::custom("nonfinite JSON number"))
+        }
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Value, E> {
+            Ok(Value::String(value.to_owned()))
+        }
+        fn visit_string<E: serde::de::Error>(self, value: String) -> std::result::Result<Value, E> {
+            Ok(Value::String(value))
+        }
+        fn visit_none<E: serde::de::Error>(self) -> std::result::Result<Value, E> {
+            Ok(Value::Null)
+        }
+        fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<Value, E> {
+            Ok(Value::Null)
+        }
+        fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> std::result::Result<Value, D::Error> {
+            Unique.deserialize(d)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Value, A::Error> {
+            let mut out = Vec::new();
+            while let Some(value) = seq.next_element_seed(Unique)? {
+                out.push(value);
+            }
+            Ok(Value::Array(out))
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<Value, A::Error> {
             let mut out = serde_json::Map::new();
-            while let Some(k) = map.next_key::<String>()? {
-                if out.contains_key(&k) { return Err(serde::de::Error::custom(format!("duplicate JSON property {k}"))); }
-                let v = map.next_value::<Value>()?;
-                out.insert(k, v);
+            while let Some(key) = map.next_key::<String>()? {
+                if out.contains_key(&key) {
+                    return Err(serde::de::Error::custom("duplicate JSON property"));
+                }
+                let value = map.next_value_seed(Unique)?;
+                out.insert(key, value);
             }
             Ok(Value::Object(out))
         }
     }
     impl<'de> DeserializeSeed<'de> for Unique {
         type Value = Value;
-        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> std::result::Result<Self::Value, D::Error> {
-            d.deserialize_map(self)
+        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> std::result::Result<Value, D::Error> {
+            d.deserialize_any(self)
         }
     }
-    let v = Unique.deserialize(&mut *de).map_err(|e| e.to_string())?;
+    let value = Unique.deserialize(&mut *de).map_err(|e| e.to_string())?;
     de.end().map_err(|e| e.to_string())?;
-    Ok(v)
+    if !value.is_object() { return Err("race trace record must be a JSON object".into()); }
+    Ok(value)
 }
 pub fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     let s = v.get(key).and_then(Value::as_str).ok_or_else(|| format!("invalid {key}"))?;
