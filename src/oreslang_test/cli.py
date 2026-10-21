@@ -193,7 +193,7 @@ def _failure(result):
     return f"exit:{result.returncode}" if result.returncode else None
 
 
-def fuzz(root, config, seed, cases, timeout, inherit_env=False):
+def fuzz(root, config, seed, cases, timeout, inherit_env=False, profile="general"):
     params = config.get("fuzz", {})
     cmd = _command(params.get("command"), "fuzz")
     if not 1 <= cases <= 1_000_000:
@@ -206,6 +206,15 @@ def fuzz(root, config, seed, cases, timeout, inherit_env=False):
     rng = random.Random(seed)
     corpus_path = _relative(root, params.get("corpus", "tests/corpus"))
     corpus = [b"", b"\x00", b"\xff"]
+    if profile == "security":
+        # Adversarial *inputs*, not exploit-detection oracles. The configured
+        # harness remains responsible for asserting correct behavior.
+        corpus.extend(payload[:max_bytes] for payload in (
+            b"../../etc/passwd", b"..\\..\\windows\\system.ini",
+            b"%00", b"%2e%2e%2f", b"' OR '1'='1",
+            b"<script>alert(1)</script>", b"\\xff\\xfe",
+            b"\x00" * 256, b"A" * 4096, b'{"x":' + b"[" * 128 + b"0" + b"]" * 128 + b"}"
+        ))
     if corpus_path.exists():
         if corpus_path.is_symlink() or not corpus_path.is_dir():
             raise UsageError("fuzz corpus must be a real directory")
@@ -527,6 +536,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="oreslang test")
     parser.add_argument("--root", default=".")
     parser.add_argument("--fuzz", action="store_true")
+    parser.add_argument("--fuzz-profile", choices=["general", "security"], default="general",
+                        help="security seeds exercise adversarial byte inputs, not vulnerability oracles")
     parser.add_argument("--audit", action="store_true", help="advisory security and anti-pattern source scan")
     parser.add_argument("--security", action="store_true", help="advisory security scan only")
     parser.add_argument("--anti-patterns", action="store_true", help="advisory code anti-pattern scan only")
@@ -552,6 +563,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         audit_requested = args.audit or args.security or args.anti_patterns
+        if args.fuzz_profile != "general" and not args.fuzz:
+            raise UsageError("--fuzz-profile requires --fuzz")
         if audit_requested and (args.fuzz or args.race or args.deadlock or args.model_check
                                 or args.logical or args.model or args.trace or args.schedule_fuzz
                                 or args.replay or args.trace_output or args.iterations != 1):
@@ -597,7 +610,7 @@ def main(argv=None):
             return schedule(root, config, args.seed, args.iterations,
                             args.timeout, args.replay, args.trace_output, args.inherit_env)
         if args.fuzz:
-            return fuzz(root, config, args.seed, args.cases, args.timeout, args.inherit_env)
+            return fuzz(root, config, args.seed, args.cases, args.timeout, args.inherit_env, args.fuzz_profile)
         if args.model_check:
             # The existing bounded reference-model explorer, not full guest
             # compiler model checking. The output explicitly identifies scope.
