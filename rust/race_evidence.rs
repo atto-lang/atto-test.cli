@@ -59,7 +59,7 @@ fn is_bounded_run_id(value: &str) -> bool {
     return !value.is_empty()
         && value.len() <= MAX_RUN_ID
         && value.as_bytes().iter().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+            byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b':' | b'.')
         });
 }
 
