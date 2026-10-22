@@ -6,6 +6,8 @@ mod race_offline;
 mod deadlock;
 mod logical;
 mod runtime;
+#[cfg(target_os = "linux")]
+mod fs_secure;
 
 use std::ffi::OsString;
 use std::fs;
@@ -50,6 +52,20 @@ fn read_bounded(path: &Path) -> Result<String, String> {
         ));
     }
     return String::from_utf8(bytes).map_err(|_| format!("invalid UTF-8: {}", path.display()));
+}
+
+fn read_bounded_project(root: &Path, relative: &Path) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let bytes = fs_secure::read_project_file(root, relative, effects::MAX_SOURCE)?;
+        return String::from_utf8(bytes).map_err(|_| {
+            format!("invalid UTF-8 project input: {}", relative.display())
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        return read_bounded(&root.join(relative));
+    }
 }
 
 fn source_path(root: &Path, name: &str) -> Result<PathBuf, String> {
@@ -197,7 +213,7 @@ fn scan(args: &[OsString]) -> Result<(String, i32), String> {
                 return Err("source configuration symlink refused".into());
             }
             Some(
-                read_bounded(&manifest)?
+                read_bounded_project(&root, Path::new("oreslang-test.toml"))?
                     .parse::<toml::Table>()
                     .map_err(|e| format!("invalid TOML: {e}"))?,
             )
@@ -242,7 +258,7 @@ fn scan(args: &[OsString]) -> Result<(String, i32), String> {
         if !seen.insert(path.canonicalize().map_err(|e| e.to_string())?) {
             continue;
         }
-        let source = read_bounded(&path)?;
+        let source = read_bounded_project(&root, Path::new(&name))?;
         source_bytes += source.len();
         if source_bytes > 4 * 1024 * 1024 {
             return Err("aggregate source budget exceeds 4 MiB; narrow --file selection".into());
