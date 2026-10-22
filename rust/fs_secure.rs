@@ -81,16 +81,45 @@ fn step_dir(current: &File, component: &OsStr, create: bool) -> Result<File, Str
     }).map_err(|e| format!("unsafe or missing project path component: {e}"))
 }
 
-fn parent_and_name(root: &Path, relative: &Path, create_dirs: bool)
+fn parent_and_name_fd(root: &File, relative: &Path, create_dirs: bool)
     -> Result<(File, CString), String>
 {
     let parts = components(relative)?;
-    let mut current = root_fd(root)?;
+    let mut current = root.try_clone().map_err(|e| e.to_string())?;
     for component in &parts[..parts.len() - 1] {
         current = step_dir(&current, component, create_dirs)?;
     }
     let name = c_name(parts[parts.len() - 1])?;
     Ok((current, name))
+}
+
+fn parent_and_name(root: &Path, relative: &Path, create_dirs: bool)
+    -> Result<(File, CString), String>
+{
+    let fd = root_fd(root)?;
+    parent_and_name_fd(&fd, relative, create_dirs)
+}
+
+/// One verified directory descriptor reused by a single fuzz invocation.
+/// Root pathname substitutions after construction cannot redirect corpus
+/// reads or reproduced failure output.
+pub struct ProjectRoot {
+    fd: File,
+}
+impl ProjectRoot {
+    pub fn new(root: &Path) -> Result<Self, String> {
+        Ok(Self { fd: root_fd(root)? })
+    }
+
+    pub fn corpus(&self, relative: &Path, max_files: usize, per_file: usize, total: usize)
+        -> Result<Vec<Vec<u8>>, String>
+    {
+        read_corpus_fd(&self.fd, relative, max_files, per_file, total)
+    }
+
+    pub fn reproducer(&self, relative: &Path, bytes: &[u8]) -> Result<(), String> {
+        create_or_match_fd(&self.fd, relative, bytes)
+    }
 }
 
 fn open_input(root: &Path, relative: &Path) -> Result<File, String> {
@@ -206,6 +235,22 @@ fn read_corpus_directory(directory: &File, max_files: usize, per_file: usize, to
     Ok(records.into_iter().map(|(_, bytes)| bytes).collect())
 }
 
+fn read_corpus_fd(
+    root: &File,
+    relative: &Path,
+    max_files: usize,
+    per_file: usize,
+    total: usize,
+) -> Result<Vec<Vec<u8>>, String> {
+    let (parent, name) = parent_and_name_fd(root, relative, false)?;
+    let directory = opened(unsafe {
+        openat(parent.as_raw_fd(), name.as_ptr(),
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
+    })?;
+    read_corpus_directory(&directory, max_files, per_file, total)
+}
+
+#[cfg(test)]
 pub fn read_corpus_snapshot(
     root: &Path,
     relative: &Path,
@@ -213,12 +258,8 @@ pub fn read_corpus_snapshot(
     per_file: usize,
     total: usize,
 ) -> Result<Vec<Vec<u8>>, String> {
-    let (parent, name) = parent_and_name(root, relative, false)?;
-    let directory = opened(unsafe {
-        openat(parent.as_raw_fd(), name.as_ptr(),
-            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
-    })?;
-    read_corpus_directory(&directory, max_files, per_file, total)
+    let pinned = ProjectRoot::new(root)?;
+    pinned.corpus(relative, max_files, per_file, total)
 }
 
 /// Discover Oreslang source paths from *opened* directory descriptors.
@@ -284,10 +325,10 @@ pub fn discover_sources(
 /// Create an immutable fuzz reproducer only if absent, or compare an existing
 /// bounded regular file at the securely opened parent. No path-based
 /// read-after-check, symlink following, or truncation.
-pub fn create_or_match(root: &Path, relative: &Path, expected: &[u8])
+fn create_or_match_fd(root: &File, relative: &Path, expected: &[u8])
     -> Result<(), String>
 {
-    let (parent, name) = parent_and_name(root, relative, true)?;
+    let (parent, name) = parent_and_name_fd(root, relative, true)?;
     let fd = unsafe {
         openat(parent.as_raw_fd(), name.as_ptr(),
             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -316,6 +357,13 @@ pub fn create_or_match(root: &Path, relative: &Path, expected: &[u8])
         return Err("fuzz reproducer collision or hostile content".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub fn create_or_match(root: &Path, relative: &Path, expected: &[u8])
+    -> Result<(), String>
+{
+    ProjectRoot::new(root)?.reproducer(relative, expected)
 }
 
 #[cfg(test)]
@@ -418,6 +466,26 @@ mod tests {
         );
         symlink(root.join("corpus/a"), root.join("corpus/alias")).unwrap();
         assert!(read_corpus_snapshot(&root, corpus, 3, 5, 20).is_err());
+    }
+
+    #[test]
+    fn pinned_root_rejects_source_root_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(root.join("corpus")).unwrap();
+        std::fs::write(root.join("corpus/sample"), b"original").unwrap();
+        let pinned = ProjectRoot::new(&root).unwrap();
+        std::fs::rename(&root, tmp.path().join("previous")).unwrap();
+        std::fs::create_dir_all(root.join("corpus")).unwrap();
+        std::fs::write(root.join("corpus/sample"), b"replacement").unwrap();
+        assert_eq!(
+            pinned.corpus(Path::new("corpus"), 2, 40, 100).unwrap(),
+            vec![b"original".to_vec()]
+        );
+        let output = Path::new(".oreslang-test/failures/repro.bin");
+        pinned.reproducer(output, b"original").unwrap();
+        assert!(tmp.path().join("previous").join(output).is_file());
+        assert!(!root.join(output).exists());
     }
 
     #[test]
