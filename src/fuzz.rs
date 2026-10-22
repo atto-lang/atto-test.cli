@@ -84,6 +84,10 @@ pub fn fuzz(root: &Path, cfg: &toml::Value, seed: u64, cases: usize, timeout: f6
     }
     corpus.sort();
     corpus.dedup();
+    // Bound retained mutations as well as disk seeds; large in-memory corpora
+    // otherwise multiply max_bytes by the 4096-entry retention limit.
+    const MAX_RETAINED_BYTES: usize = 16_777_216;
+    let mut retained_bytes: usize = corpus.iter().map(Vec::len).sum();
     let mut rng = StdRng::seed_from_u64(seed);
     for iteration in 0..cases {
         let case = if iteration < corpus.len() {
@@ -167,7 +171,12 @@ pub fn fuzz(root: &Path, cfg: &toml::Value, seed: u64, cases: usize, timeout: f6
             return Ok(1);
         }
         if corpus.len() < 4096 && !corpus.contains(&case) {
-            corpus.push(case);
+            if let Some(next) = retained_bytes.checked_add(case.len()) {
+                if next <= MAX_RETAINED_BYTES {
+                    retained_bytes = next;
+                    corpus.push(case);
+                }
+            }
         }
     }
     println!("FUZZ PASS cases={cases} seed={seed} (tested inputs only; no coverage claim)");
