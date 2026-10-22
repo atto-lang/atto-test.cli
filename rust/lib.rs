@@ -13,6 +13,7 @@ use std::ffi::OsString;
 use std::fs;
 #[cfg(not(target_os = "linux"))]
 use std::fs::File;
+#[cfg(not(target_os = "linux"))]
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -20,38 +21,19 @@ use std::process::Command;
 const MAX_FILES: usize = 512;
 const MAX_ENTRIES: usize = 20_000;
 
+#[cfg(not(target_os = "linux"))]
 fn read_bounded(path: &Path) -> Result<String, String> {
-    // On Linux open the final component without following a symlink. This
-    // closes the check-then-open substitution window at the final path
-    // component; it is NOT a descriptor-relative guarantee for ancestors.
-    #[cfg(target_os = "linux")]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(0o400000 | 0o4000) // O_NOFOLLOW | O_NONBLOCK (Linux)
-            .open(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?
-    };
-    #[cfg(not(target_os = "linux"))]
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err(format!(
-            "expected regular source/config file: {}",
-            path.display()
-        ));
+        return Err(format!("expected regular source/config file: {}", path.display()));
     }
     let mut bytes = Vec::new();
-    file.take(effects::MAX_SOURCE as u64 + 1)
-        .read_to_end(&mut bytes)
+    file.take(effects::MAX_SOURCE as u64 + 1).read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     if bytes.len() > effects::MAX_SOURCE {
-        return Err(format!(
-            "file exceeds 256 KiB analysis bound: {}",
-            path.display()
-        ));
+        return Err(format!("file exceeds 256 KiB analysis bound: {}", path.display()));
     }
-    return String::from_utf8(bytes).map_err(|_| format!("invalid UTF-8: {}", path.display()));
+    String::from_utf8(bytes).map_err(|_| format!("invalid UTF-8: {}", path.display()))
 }
 
 fn read_bounded_project(root: &Path, relative: &Path) -> Result<String, String> {
@@ -381,36 +363,4 @@ Exit 0: scoped observed pass; 1: finding/failure; 2: invalid/inconclusive."#);
         return audit::run(&args);
     }
     return runtime::run(&args);
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod nofollow_source_tests {
-    use super::*;
-    use std::os::unix::fs::symlink;
-
-    #[test]
-    fn bounded_read_denies_final_symlink_and_admits_regular_source() {
-        let tmp = tempfile::tempdir().expect("temporary source directory");
-        let regular = tmp.path().join("direct.ores");
-        std::fs::write(&regular, b"define module demo as end").unwrap();
-        assert!(read_bounded(&regular).is_ok());
-        let alias = tmp.path().join("alias.ores");
-        symlink(&regular, &alias).unwrap();
-        assert!(read_bounded(&alias).is_err());
-    }
-
-    #[test]
-    fn bounded_read_denies_fifo_and_over_budget_input() {
-        let tmp = tempfile::tempdir().unwrap();
-        let oversized = tmp.path().join("oversized.ores");
-        std::fs::write(&oversized, vec![b'x'; effects::MAX_SOURCE + 1]).unwrap();
-        assert!(read_bounded(&oversized).is_err());
-        let fifo = tmp.path().join("fifo.ores");
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        unsafe extern "C" { fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32; }
-        let path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
-        assert_eq!(unsafe { mkfifo(path.as_ptr(), 0o600) }, 0);
-        assert!(read_bounded(&fifo).is_err());
-    }
 }
