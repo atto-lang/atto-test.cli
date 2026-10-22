@@ -350,7 +350,10 @@ pub(crate) fn relative_trace(root: &Path, name: &str) -> Result<std::path::PathB
 }
 
 pub fn offline(root: &Path, name: &str) -> Result<i32, String> {
-    let path = relative_trace(root,name)?;
+    #[cfg(target_os = "linux")]
+    relative_trace(root, name)?;
+    #[cfg(not(target_os = "linux"))]
+    let path = relative_trace(root, name)?;
     #[cfg(target_os = "linux")]
     let bytes = crate::fs_secure::read_project_file(root, Path::new(name), MAX_BYTES as usize)?;
     #[cfg(not(target_os = "linux"))]
