@@ -4,10 +4,16 @@ mod audit;
 pub mod race_evidence;
 mod race_offline;
 mod deadlock;
+mod logical;
 mod runtime;
+#[cfg(target_os = "linux")]
+mod fs_secure;
 
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs;
+#[cfg(not(target_os = "linux"))]
+use std::fs::File;
+#[cfg(not(target_os = "linux"))]
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -15,25 +21,33 @@ use std::process::Command;
 const MAX_FILES: usize = 512;
 const MAX_ENTRIES: usize = 20_000;
 
+#[cfg(not(target_os = "linux"))]
 fn read_bounded(path: &Path) -> Result<String, String> {
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err(format!(
-            "expected regular source/config file: {}",
-            path.display()
-        ));
+        return Err(format!("expected regular source/config file: {}", path.display()));
     }
     let mut bytes = Vec::new();
-    file.take(effects::MAX_SOURCE as u64 + 1)
-        .read_to_end(&mut bytes)
+    file.take(effects::MAX_SOURCE as u64 + 1).read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     if bytes.len() > effects::MAX_SOURCE {
-        return Err(format!(
-            "file exceeds 256 KiB analysis bound: {}",
-            path.display()
-        ));
+        return Err(format!("file exceeds 256 KiB analysis bound: {}", path.display()));
     }
-    return String::from_utf8(bytes).map_err(|_| format!("invalid UTF-8: {}", path.display()));
+    String::from_utf8(bytes).map_err(|_| format!("invalid UTF-8: {}", path.display()))
+}
+
+fn read_bounded_project(root: &Path, relative: &Path) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let bytes = fs_secure::read_project_file(root, relative, effects::MAX_SOURCE)?;
+        return String::from_utf8(bytes).map_err(|_| {
+            format!("invalid UTF-8 project input: {}", relative.display())
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        return read_bounded(&root.join(relative));
+    }
 }
 
 fn source_path(root: &Path, name: &str) -> Result<PathBuf, String> {
@@ -60,6 +74,12 @@ fn source_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     return Ok(current);
 }
 
+#[cfg(target_os = "linux")]
+fn discover(root: &Path) -> Result<Vec<String>, String> {
+    fs_secure::discover_sources(root, &["target", "node_modules"], MAX_ENTRIES, MAX_FILES, 64)
+}
+
+#[cfg(not(target_os = "linux"))]
 fn discover(root: &Path) -> Result<Vec<String>, String> {
     let mut pending = vec![(root.to_path_buf(), 0)];
     let mut paths = Vec::new();
@@ -181,7 +201,7 @@ fn scan(args: &[OsString]) -> Result<(String, i32), String> {
                 return Err("source configuration symlink refused".into());
             }
             Some(
-                read_bounded(&manifest)?
+                read_bounded_project(&root, Path::new("oreslang-test.toml"))?
                     .parse::<toml::Table>()
                     .map_err(|e| format!("invalid TOML: {e}"))?,
             )
@@ -226,7 +246,7 @@ fn scan(args: &[OsString]) -> Result<(String, i32), String> {
         if !seen.insert(path.canonicalize().map_err(|e| e.to_string())?) {
             continue;
         }
-        let source = read_bounded(&path)?;
+        let source = read_bounded_project(&root, Path::new(&name))?;
         source_bytes += source.len();
         if source_bytes > 4 * 1024 * 1024 {
             return Err("aggregate source budget exceeds 4 MiB; narrow --file selection".into());
@@ -313,11 +333,13 @@ pub fn run(mut args: Vec<OsString>, core_launcher: bool) -> i32 {
        oreslang test --security | --anti-patterns
        oreslang test --fuzz [--fuzz-profile basic|security] [--seed N] [--cases N] [--timeout SECONDS]
        oreslang test --race --trace OFFLINE.jsonl
+       oreslang test --race --logical --model MODEL.json [--max-schedules N]
        oreslang test --deadlock --trace OFFLINE.jsonl
        oreslang test --race --deadlock --trace OFFLINE.jsonl
 
 All current CLI engines are Rust-only; no Python fallback.
-Uninstrumented --race/--deadlock and --logical are inconclusive (exit 2).
+Uninstrumented runtime --race/--deadlock are inconclusive (exit 2).
+--logical is a bounded Rust host model, not a runtime scheduling proof.
 Exit 0: scoped observed pass; 1: finding/failure; 2: invalid/inconclusive."#);
         return 0;
     }

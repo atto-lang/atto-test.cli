@@ -193,6 +193,31 @@ fn bare_path_alias_to_own_cli_cannot_invoke_recursively() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("recursion refused"));
 }
 
+#[test]
+fn rust_logical_host_models_check_atomic_and_lost_updates() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("atomic.json"), include_str!("models/atomic-update.json")).unwrap();
+    fs::write(root.path().join("lost.json"), include_str!("models/lost-update.json")).unwrap();
+
+    let success = cli(root.path(), &["--race", "--logical", "--model", "atomic.json"]);
+    assert_eq!(success.status.code(), Some(0), "{success:?}");
+    assert!(String::from_utf8_lossy(&success.stdout).contains("host model only"));
+
+    let failure = cli(root.path(), &["--race", "--logical", "--model", "lost.json"]);
+    assert_eq!(failure.status.code(), Some(1), "{failure:?}");
+    assert!(String::from_utf8_lossy(&failure.stdout).contains("LOGICAL COUNTEREXAMPLE"));
+
+    let limited = cli(root.path(), &[
+        "--race", "--logical", "--model", "atomic.json", "--max-schedules", "1",
+    ]);
+    assert_eq!(limited.status.code(), Some(2), "{limited:?}");
+    assert!(String::from_utf8_lossy(&limited.stderr).contains("INCONCLUSIVE"));
+
+    assert_eq!(cli(root.path(), &["--race", "--logical"]).status.code(), Some(2));
+    assert_eq!(cli(root.path(), &["--logical", "--model", "atomic.json"]).status.code(), Some(2));
+    assert_eq!(cli(root.path(), &["--race", "--model", "atomic.json"]).status.code(), Some(2));
+}
+
 #[cfg(unix)]
 #[test]
 fn native_runner_refuses_skipped_duplicate_and_empty_case_receipts() {

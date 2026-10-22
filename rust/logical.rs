@@ -3,6 +3,7 @@
 //! proof of race freedom. Exhaustion and arithmetic overflows fail closed.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(not(target_os = "linux"))]
 use std::io::Read;
 use std::path::Path;
 use crate::race_offline::relative_trace;
@@ -370,10 +371,19 @@ pub fn explore(input:&str,max_schedules:u64)->Result<Report,String>{
 pub fn offline(root:&Path,name:&str,max_schedules:u64)->Result<i32,String>{
     let path=relative_trace(root,name)?;
     if path.extension().is_none_or(|ext|ext!="json"){return Err("logical model requires .json".into());}
-    if path.metadata().map_err(|e|e.to_string())?.len()>MAX_SOURCE{return Err("model exceeds 2 MB".into());}
-    let mut bytes=Vec::new();
-    std::fs::File::open(path).map_err(|e|e.to_string())?.take(MAX_SOURCE+1)
-        .read_to_end(&mut bytes).map_err(|e|e.to_string())?;
+    #[cfg(target_os = "linux")]
+    let bytes = crate::fs_secure::read_project_file(root, Path::new(name), MAX_SOURCE as usize)?;
+    #[cfg(not(target_os = "linux"))]
+    let bytes = {
+        if path.metadata().map_err(|e|e.to_string())?.len()>MAX_SOURCE {
+            return Err("model exceeds 2 MB".into());
+        }
+        let mut data=Vec::new();
+        std::fs::File::open(path).map_err(|e|e.to_string())?.take(MAX_SOURCE+1)
+            .read_to_end(&mut data).map_err(|e|e.to_string())?;
+        data
+    };
+    if bytes.len() as u64 > MAX_SOURCE {return Err("model exceeds 2 MB".into());}
     let input=String::from_utf8(bytes).map_err(|_|"model is not UTF-8")?;
     let report=explore(&input,max_schedules)?;
     if let Some(found)=report.violation{
