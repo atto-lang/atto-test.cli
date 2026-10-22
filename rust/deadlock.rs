@@ -203,6 +203,9 @@ pub fn analyze(contents: &str) -> Result<Report, String> {
 }
 
 pub fn offline(root: &Path, name: &str) -> Result<i32, String> {
+    #[cfg(target_os = "linux")]
+    relative_trace(root, name)?;
+    #[cfg(not(target_os = "linux"))]
     let path = relative_trace(root, name)?;
     #[cfg(target_os = "linux")]
     let data = crate::fs_secure::read_project_file(root, Path::new(name), MAX_BYTES as usize)?;
