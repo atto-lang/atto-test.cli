@@ -146,6 +146,66 @@ pub fn list_project_files(root: &Path, relative: &Path, max_files: usize)
     Ok(found)
 }
 
+/// Discover Oreslang source paths from *opened* directory descriptors.
+/// No path-based recursive traversal. Bounds prevent enormous or cyclic
+/// directory trees from causing unbounded scanning. Symlinks are rejected
+/// even when their target would otherwise look like an ordinary source.
+pub fn discover_sources(
+    root: &Path,
+    skipped: &[&str],
+    max_entries: usize,
+    max_files: usize,
+    max_depth: usize,
+) -> Result<Vec<String>, String> {
+    let mut pending = vec![(root_fd(root)?, PathBuf::new(), 0usize)];
+    let mut found = Vec::new();
+    let mut visited_entries = 0usize;
+    while let Some((directory, relative, depth)) = pending.pop() {
+        if depth > max_depth {
+            return Err("source discovery depth budget exhausted".into());
+        }
+        let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+        for entry in fs::read_dir(fd_path)
+            .map_err(|e| format!("secure source discovery unavailable: {e}"))?
+        {
+            let entry = entry.map_err(|e| e.to_string())?;
+            visited_entries = visited_entries.checked_add(1)
+                .ok_or("source discovery counter overflow")?;
+            if visited_entries > max_entries {
+                return Err("source discovery entry budget exhausted".into());
+            }
+            let name = entry.file_name();
+            let name_text = name.to_str().ok_or("non-UTF-8 source path")?;
+            if name_text.starts_with('.') || skipped.contains(&name_text) {
+                continue;
+            }
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            if kind.is_symlink() {
+                return Err("source discovery encountered a symlink".into());
+            }
+            let child_relative = relative.join(&name);
+            if kind.is_dir() {
+                let child = step_dir(&directory, &name, false)?;
+                pending.push((child, child_relative, depth + 1));
+            } else if kind.is_file() && child_relative.extension().is_some_and(|ext| ext == "ores") {
+                let fd = opened(unsafe {
+                    openat(directory.as_raw_fd(), c_name(&name)?.as_ptr(),
+                        O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0)
+                })?;
+                if !fd.metadata().map_err(|e| e.to_string())?.is_file() {
+                    return Err("source file changed type during discovery".into());
+                }
+                found.push(child_relative.to_str().ok_or("non-UTF-8 source path")?.to_owned());
+                if found.len() > max_files {
+                    return Err("source discovery file budget exhausted".into());
+                }
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
 /// Create an immutable fuzz reproducer only if absent, or compare an existing
 /// bounded regular file at the securely opened parent. No path-based
 /// read-after-check, symlink following, or truncation.
@@ -239,6 +299,28 @@ mod tests {
         std::fs::rename(root.join("tests"), root.join("original-tests")).unwrap();
         symlink(root.join("original-tests"), root.join("tests")).unwrap();
         assert!(list_project_files(&root, Path::new("tests/corpus"), 3).is_err());
+    }
+
+    #[test]
+    fn source_discovery_is_anchored_and_budgeted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join("src/nested/test_a.ores"), b"a").unwrap();
+        std::fs::write(root.join("src/nested/test_b.ores"), b"b").unwrap();
+        std::fs::create_dir(root.join("target")).unwrap();
+        std::fs::write(root.join("target/ignore.ores"), b"hidden").unwrap();
+        assert_eq!(
+            discover_sources(&root, &["target"], 100, 2, 64).unwrap(),
+            vec!["src/nested/test_a.ores", "src/nested/test_b.ores"]
+        );
+        assert!(discover_sources(&root, &["target"], 100, 1, 64).is_err());
+        assert!(discover_sources(&root, &["target"], 1, 100, 64).is_err());
+        assert!(discover_sources(&root, &["target"], 100, 100, 1).is_err());
+        let external = tmp.path().join("external");
+        std::fs::create_dir(&external).unwrap();
+        symlink(&external, root.join("untrusted")).unwrap();
+        assert!(discover_sources(&root, &["target"], 100, 100, 64).is_err());
     }
 
     #[test]
