@@ -122,6 +122,7 @@ pub fn read_project_file(root: &Path, relative: &Path, max_bytes: usize)
 /// directory; it does not re-resolve the original untrusted project path.
 /// If procfs is unavailable, fail closed rather than falling back to read_dir
 /// by pathname (which would reintroduce ancestor substitution).
+#[cfg(test)]
 pub fn list_project_files(root: &Path, relative: &Path, max_files: usize)
     -> Result<Vec<PathBuf>, String>
 {
