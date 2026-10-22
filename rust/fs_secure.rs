@@ -162,12 +162,16 @@ fn read_corpus_directory(directory: &File, max_files: usize, per_file: usize, to
     use std::os::unix::fs::MetadataExt;
     let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
     let mut records = Vec::new();
+    let mut aggregate = 0usize;
     for entry in fs::read_dir(&fd_path)
         .map_err(|e| format!("secure corpus enumeration denied: {e}"))?
     {
         let entry = entry.map_err(|e| e.to_string())?;
         if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
             return Err("corpus contains a symlink or nonregular entry".into());
+        }
+        if records.len() >= max_files {
+            return Err("corpus count exceeds admission budget".into());
         }
         let listed = entry.metadata().map_err(|e| e.to_string())?;
         let name = entry.file_name();
@@ -183,17 +187,8 @@ fn read_corpus_directory(directory: &File, max_files: usize, per_file: usize, to
         if actual.len() > per_file as u64 {
             return Err("corpus entry exceeds case byte budget".into());
         }
-        records.push((name, input));
-        if records.len() > max_files {
-            return Err("corpus count exceeds admission budget".into());
-        }
-    }
-    records.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut aggregate = 0usize;
-    let mut contents = Vec::new();
-    for (_, file) in records {
         let mut data = Vec::new();
-        file.take(per_file as u64 + 1).read_to_end(&mut data)
+        input.take(per_file as u64 + 1).read_to_end(&mut data)
             .map_err(|e| e.to_string())?;
         if data.len() > per_file {
             return Err("corpus case grew beyond read limit".into());
@@ -203,9 +198,12 @@ fn read_corpus_directory(directory: &File, max_files: usize, per_file: usize, to
         if aggregate > total {
             return Err("corpus aggregate budget exhausted".into());
         }
-        contents.push(data);
+        // Drop the open file promptly instead of holding up to max_files
+        // descriptors until sorting. Corpus bytes are already size-bounded.
+        records.push((name, data));
     }
-    Ok(contents)
+    records.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(records.into_iter().map(|(_, bytes)| bytes).collect())
 }
 
 pub fn read_corpus_snapshot(
