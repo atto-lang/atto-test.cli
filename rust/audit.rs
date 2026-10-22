@@ -91,6 +91,21 @@ fn discover(root: &Path, explicit: &[String]) -> Result<Vec<String>,String> {
         for p in explicit { safe_path(root,p)?; selected.insert(p.clone()); }
         return Ok(selected.into_iter().collect());
     }
+    #[cfg(target_os = "linux")]
+    {
+        let sources = crate::fs_secure::discover_sources(
+            root,
+            &[".git", ".oreslang-test", "target", "build", "dist",
+              "vendor", "node_modules", "__pycache__", ".venv"],
+            50_000, MAX_FILES, 64,
+        )?;
+        if sources.is_empty() {
+            return Err("no Oreslang audit sources found (inconclusive)".into());
+        }
+        return Ok(sources);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
     let skip=[".git",".oreslang-test","target","build","dist","vendor","node_modules","__pycache__",".venv"];
     let mut pending=vec![(root.to_path_buf(),0usize)];
     let mut result=Vec::new();
@@ -117,6 +132,7 @@ fn discover(root: &Path, explicit: &[String]) -> Result<Vec<String>,String> {
     result.sort();
     if result.is_empty() { return Err("no Oreslang audit sources found (inconclusive)".into()); }
     Ok(result)
+    }
 }
 fn read_source(root: &Path, name: &str) -> Result<String,String> {
     #[cfg(target_os = "linux")]
