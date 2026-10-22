@@ -18,6 +18,7 @@ struct ProjectRoot;
 #[cfg(not(target_os = "linux"))]
 impl ProjectRoot {
     fn new(_root: &Path) -> Result<Self, String> { Ok(Self) }
+    fn verify_path(&self, _root: &Path) -> Result<(), String> { Ok(()) }
 }
 
 const MAX_OUTPUT: u64 = 4_000_000;
@@ -495,8 +496,13 @@ fn classify(result: &ProcessResult) -> Result<Option<i32>, String> {
     if result.code == Some(0) { Ok(None) } else { Ok(result.code) }
 }
 
-fn candidate(cmd: &[String], root: &Path, timeout: Duration, bytes: &[u8]) -> Result<Option<i32>, String> {
-    classify(&invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), false)?)
+fn candidate(cmd: &[String], root: &Path, timeout: Duration, bytes: &[u8],
+    project: &ProjectRoot) -> Result<Option<i32>, String>
+{
+    project.verify_path(root)?;
+    let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), false)?;
+    project.verify_path(root)?;
+    classify(&result)
 }
 
 fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<PathBuf, String> {
@@ -508,7 +514,11 @@ fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<Pa
         .join(format!("fuzz-{hash:016x}-{}.bin", bytes.len()));
     #[cfg(target_os = "linux")]
     {
+        _project.verify_path(root)?;
         _project.reproducer(&relative, bytes)?;
+        // Do not return a path that might now refer to a replaced root,
+        // even though the write itself was anchored safely to our FD.
+        _project.verify_path(root)?;
         return Ok(root.join(relative));
     }
     #[cfg(not(target_os = "linux"))]
@@ -542,6 +552,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
     if !(1..=65_536).contains(&max_bytes) { return Err("fuzz.max_bytes must be 1..65536".into()); }
     let project = ProjectRoot::new(root)?;
     let mut samples = corpus(root, params, max_bytes as usize, &project)?;
+    project.verify_path(root)?;
     if settings.security_fuzz {
         // Adversarial inputs are *stimuli*, never standalone proof of a bug.
         // Put these before the ordinary corpus so a bounded --cases also
@@ -581,9 +592,9 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             }
             bytes
         };
-        if let Some(code) = candidate(&cmd, root, settings.timeout, &case)? {
+        if let Some(code) = candidate(&cmd, root, settings.timeout, &case, &project)? {
             for _ in 0..2 {
-                if candidate(&cmd, root, settings.timeout, &case)? != Some(code) {
+                if candidate(&cmd, root, settings.timeout, &case, &project)? != Some(code) {
                     eprintln!("FUZZ FLAKY seed={} iteration={i}: no stable reproduction", settings.seed);
                     return Ok(2);
                 }
@@ -599,7 +610,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                     budget -= 1;
                     let mut reduced = shrunk[..start].to_vec();
                     reduced.extend_from_slice(&shrunk[(start + chunk).min(shrunk.len())..]);
-                    if candidate(&cmd, root, settings.timeout, &reduced)? == Some(code) {
+                    if candidate(&cmd, root, settings.timeout, &reduced, &project)? == Some(code) {
                         shrunk = reduced;
                         granularity = 2;
                         shorter = true;
@@ -612,7 +623,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                 }
             }
             for _ in 0..2 {
-                if candidate(&cmd, root, settings.timeout, &shrunk)? != Some(code) {
+                if candidate(&cmd, root, settings.timeout, &shrunk, &project)? != Some(code) {
                     eprintln!("FUZZ FLAKY after minimization; preserving original failure");
                     shrunk = case.clone();
                     break;
