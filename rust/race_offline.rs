@@ -324,7 +324,11 @@ pub fn analyze(text: &str) -> Result<Report, String> {
     }
     if accesses == 0 { return Err("no memory accesses observed (inconclusive)".into()); }
     if locks.values().any(|(owner,_)| owner.is_some()) { return Err("held lock at trace end".into()); }
-    if parents.keys().any(|child| !finished.contains(child)) { return Err("unfinished forked task".into()); }
+    if !pending_waits.is_empty() { return Err("trace ended with unresolved lock waits".into()); }
+    if !messages.is_empty() { return Err("trace ended with unreceived messages".into()); }
+    if parents.keys().any(|child| !finished.contains(child) || !joined.contains(child)) {
+        return Err("forked tasks must finish and be joined before an offline clean result".into());
+    }
     Ok(Report {events: lines.len()-2, accesses, conflicts, examples, backend})
 }
 
@@ -392,6 +396,26 @@ mod tests {
         assert!(Parser::object(r#"{"op":"task","task":"\uD800"}"#).is_err());
         assert!(Parser::object(r#"{"op":"task","task":"\uDC00"}"#).is_err());
         assert!(Parser::object(r#"{"op":"task","task":"\uD83D\uDE00"}"#).is_ok());
+    }
+    #[test] fn incomplete_mailboxes_and_unjoined_forks_are_inconclusive() {
+        let missing_receive = concat!(
+            "{\"op\":\"begin\",\"version\":1,\"run_id\":\"r\",\"backend\":\"llvm\"}\n",
+            "{\"op\":\"task\",\"task\":\"a\"}\n",
+            "{\"op\":\"access\",\"task\":\"a\",\"location\":\"x\",\"mode\":\"W\"}\n",
+            "{\"op\":\"send\",\"task\":\"a\",\"message\":\"m\"}\n",
+            "{\"op\":\"end\",\"run_id\":\"r\",\"events\":3}\n",
+        );
+        assert!(analyze(missing_receive).is_err());
+
+        let detached_child = concat!(
+            "{\"op\":\"begin\",\"version\":1,\"run_id\":\"r\",\"backend\":\"llvm\"}\n",
+            "{\"op\":\"task\",\"task\":\"a\"}\n",
+            "{\"op\":\"fork\",\"task\":\"a\",\"child\":\"b\"}\n",
+            "{\"op\":\"access\",\"task\":\"b\",\"location\":\"x\",\"mode\":\"R\"}\n",
+            "{\"op\":\"finish\",\"task\":\"b\"}\n",
+            "{\"op\":\"end\",\"run_id\":\"r\",\"events\":4}\n",
+        );
+        assert!(analyze(detached_child).is_err());
     }
     #[test] fn cross_task_history_is_not_erased() {
         let s = "{\"op\":\"begin\",\"version\":1,\"run_id\":\"id\",\"backend\":\"llvm\"}\n{\"op\":\"task\",\"task\":\"a\"}\n{\"op\":\"task\",\"task\":\"b\"}\n{\"op\":\"task\",\"task\":\"c\"}\n{\"op\":\"access\",\"task\":\"a\",\"location\":\"x\",\"mode\":\"W\"}\n{\"op\":\"access\",\"task\":\"b\",\"location\":\"x\",\"mode\":\"W\"}\n{\"op\":\"access\",\"task\":\"c\",\"location\":\"x\",\"mode\":\"R\"}\n{\"op\":\"end\",\"run_id\":\"id\",\"events\":6}\n";
