@@ -11,6 +11,15 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use super::fs_secure::ProjectRoot;
+#[cfg(not(target_os = "linux"))]
+struct ProjectRoot;
+#[cfg(not(target_os = "linux"))]
+impl ProjectRoot {
+    fn new(_root: &Path) -> Result<Self, String> { Ok(Self) }
+}
+
 const MAX_OUTPUT: u64 = 4_000_000;
 const MAX_CASES: usize = 1_000_000;
 const MAX_CORPUS_FILES: usize = 1024;
@@ -430,10 +439,12 @@ fn read_case_bounded(root: &Path, relative: &Path, max_bytes: usize) -> Result<V
     }
 }
 
-fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec<u8>>, String> {
+fn corpus(root: &Path, params: &toml::Table, max_bytes: usize, _project: &ProjectRoot) -> Result<Vec<Vec<u8>>, String> {
     let name = params.get("corpus").map(|v| v.as_str().ok_or("fuzz.corpus must be a relative path")).transpose()?.unwrap_or("tests/corpus");
+    #[cfg(not(target_os = "linux"))]
     let path = checked_project_path(root, name)?;
     let mut cases = vec![vec![], vec![0], vec![255]];
+    #[cfg(not(target_os = "linux"))]
     match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cases),
         Err(e) => return Err(e.to_string()),
@@ -442,11 +453,11 @@ fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec
     }
     #[cfg(target_os = "linux")]
     {
-        // One open corpus directory, not a pathname list followed by
-        // independent reopen calls. This binds file reads to the same
-        // directory even if an ancestor is renamed concurrently.
-        cases.extend(super::fs_secure::read_corpus_snapshot(
-            root, Path::new(name), MAX_CORPUS_FILES, max_bytes, MAX_CORPUS_BYTES,
+        // Reuse the same project-root descriptor as the future failure
+        // artifact write. Absent optional corpora remain empty without a
+        // pathname fallback into a different project root.
+        cases.extend(_project.corpus(
+            Path::new(name), MAX_CORPUS_FILES, max_bytes, MAX_CORPUS_BYTES,
         )?);
     }
     #[cfg(not(target_os = "linux"))]
@@ -488,7 +499,7 @@ fn candidate(cmd: &[String], root: &Path, timeout: Duration, bytes: &[u8]) -> Re
     classify(&invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), false)?)
 }
 
-fn write_failure(root: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<PathBuf, String> {
     // Stable filename is only a local deduplication hint, not a
     // cryptographic authentication or an attacker-resistant digest.
     let hash = bytes.iter().fold(0xcbf29ce484222325u64,
@@ -497,7 +508,7 @@ fn write_failure(root: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
         .join(format!("fuzz-{hash:016x}-{}.bin", bytes.len()));
     #[cfg(target_os = "linux")]
     {
-        super::fs_secure::create_or_match(root, &relative, bytes)?;
+        _project.reproducer(&relative, bytes)?;
         return Ok(root.join(relative));
     }
     #[cfg(not(target_os = "linux"))]
@@ -529,7 +540,8 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         None => 256,
     };
     if !(1..=65_536).contains(&max_bytes) { return Err("fuzz.max_bytes must be 1..65536".into()); }
-    let mut samples = corpus(root, params, max_bytes as usize)?;
+    let project = ProjectRoot::new(root)?;
+    let mut samples = corpus(root, params, max_bytes as usize, &project)?;
     if settings.security_fuzz {
         // Adversarial inputs are *stimuli*, never standalone proof of a bug.
         // Put these before the ordinary corpus so a bounded --cases also
@@ -606,7 +618,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                     break;
                 }
             }
-            let saved = write_failure(root, &shrunk)?;
+            let saved = write_failure(root, &shrunk, &project)?;
             println!("FUZZ FAILURE seed={} iteration={i} exit={code} initial={} minimized={} path={}", settings.seed, case.len(), shrunk.len(), saved.display());
             return Ok(1);
         }
@@ -714,13 +726,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let payload = b"reproducible-crash";
-        let saved = write_failure(&root, payload).unwrap();
-        assert_eq!(write_failure(&root, payload).unwrap(), saved);
+        let saved = write_failure(&root, payload, &ProjectRoot::new(&root).unwrap()).unwrap();
+        assert_eq!(write_failure(&root, payload, &ProjectRoot::new(&root).unwrap()).unwrap(), saved);
         std::fs::remove_file(&saved).unwrap();
         let external = root.join("external.bin");
         std::fs::write(&external, payload).unwrap();
         symlink(&external, &saved).unwrap();
-        assert!(write_failure(&root, payload).is_err());
+        assert!(write_failure(&root, payload, &ProjectRoot::new(&root).unwrap()).is_err());
     }
 
     #[test]
