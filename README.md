@@ -49,6 +49,12 @@ This is black-box mutation fuzzing, not coverage-guided source fuzzing.
 Guest processes receive a minimal environment; unrelated CI secrets are not
 forwarded by default.
 
+Corpus ingestion limits each opened stream to max_bytes plus one overflow
+sentinel byte, rejecting oversized reads and accounting aggregate corpus
+bytes from the data actually read. Preflight sizes alone are insufficient
+when files can grow. This bounds read allocation; descriptor-relative
+no-follow protection against concurrent path replacement remains pending.
+
 Example project manifest:
 
     [native]

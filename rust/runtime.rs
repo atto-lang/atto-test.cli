@@ -400,6 +400,7 @@ impl Rng {
 /// Reject path escapes and symlinked ancestors before accessing project-owned
 /// input/output. This is a preflight boundary check, not an atomic openat2
 /// guarantee against a concurrently malicious local filesystem writer.
+#[cfg(not(target_os = "linux"))]
 fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     let relative = Path::new(name);
     if relative.as_os_str().is_empty() || relative.is_absolute()
@@ -423,6 +424,18 @@ fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(result)
 }
 
+// Bound bytes read from the opened stream as well as preflight file sizes.
+// This limits allocation if a regular corpus file grows during ingestion.
+#[cfg(any(test, not(target_os = "linux")))]
+fn read_corpus_case(input: impl Read, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    input.take(max_bytes as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() > max_bytes {
+        return Err("corpus case exceeds max_bytes while reading".into());
+    }
+    return Ok(bytes);
+}
+
 /// Bound reads using the *opened file descriptor*. Linux also denies a final
 /// symlink and avoids FIFO blocking, even if a path changes after listing.
 /// Ancestor components still require descriptor-relative openat/openat2.
@@ -440,17 +453,14 @@ fn read_case_bounded(root: &Path, relative: &Path, max_bytes: usize) -> Result<V
         if !meta.is_file() || meta.len() > max_bytes as u64 {
             return Err("corpus item is not a bounded regular file".into());
         }
-        let mut bytes = Vec::new();
-        file.take(max_bytes as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-        if bytes.len() > max_bytes { return Err("corpus item grew beyond read budget".into()); }
-        return Ok(bytes);
+        return read_corpus_case(file, max_bytes);
     }
 }
 
-fn corpus(root: &Path, params: &toml::Table, max_bytes: usize, _project: &ProjectRoot) -> Result<Vec<Vec<u8>>, String> {
+fn corpus(_root: &Path, params: &toml::Table, max_bytes: usize, _project: &ProjectRoot) -> Result<Vec<Vec<u8>>, String> {
     let name = params.get("corpus").map(|v| v.as_str().ok_or("fuzz.corpus must be a relative path")).transpose()?.unwrap_or("tests/corpus");
     #[cfg(not(target_os = "linux"))]
-    let path = checked_project_path(root, name)?;
+    let path = checked_project_path(_root, name)?;
     let mut cases = vec![vec![], vec![0], vec![255]];
     #[cfg(not(target_os = "linux"))]
     match fs::symlink_metadata(&path) {
@@ -461,9 +471,9 @@ fn corpus(root: &Path, params: &toml::Table, max_bytes: usize, _project: &Projec
     }
     #[cfg(target_os = "linux")]
     {
-        // Reuse the same project-root descriptor as the future failure
+        // Reuse the same project-_root descriptor as the future failure
         // artifact write. Absent optional corpora remain empty without a
-        // pathname fallback into a different project root.
+        // pathname fallback into a different project _root.
         cases.extend(_project.corpus(
             Path::new(name), MAX_CORPUS_FILES, max_bytes, MAX_CORPUS_BYTES,
         )?);
@@ -485,7 +495,7 @@ fn corpus(root: &Path, params: &toml::Table, max_bytes: usize, _project: &Projec
         files.sort();
         let mut consumed = 0usize;
         for relative in files {
-            let bytes = read_case_bounded(root, &relative, max_bytes)?;
+            let bytes = read_case_bounded(_root, &relative, max_bytes)?;
             consumed = consumed.checked_add(bytes.len()).ok_or("corpus byte budget overflow")?;
             if consumed > MAX_CORPUS_BYTES {
                 return Err("corpus byte budget exceeded".into());
@@ -726,10 +736,55 @@ mod tests {
     }
 
     #[test]
+    fn corpus_stream_accepts_empty_and_exact_limit_binary_input() {
+        assert_eq!(read_corpus_case(&b""[..], 4), Ok(Vec::new()));
+        assert_eq!(read_corpus_case(&[0, 255, 128, 1][..], 4), Ok(vec![0, 255, 128, 1]));
+    }
+
+    #[test]
+    fn corpus_stream_stops_after_one_byte_beyond_limit() {
+        let mut input = std::io::Cursor::new(vec![7; 100]);
+        assert!(read_corpus_case(&mut input, 8).is_err());
+        assert_eq!(input.position(), 9);
+        // A stream which keeps producing data must also terminate at the cap.
+        assert!(read_corpus_case(std::io::repeat(1), 8).is_err());
+    }
+
+    #[test]
+    fn corpus_stream_propagates_read_errors() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"));
+            }
+        }
+        assert!(read_corpus_case(Broken, 8).is_err());
+    }
+
+    #[test]
+    fn corpus_aggregate_budget_is_enforced_before_fuzz_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let seeds = root.path().join("seeds");
+        fs::create_dir(&seeds).unwrap();
+        let seed = vec![3; 65_536];
+        for n in 0..65 {
+            fs::write(seeds.join(format!("{n:03}.bin")), &seed).unwrap();
+        }
+        let mut params = toml::Table::new();
+        params.insert("corpus".into(), toml::Value::String("seeds".into()));
+        let expected = if cfg!(target_os = "linux") {
+            "corpus aggregate budget exhausted"
+        } else {
+            "corpus byte budget exceeded"
+        };
+        assert_eq!(corpus(root.path(), &params, seed.len(), &ProjectRoot::new(root.path()).unwrap()).unwrap_err(), expected);
+    }
+
+    #[test]
     fn rejects_unsupported_race_without_python_fallback() {
         assert_eq!(run(&["--race".into()]), 2);
         assert_eq!(run(&["--race".into(), "--logical".into()]), 2);
-        assert_eq!(parse(&["--model".into(),"x.json".into()]).is_err(), true);
+        assert!(parse(&["--model".into(),"x.json".into()]).is_err());
     }
     #[test]
     fn rejects_missing_arguments_and_invalid_timeouts() {
@@ -767,11 +822,11 @@ mod tests {
         let source = dir.path().join("case");
         std::fs::write(&source, b"abc").unwrap();
         let relative = Path::new("case");
-        assert_eq!(super::fs_secure::read_project_file(dir.path(), relative, 3).unwrap(), b"abc");
-        assert!(super::fs_secure::read_project_file(dir.path(), relative, 2).is_err());
+        assert_eq!(crate::fs_secure::read_project_file(dir.path(), relative, 3).unwrap(), b"abc");
+        assert!(crate::fs_secure::read_project_file(dir.path(), relative, 2).is_err());
         let alias = dir.path().join("alias");
         symlink(&source, &alias).unwrap();
-        assert!(super::fs_secure::read_project_file(dir.path(), Path::new("alias"), 3).is_err());
+        assert!(crate::fs_secure::read_project_file(dir.path(), Path::new("alias"), 3).is_err());
     }
     #[cfg(target_os = "linux")]
     #[test]
