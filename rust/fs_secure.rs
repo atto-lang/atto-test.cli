@@ -146,6 +146,82 @@ pub fn list_project_files(root: &Path, relative: &Path, max_files: usize)
     Ok(found)
 }
 
+/// Read a complete corpus from one opened directory handle. Files are opened
+/// relative to that same handle, not to the original pathname. A concurrent
+/// directory rename therefore cannot redirect us into a replacement corpus.
+/// File dev/inode is also compared across enumeration and open, rejecting
+/// replacement in the gap. The bytes are bounded on the opened descriptor.
+///
+/// This is not a frozen filesystem snapshot: an adversary with write access
+/// can still change bytes in an already opened regular file. Do not claim
+/// cryptographic provenance or snapshot isolation from this interface.
+fn read_corpus_directory(directory: &File, max_files: usize, per_file: usize, total: usize)
+    -> Result<Vec<Vec<u8>>, String>
+{
+    use std::os::unix::fs::MetadataExt;
+    let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    let mut records = Vec::new();
+    for entry in fs::read_dir(&fd_path)
+        .map_err(|e| format!("secure corpus enumeration denied: {e}"))?
+    {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
+            return Err("corpus contains a symlink or nonregular entry".into());
+        }
+        let listed = entry.metadata().map_err(|e| e.to_string())?;
+        let name = entry.file_name();
+        let c = c_name(&name)?;
+        let input = opened(unsafe {
+            openat(directory.as_raw_fd(), c.as_ptr(),
+                O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0)
+        })?;
+        let actual = input.metadata().map_err(|e| e.to_string())?;
+        if !actual.is_file() || actual.dev() != listed.dev() || actual.ino() != listed.ino() {
+            return Err("corpus entry changed identity during enumeration".into());
+        }
+        if actual.len() > per_file as u64 {
+            return Err("corpus entry exceeds case byte budget".into());
+        }
+        records.push((name, input));
+        if records.len() > max_files {
+            return Err("corpus count exceeds admission budget".into());
+        }
+    }
+    records.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut aggregate = 0usize;
+    let mut contents = Vec::new();
+    for (_, file) in records {
+        let mut data = Vec::new();
+        file.take(per_file as u64 + 1).read_to_end(&mut data)
+            .map_err(|e| e.to_string())?;
+        if data.len() > per_file {
+            return Err("corpus case grew beyond read limit".into());
+        }
+        aggregate = aggregate.checked_add(data.len())
+            .ok_or("corpus aggregate budget overflow")?;
+        if aggregate > total {
+            return Err("corpus aggregate budget exhausted".into());
+        }
+        contents.push(data);
+    }
+    Ok(contents)
+}
+
+pub fn read_corpus_snapshot(
+    root: &Path,
+    relative: &Path,
+    max_files: usize,
+    per_file: usize,
+    total: usize,
+) -> Result<Vec<Vec<u8>>, String> {
+    let (parent, name) = parent_and_name(root, relative, false)?;
+    let directory = opened(unsafe {
+        openat(parent.as_raw_fd(), name.as_ptr(),
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
+    })?;
+    read_corpus_directory(&directory, max_files, per_file, total)
+}
+
 /// Discover Oreslang source paths from *opened* directory descriptors.
 /// No path-based recursive traversal. Bounds prevent enormous or cyclic
 /// directory trees from causing unbounded scanning. Symlinks are rejected
@@ -299,6 +375,50 @@ mod tests {
         std::fs::rename(root.join("tests"), root.join("original-tests")).unwrap();
         symlink(root.join("original-tests"), root.join("tests")).unwrap();
         assert!(list_project_files(&root, Path::new("tests/corpus"), 3).is_err());
+    }
+
+    #[test]
+    fn corpus_fd_does_not_follow_replacement_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(root.join("tests/corpus")).unwrap();
+        std::fs::write(root.join("tests/corpus/a"), b"original").unwrap();
+        let (parent, name) = parent_and_name(
+            &root, Path::new("tests/corpus"), false
+        ).unwrap();
+        let directory = opened(unsafe {
+            openat(parent.as_raw_fd(), name.as_ptr(),
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
+        }).unwrap();
+        std::fs::rename(root.join("tests/corpus"), root.join("tests/previous")).unwrap();
+        std::fs::create_dir(root.join("tests/corpus")).unwrap();
+        std::fs::write(root.join("tests/corpus/a"), b"replacement").unwrap();
+        assert_eq!(
+            read_corpus_directory(&directory, 2, 32, 128).unwrap(),
+            vec![b"original".to_vec()]
+        );
+        assert_eq!(
+            read_corpus_snapshot(&root, Path::new("tests/corpus"), 2, 32, 128).unwrap(),
+            vec![b"replacement".to_vec()]
+        );
+    }
+
+    #[test]
+    fn corpus_snapshot_rejects_symlink_and_aggregate_overflow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(root.join("corpus")).unwrap();
+        std::fs::write(root.join("corpus/a"), b"aaa").unwrap();
+        std::fs::write(root.join("corpus/b"), b"bbb").unwrap();
+        let corpus = Path::new("corpus");
+        assert!(read_corpus_snapshot(&root, corpus, 1, 5, 20).is_err());
+        assert!(read_corpus_snapshot(&root, corpus, 2, 5, 5).is_err());
+        assert_eq!(
+            read_corpus_snapshot(&root, corpus, 2, 5, 6).unwrap(),
+            vec![b"aaa".to_vec(), b"bbb".to_vec()]
+        );
+        symlink(root.join("corpus/a"), root.join("corpus/alias")).unwrap();
+        assert!(read_corpus_snapshot(&root, corpus, 3, 5, 20).is_err());
     }
 
     #[test]
