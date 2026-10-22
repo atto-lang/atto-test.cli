@@ -337,6 +337,14 @@ fn test_receipt(output: &str) -> Result<Counts, String> {
     Ok(c)
 }
 
+// Use platform path components: discovered Windows paths contain backslashes.
+fn is_native_test_path(path: &Path) -> bool {
+    let base = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    return path.starts_with("tests")
+        && path.extension().is_some_and(|ext| ext == "ores")
+        && (base.starts_with("test_") || base.ends_with("_test.ores"));
+}
+
 fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, String> {
     let params = section(config, "native")?;
     let mut files = Vec::new();
@@ -347,8 +355,7 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
         }
     } else {
         for name in super::discover(root)? {
-            let base = Path::new(&name).file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if name.starts_with("tests/") && (base.starts_with("test_") || base.ends_with("_test.ores")) {
+            if is_native_test_path(Path::new(&name)) {
                 files.push(name);
             }
         }
@@ -682,6 +689,42 @@ pub fn run(args: &[OsString]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_discovery_uses_platform_path_components() {
+        assert!(is_native_test_path(&Path::new("tests").join("test_one.ores")));
+        assert!(is_native_test_path(&Path::new("tests").join("nested").join("two_test.ores")));
+        for path in [
+            PathBuf::from("test_one.ores"),
+            Path::new("tests-other").join("test_one.ores"),
+            Path::new("src").join("tests").join("test_one.ores"),
+            Path::new("tests").join("ordinary.ores"),
+            Path::new("tests").join("test_one.txt"),
+        ] {
+            assert!(!is_native_test_path(&path), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn native_discovery_filters_real_nested_files_on_each_host_os() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("tests").join("nested")).unwrap();
+        fs::create_dir(root.path().join("tests-other")).unwrap();
+        for path in [
+            Path::new("tests").join("test_one.ores"),
+            Path::new("tests").join("nested").join("two_test.ores"),
+            Path::new("tests").join("ordinary.ores"),
+            Path::new("tests-other").join("test_ignored.ores"),
+        ] {
+            fs::write(root.path().join(path), "").unwrap();
+        }
+        let selected: Vec<_> = super::super::discover(root.path()).unwrap().into_iter()
+            .filter(|name| is_native_test_path(Path::new(name))).collect();
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().any(|name| Path::new(name).ends_with("test_one.ores")));
+        assert!(selected.iter().any(|name| Path::new(name).ends_with("two_test.ores")));
+    }
+
     #[test]
     fn rejects_unsupported_race_without_python_fallback() {
         assert_eq!(run(&["--race".into()]), 2);

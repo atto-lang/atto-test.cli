@@ -25,7 +25,10 @@ cargo install --path . --locked.
     oreslang test --effects --effects-strict --file src/server.ores
 
 **Native Oreslang tests:** discovers tests/**/test_*.ores and
-tests/**/*_test.ores, or [native].files in oreslang-test.toml. The real
+tests/**/*_test.ores, or [native].files in oreslang-test.toml.
+Discovery matches the `tests` path component using the host platform's
+separator rules, including Windows backslashes. Similarly named directories
+such as `tests-other` are excluded. The real
 compiler is selected by ORESLANG_BIN (default oreslang-core). A test only
 passes if the child exits successfully and emits a consistent ORES_TEST
 PASS/FAIL/SKIP + SUMMARY machine receipt. These are **structural
