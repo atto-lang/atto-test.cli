@@ -28,7 +28,11 @@ cargo install --path . --locked.
 tests/**/*_test.ores, or [native].files in oreslang-test.toml. The real
 compiler is selected by ORESLANG_BIN (default oreslang-core). A test only
 passes if the child exits successfully and emits a consistent ORES_TEST
-PASS/FAIL/SKIP + SUMMARY machine receipt. The CLI uses a bounded host-owned
+PASS/FAIL/SKIP + SUMMARY machine receipt. These records are child-output
+  **structural checks**, not authenticated host-only events: a hostile test
+  executable could print a plausible receipt. Do not treat a green native
+  receipt as secure provenance or as a race-freedom certificate. The CLI
+  uses a bounded host-owned
 process runner, an allowlisted environment, process group isolation on
 Unix, timeout enforcement, and limits output captures to 4 MB per stream.
 
@@ -117,8 +121,14 @@ model's schedule or that its instrumentation covered all memory accesses.
   oversize shapes), constrained by the configured per-case maximum. A test
   target must demonstrate a reproducible violated property; the input's
   appearance alone is not a vulnerability finding. The `basic` profile is
-  the default. Corpus and failure-output paths reject symlinked ancestors,
-  though descriptor-relative atomic open remains a hardening task.
+  the default. On Linux, source/config reads, corpus file opens, corpus
+  directory enumeration and fuzz-reproducer creation use root-anchored
+  directory descriptors with `O_NOFOLLOW`; input reads are size-bounded on
+  the opened file, and `/proc/self/fd` is required for secure enumeration.
+  The non-Linux fallback still uses path-based preflight checks. A hostile
+  concurrent rename of the project root, Windows subprocess containment,
+  OS-level resource isolation and cryptographic authenticity of guest
+  test receipts remain outside this security boundary.
 - `--deadlock --trace file.jsonl` analyzes observed lock ordering and
   outstanding wait cycles in Rust. It is offline only and does not certify
   liveness. `--race --deadlock --trace` combines the two findings on the
