@@ -120,9 +120,10 @@ model's schedule or that its instrumentation covered all memory accesses.
   oversize shapes), constrained by the configured per-case maximum. A test
   target must demonstrate a reproducible violated property; the input's
   appearance alone is not a vulnerability finding. The `basic` profile is
-  the default. On Linux, source/config reads, advisory audit inputs,
-  offline race/deadlock traces, logical models, corpus enumeration and reads,
-  and fuzz-reproducer creation use root-anchored directory descriptors
+  the default. On Linux, effects and audit source discovery,
+  source/config reads, advisory audit inputs, offline race/deadlock traces,
+  logical models, corpus enumeration and reads, and fuzz-reproducer creation
+  use root-anchored directory descriptors
   with `O_NOFOLLOW`; input reads are size-bounded on
   the opened file, and `/proc/self/fd` is required for secure enumeration.
   The non-Linux fallback still uses path-based preflight checks. A hostile
