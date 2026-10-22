@@ -28,13 +28,12 @@ cargo install --path . --locked.
 tests/**/*_test.ores, or [native].files in oreslang-test.toml. The real
 compiler is selected by ORESLANG_BIN (default oreslang-core). A test only
 passes if the child exits successfully and emits a consistent ORES_TEST
-PASS/FAIL/SKIP + SUMMARY machine receipt. These records are child-output
-  **structural checks**, not authenticated host-only events: a hostile test
-  executable could print a plausible receipt. Do not treat a green native
-  receipt as secure provenance or as a race-freedom certificate. The CLI
-  uses a bounded host-owned
-process runner, an allowlisted environment, process group isolation on
-Unix, timeout enforcement, and limits output captures to 4 MB per stream.
+PASS/FAIL/SKIP + SUMMARY machine receipt. These are **structural
+checks of guest output**, not authenticated host-only events: a hostile
+executable can print a plausible receipt. A green native receipt does not
+establish secure provenance or runtime race freedom. The CLI uses a bounded
+host-owned process runner, an allowlisted environment, process-group
+isolation on Unix, timeout enforcement, and a 4 MB capture limit per stream.
 
 **Fuzzing:** [fuzz].command must be a TOML array of a real executable and
 argv. Corpus default tests/corpus; max_bytes defaults to 256 (range 1..65536).
