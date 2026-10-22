@@ -8,7 +8,9 @@ mod logical;
 mod runtime;
 
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs;
+#[cfg(not(target_os = "linux"))]
+use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
