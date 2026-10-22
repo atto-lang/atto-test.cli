@@ -235,6 +235,28 @@ fn read_corpus_directory(directory: &File, max_files: usize, per_file: usize, to
     Ok(records.into_iter().map(|(_, bytes)| bytes).collect())
 }
 
+/// Missing optional corpus directory yields an empty corpus, without
+/// looking up the original project root pathname even once.
+fn open_corpus_directory(root: &File, relative: &Path) -> Result<Option<File>, String> {
+    let mut current = root.try_clone().map_err(|e| e.to_string())?;
+    for component in components(relative)? {
+        let name = c_name(component)?;
+        let fd = unsafe {
+            openat(current.as_raw_fd(), name.as_ptr(),
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(format!("unsafe corpus directory: {error}"));
+        }
+        current = opened(fd)?;
+    }
+    Ok(Some(current))
+}
+
 fn read_corpus_fd(
     root: &File,
     relative: &Path,
@@ -242,12 +264,10 @@ fn read_corpus_fd(
     per_file: usize,
     total: usize,
 ) -> Result<Vec<Vec<u8>>, String> {
-    let (parent, name) = parent_and_name_fd(root, relative, false)?;
-    let directory = opened(unsafe {
-        openat(parent.as_raw_fd(), name.as_ptr(),
-            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
-    })?;
-    read_corpus_directory(&directory, max_files, per_file, total)
+    match open_corpus_directory(root, relative)? {
+        Some(directory) => read_corpus_directory(&directory, max_files, per_file, total),
+        None => Ok(Vec::new()),
+    }
 }
 
 #[cfg(test)]
@@ -448,6 +468,20 @@ mod tests {
             read_corpus_snapshot(&root, Path::new("tests/corpus"), 2, 32, 128).unwrap(),
             vec![b"replacement".to_vec()]
         );
+    }
+
+    #[test]
+    fn optional_missing_corpus_is_empty_but_symlinked_corpus_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir(&root).unwrap();
+        let pinned = ProjectRoot::new(&root).unwrap();
+        assert!(pinned.corpus(Path::new("tests/corpus"), 3, 10, 20).unwrap().is_empty());
+        std::fs::create_dir(root.join("tests")).unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir(&external).unwrap();
+        symlink(&external, root.join("tests/corpus")).unwrap();
+        assert!(pinned.corpus(Path::new("tests/corpus"), 3, 10, 20).is_err());
     }
 
     #[test]
