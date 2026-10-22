@@ -123,13 +123,19 @@ model's schedule or that its instrumentation covered all memory accesses.
   the default. On Linux, effects and audit source discovery,
   source/config reads, advisory audit inputs, offline race/deadlock traces,
   logical models, corpus enumeration and reads, and fuzz-reproducer creation
-  use root-anchored directory descriptors
-  with `O_NOFOLLOW`; input reads are size-bounded on
-  the opened file, and `/proc/self/fd` is required for secure enumeration.
-  The non-Linux fallback still uses path-based preflight checks. A hostile
-  concurrent rename of the project root, Windows subprocess containment,
-  OS-level resource isolation and cryptographic authenticity of guest
-  test receipts remain outside this security boundary.
+  use root-anchored directory descriptors with `O_NOFOLLOW`;
+  input reads are size-bounded on the opened file, and `/proc/self/fd`
+  is required for secure enumeration. A single fuzz invocation additionally
+  retains one project-root FD across corpus loading and failure-artifact
+  creation. It opens corpus files relative to the same pinned directory,
+  checks device/inode across enumeration and open, and promptly closes
+  input descriptors. Visible-root identity is checked before and after
+  each fuzz guest execution and before reporting artifact paths.
+  These are conservative detection checks, **not** atomic snapshot isolation
+  or protection against concurrent writes to already-open regular files.
+  The non-Linux fallback still uses pathname-based preflight checks.
+  Descendant process containment, OS-level resource isolation and
+  cryptographic authenticity of guest test receipts remain open gates.
 - `--deadlock --trace file.jsonl` analyzes observed lock ordering and
   outstanding wait cycles in Rust. It is offline only and does not certify
   liveness. `--race --deadlock --trace` combines the two findings on the
