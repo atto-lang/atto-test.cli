@@ -61,11 +61,13 @@ relations using vector clocks. It reports observed conflicts and rejects
 incomplete/ambiguous traces. A clean observed trace is **never** a
 runtime race-freedom certificate.
 
-**Unsupported/pending:** --race without --trace returns exit 2 because
+**Unsupported/pending:** --race without --trace or --logical --model returns exit 2 because
 trusted runtime instrumentation, source/build attestation, shared-memory
 coverage accounting and an authenticated host-only event channel are not
-yet implemented. --race --logical / --model also returns exit 2 until the
-bounded reference-model engine is migrated to Rust. The available
+yet implemented. The Rust-native --race --logical --model FILE.json
+explores a bounded deterministic **host reference model** (read/write/
+atomic_add turns) but is never guest runtime scheduler evidence; incomplete
+exploration returns exit 2. The available
 rust/race_evidence.rs only checks a *potential* receipt's shape; it is not
 a trusted-runtime attestation or sufficient to enable a race-free PASS.
 See docs/RACE_EVIDENCE_V1.md.
@@ -84,6 +86,29 @@ See docs/security-audit-rust.md.
 **Effects:** --effects and --effects-strict execute an advisory Rust
 exception-effect source scan; not full compiler type/effect analysis.
 See docs/exception-effects.md.
+
+## Rust logical schedule models
+
+    oreslang test --race --logical --model tests/models/atomic-update.json
+    oreslang test --race --logical --model tests/models/lost-update.json
+    oreslang test --race --logical --model tests/models/atomic-update.json --max-schedules 1
+
+This evaluates a **host-provided finite actor-turn model**, not compiled
+Oreslang source. Model JSON declares `initial` and `expected` signed 64-bit
+state keys and 2–16 actors, each with ordered, nonempty `turns` made of
+`read`, `write`, and `atomic_add`. `read` stores a local name and
+`write` can use that local plus an integer offset. One actor turn executes
+atomically; all turn interleavings are examined until a counterexample or
+limit is reached. The engine strictly rejects duplicate JSON keys, unknown
+operations, arithmetic overflow, malformed strings, and over-budget models.
+Maximums include 64 total actor turns, 4096 operations, 2 MiB JSON,
+one million completed schedules, and ten million search visits.
+
+Exit 0 is only a complete clean result for the **bounded reference model**.
+Exit 1 means a counterexample schedule was found. Exit 2 means incomplete,
+unsupported, malformed, or truncated exploration. Neither a clean nor an
+unsuccessful model run is evidence that the guest runtime executed the
+model's schedule or that its instrumentation covered all memory accesses.
 
 ## Continued Rust parity hardening
 
@@ -108,9 +133,9 @@ See docs/exception-effects.md.
   integration contract, native P0 verifier and reactive documentation, and
   has no `.py` files. The older Python deadlock, reactive and model-checker
   scripts are removed, not silently delegated to.
-- Missing Rust logical schedule exploration, GraalVM checkpoint-only trace
-  adapter, and schedule replay are still explicitly unsupported and may not
-  return an evidence-free clean verdict.
+- Runtime-controlled schedule replay and GraalVM checkpoint-only trace
+  adapters are still unsupported and may not return an evidence-free clean
+  verdict. The Rust host-only model explorer is not runtime instrumentation.
 
 ## Exit conventions
 
