@@ -772,14 +772,19 @@ mod tests {
         }
         let mut params = toml::Table::new();
         params.insert("corpus".into(), toml::Value::String("seeds".into()));
-        assert_eq!(corpus(root.path(), &params, seed.len(), &ProjectRoot::new(root.path()).unwrap()).unwrap_err(), "corpus byte budget exceeded");
+        let expected = if cfg!(target_os = "linux") {
+            "corpus aggregate budget exhausted"
+        } else {
+            "corpus byte budget exceeded"
+        };
+        assert_eq!(corpus(root.path(), &params, seed.len(), &ProjectRoot::new(root.path()).unwrap()).unwrap_err(), expected);
     }
 
     #[test]
     fn rejects_unsupported_race_without_python_fallback() {
         assert_eq!(run(&["--race".into()]), 2);
         assert_eq!(run(&["--race".into(), "--logical".into()]), 2);
-        assert_eq!(parse(&["--model".into(),"x.json".into()]).is_err(), true);
+        assert!(parse(&["--model".into(),"x.json".into()]).is_err());
     }
     #[test]
     fn rejects_missing_arguments_and_invalid_timeouts() {
