@@ -25,12 +25,18 @@ cargo install --path . --locked.
     oreslang test --effects --effects-strict --file src/server.ores
 
 **Native Oreslang tests:** discovers tests/**/test_*.ores and
-tests/**/*_test.ores, or [native].files in oreslang-test.toml. The real
+tests/**/*_test.ores, or [native].files in oreslang-test.toml.
+Discovery matches the `tests` path component using the host platform's
+separator rules, including Windows backslashes. Similarly named directories
+such as `tests-other` are excluded. The real
 compiler is selected by ORESLANG_BIN (default oreslang-core). A test only
 passes if the child exits successfully and emits a consistent ORES_TEST
-PASS/FAIL/SKIP + SUMMARY machine receipt. The CLI uses a bounded host-owned
-process runner, an allowlisted environment, process group isolation on
-Unix, timeout enforcement, and limits output captures to 4 MB per stream.
+PASS/FAIL/SKIP + SUMMARY machine receipt. These are **structural
+checks of guest output**, not authenticated host-only events: a hostile
+executable can print a plausible receipt. A green native receipt does not
+establish secure provenance or runtime race freedom. The CLI uses a bounded
+host-owned process runner, an allowlisted environment, process-group
+isolation on Unix, timeout enforcement, and a 4 MB capture limit per stream.
 
 **Fuzzing:** [fuzz].command must be a TOML array of a real executable and
 argv. Corpus default tests/corpus; max_bytes defaults to 256 (range 1..65536).
@@ -123,8 +129,22 @@ model's schedule or that its instrumentation covered all memory accesses.
   oversize shapes), constrained by the configured per-case maximum. A test
   target must demonstrate a reproducible violated property; the input's
   appearance alone is not a vulnerability finding. The `basic` profile is
-  the default. Corpus and failure-output paths reject symlinked ancestors,
-  though descriptor-relative atomic open remains a hardening task.
+  the default. On Linux, effects and audit source discovery,
+  source/config reads, advisory audit inputs, offline race/deadlock traces,
+  logical models, corpus enumeration and reads, and fuzz-reproducer creation
+  use root-anchored directory descriptors with `O_NOFOLLOW`;
+  input reads are size-bounded on the opened file, and `/proc/self/fd`
+  is required for secure enumeration. A single fuzz invocation additionally
+  retains one project-root FD across corpus loading and failure-artifact
+  creation. It opens corpus files relative to the same pinned directory,
+  checks device/inode across enumeration and open, and promptly closes
+  input descriptors. Visible-root identity is checked before and after
+  each fuzz guest execution and before reporting artifact paths.
+  These are conservative detection checks, **not** atomic snapshot isolation
+  or protection against concurrent writes to already-open regular files.
+  The non-Linux fallback still uses pathname-based preflight checks.
+  Descendant process containment, OS-level resource isolation and
+  cryptographic authenticity of guest test receipts remain open gates.
 - `--deadlock --trace file.jsonl` analyzes observed lock ordering and
   outstanding wait cycles in Rust. It is offline only and does not certify
   liveness. `--race --deadlock --trace` combines the two findings on the

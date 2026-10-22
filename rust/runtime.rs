@@ -2,12 +2,24 @@
 //! No Python runner, subprocess shell, or guest-authored success receipt.
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
+#[cfg(not(target_os = "linux"))]
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+use super::fs_secure::ProjectRoot;
+#[cfg(not(target_os = "linux"))]
+struct ProjectRoot;
+#[cfg(not(target_os = "linux"))]
+impl ProjectRoot {
+    fn new(_root: &Path) -> Result<Self, String> { Ok(Self) }
+    fn verify_path(&self, _root: &Path) -> Result<(), String> { Ok(()) }
+}
 
 const MAX_OUTPUT: u64 = 4_000_000;
 const MAX_CASES: usize = 1_000_000;
@@ -112,7 +124,7 @@ fn manifest(root: &Path) -> Result<toml::Table, String> {
         Err(e) => Err(e.to_string()),
         Ok(meta) => {
             if !meta.is_file() || meta.file_type().is_symlink() { return Err("unsafe test manifest file".into()); }
-            super::read_bounded(&path)?.parse::<toml::Table>().map_err(|e| format!("invalid test manifest: {e}"))
+            super::read_bounded_project(root, Path::new("oreslang-test.toml"))?.parse::<toml::Table>().map_err(|e| format!("invalid test manifest: {e}"))
         }
     }
 }
@@ -127,6 +139,26 @@ fn commands(params: &toml::Table, key: &str) -> Result<Vec<String>, String> {
     if array.is_empty() || array.len() > 64 { return Err(format!("{key} needs 1..64 arguments")); }
     array.iter().map(|v| v.as_str().filter(|s| !s.is_empty() && !s.contains('\0')).map(str::to_owned)
             .ok_or_else(|| format!("{key} requires nonempty strings without NUL"))).collect()
+}
+
+fn resolve_path_candidate(
+    executable: &Path,
+    project_root: &Path,
+    search_path: &std::ffi::OsStr,
+) -> Option<PathBuf> {
+    std::env::split_paths(search_path)
+        .map(|directory| {
+            // The child runs with current_dir(project_root). A PATH entry
+            // such as "." or "bin" must resolve against THAT directory,
+            // not the CLI process's original working directory.
+            let directory = if directory.is_absolute() {
+                directory
+            } else {
+                project_root.join(directory)
+            };
+            directory.join(executable)
+        })
+        .find(|candidate| candidate.is_file())
 }
 
 fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
@@ -147,11 +179,8 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     // Otherwise --fuzz [fuzz].command=["oreslang-test"] can recursively invoke
     // this CLI until host process/file budgets are exhausted.
     let candidate = if program.components().count() == 1 {
-        std::env::var_os("PATH").and_then(|paths| {
-            std::env::split_paths(&paths)
-                .map(|directory| directory.join(&program))
-                .find(|path| path.is_file())
-        })
+        std::env::var_os("PATH")
+            .and_then(|paths| resolve_path_candidate(&program, root, &paths))
     } else {
         Some(program.clone())
     };
@@ -230,16 +259,36 @@ fn invoke(mut command: Command, timeout: Duration, bytes: Option<&[u8]>, capture
     let mut child = command.spawn().map_err(|e| format!("cannot spawn test command: {e}"))?;
     let start = Instant::now();
     let (code, timed_out) = loop {
-        if capture && (stdout.as_ref().is_some_and(|f| f.metadata().is_ok_and(|m| m.len() > MAX_OUTPUT))
-            || stderr.as_ref().is_some_and(|f| f.metadata().is_ok_and(|m| m.len() > MAX_OUTPUT)))
-        {
-            stop(&mut child);
-            return Err("test subprocess output limit exceeded".into());
+        if capture {
+            // A missing/unreadable capture must not silently disable the
+            // output budget while the child continues executing.
+            for output in [stdout.as_ref(), stderr.as_ref()].into_iter().flatten() {
+                match output.metadata() {
+                    Ok(meta) if meta.len() > MAX_OUTPUT => {
+                        stop(&mut child);
+                        return Err("test subprocess output limit exceeded".into());
+                    }
+                    Err(e) => {
+                        stop(&mut child);
+                        return Err(format!("cannot inspect test output capture: {e}"));
+                    }
+                    Ok(_) => {}
+                }
+            }
         }
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) => break (status.code(), false),
-            None if start.elapsed() >= timeout => { stop(&mut child); break (None, true); }
-            None => thread::sleep(Duration::from_millis(5)),
+        match child.try_wait() {
+            Ok(Some(status)) => break (status.code(), false),
+            Ok(None) if start.elapsed() >= timeout => {
+                stop(&mut child);
+                break (None, true);
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(5)),
+            Err(e) => {
+                // Failure to inspect child status is inconclusive, but
+                // must also terminate the spawned process group.
+                stop(&mut child);
+                return Err(format!("cannot inspect child process status: {e}"));
+            }
         }
     };
     drop(stdin_file);
@@ -288,6 +337,14 @@ fn test_receipt(output: &str) -> Result<Counts, String> {
     Ok(c)
 }
 
+// Use platform path components: discovered Windows paths contain backslashes.
+fn is_native_test_path(path: &Path) -> bool {
+    let base = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    return path.starts_with("tests")
+        && path.extension().is_some_and(|ext| ext == "ores")
+        && (base.starts_with("test_") || base.ends_with("_test.ores"));
+}
+
 fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, String> {
     let params = section(config, "native")?;
     let mut files = Vec::new();
@@ -298,8 +355,7 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
         }
     } else {
         for name in super::discover(root)? {
-            let base = Path::new(&name).file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if name.starts_with("tests/") && (base.starts_with("test_") || base.ends_with("_test.ores")) {
+            if is_native_test_path(Path::new(&name)) {
                 files.push(name);
             }
         }
@@ -378,41 +434,72 @@ fn read_corpus_case(input: impl Read, max_bytes: usize) -> Result<Vec<u8>, Strin
     return Ok(bytes);
 }
 
-fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec<u8>>, String> {
+/// Bound reads using the *opened file descriptor*. Linux also denies a final
+/// symlink and avoids FIFO blocking, even if a path changes after listing.
+/// Ancestor components still require descriptor-relative openat/openat2.
+#[cfg(not(target_os = "linux"))]
+fn read_case_bounded(root: &Path, relative: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        return super::fs_secure::read_project_file(root, relative, max_bytes);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let path = root.join(relative);
+        let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let meta = file.metadata().map_err(|e| e.to_string())?;
+        if !meta.is_file() || meta.len() > max_bytes as u64 {
+            return Err("corpus item is not a bounded regular file".into());
+        }
+        return read_corpus_case(file, max_bytes);
+    }
+}
+
+fn corpus(root: &Path, params: &toml::Table, max_bytes: usize, _project: &ProjectRoot) -> Result<Vec<Vec<u8>>, String> {
     let name = params.get("corpus").map(|v| v.as_str().ok_or("fuzz.corpus must be a relative path")).transpose()?.unwrap_or("tests/corpus");
+    #[cfg(not(target_os = "linux"))]
     let path = checked_project_path(root, name)?;
     let mut cases = vec![vec![], vec![0], vec![255]];
+    #[cfg(not(target_os = "linux"))]
     match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cases),
         Err(e) => return Err(e.to_string()),
         Ok(m) if !m.is_dir() || m.file_type().is_symlink() => return Err("unsafe corpus directory".into()),
         _ => {}
     }
-    let mut names = Vec::new();
-    for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let ty = entry.file_type().map_err(|e| e.to_string())?;
-        if ty.is_symlink() { return Err("corpus symlinks are refused".into()); }
-        if ty.is_file() { names.push(entry.path()); }
-        else { return Err("corpus may contain only regular files".into()); }
-        if names.len() > MAX_CORPUS_FILES { return Err("corpus file limit exceeded".into()); }
+    #[cfg(target_os = "linux")]
+    {
+        // Reuse the same project-root descriptor as the future failure
+        // artifact write. Absent optional corpora remain empty without a
+        // pathname fallback into a different project root.
+        cases.extend(_project.corpus(
+            Path::new(name), MAX_CORPUS_FILES, max_bytes, MAX_CORPUS_BYTES,
+        )?);
     }
-    names.sort();
-    let mut consumed = 0usize;
-    for path in names {
-        let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-        if !meta.is_file() || meta.file_type().is_symlink() {
-            return Err("corpus changed type or became a symlink".into());
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let ty = entry.file_type().map_err(|e| e.to_string())?;
+            if !ty.is_file() || ty.is_symlink() {
+                return Err("corpus may contain only regular files".into());
+            }
+            files.push(Path::new(name).join(entry.file_name()));
+            if files.len() > MAX_CORPUS_FILES {
+                return Err("corpus file limit exceeded".into());
+            }
         }
-        if meta.len() > max_bytes as u64 { return Err("corpus case exceeds max_bytes".into()); }
-        let file = File::open(&path).map_err(|e| e.to_string())?;
-        if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-            return Err("opened corpus input is not a regular file".into());
+        files.sort();
+        let mut consumed = 0usize;
+        for relative in files {
+            let bytes = read_case_bounded(root, &relative, max_bytes)?;
+            consumed = consumed.checked_add(bytes.len()).ok_or("corpus byte budget overflow")?;
+            if consumed > MAX_CORPUS_BYTES {
+                return Err("corpus byte budget exceeded".into());
+            }
+            cases.push(bytes);
         }
-        let bytes = read_corpus_case(file, max_bytes)?;
-        consumed = consumed.checked_add(bytes.len()).ok_or("corpus byte budget overflow")?;
-        if consumed > MAX_CORPUS_BYTES { return Err("corpus byte budget exceeded".into()); }
-        cases.push(bytes);
     }
     let mut unique = BTreeSet::new();
     cases.retain(|x| unique.insert(x.clone()));
@@ -424,30 +511,52 @@ fn classify(result: &ProcessResult) -> Result<Option<i32>, String> {
     if result.code == Some(0) { Ok(None) } else { Ok(result.code) }
 }
 
-fn candidate(cmd: &[String], root: &Path, timeout: Duration, bytes: &[u8]) -> Result<Option<i32>, String> {
-    classify(&invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), false)?)
+fn candidate(cmd: &[String], root: &Path, timeout: Duration, bytes: &[u8],
+    project: &ProjectRoot) -> Result<Option<i32>, String>
+{
+    project.verify_path(root)?;
+    let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), false)?;
+    project.verify_path(root)?;
+    classify(&result)
 }
 
-fn write_failure(root: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
-    let folder = checked_project_path(root, ".oreslang-test/failures")?;
-    fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-    // A preexisting symlink at either parent is never an acceptable target.
-    checked_project_path(root, ".oreslang-test/failures")?;
-    // Deterministic identity; do NOT claim FNV is a cryptographic digest.
-    let h = bytes.iter().fold(0xcbf29ce484222325u64, |h, x| (h ^ u64::from(*x)).wrapping_mul(0x100000001b3));
-    let path = folder.join(format!("fuzz-{h:016x}-{}.bin", bytes.len()));
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut f) => { f.write_all(bytes).map_err(|e| e.to_string())?; Ok(path) }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-            if !meta.is_file() || meta.file_type().is_symlink() || fs::read(&path).map_err(|e| e.to_string())? != bytes {
-                return Err("unsafe or colliding failure artifact".into());
+fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<PathBuf, String> {
+    // Stable filename is only a local deduplication hint, not a
+    // cryptographic authentication or an attacker-resistant digest.
+    let hash = bytes.iter().fold(0xcbf29ce484222325u64,
+        |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100000001b3));
+    let relative = Path::new(".oreslang-test/failures")
+        .join(format!("fuzz-{hash:016x}-{}.bin", bytes.len()));
+    #[cfg(target_os = "linux")]
+    {
+        _project.verify_path(root)?;
+        _project.reproducer(&relative, bytes)?;
+        // Do not return a path that might now refer to a replaced root,
+        // even though the write itself was anchored safely to our FD.
+        _project.verify_path(root)?;
+        return Ok(root.join(relative));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let folder = checked_project_path(root, ".oreslang-test/failures")?;
+        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        checked_project_path(root, ".oreslang-test/failures")?;
+        let path = root.join(&relative);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => { file.write_all(bytes).map_err(|e| e.to_string())?; Ok(path) }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+                if !meta.is_file() || meta.file_type().is_symlink()
+                    || read_case_bounded(root, &relative, bytes.len())? != bytes {
+                    return Err("unsafe or colliding failure artifact".into());
+                }
+                Ok(path)
             }
-            Ok(path)
+            Err(e) => Err(e.to_string()),
         }
-        Err(e) => Err(e.to_string()),
     }
 }
+
 fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, String> {
     let params = section(config, "fuzz")?.ok_or("missing [fuzz] section")?;
     let cmd = commands(params, "command")?;
@@ -456,7 +565,9 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         None => 256,
     };
     if !(1..=65_536).contains(&max_bytes) { return Err("fuzz.max_bytes must be 1..65536".into()); }
-    let mut samples = corpus(root, params, max_bytes as usize)?;
+    let project = ProjectRoot::new(root)?;
+    let mut samples = corpus(root, params, max_bytes as usize, &project)?;
+    project.verify_path(root)?;
     if settings.security_fuzz {
         // Adversarial inputs are *stimuli*, never standalone proof of a bug.
         // Put these before the ordinary corpus so a bounded --cases also
@@ -496,9 +607,9 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             }
             bytes
         };
-        if let Some(code) = candidate(&cmd, root, settings.timeout, &case)? {
+        if let Some(code) = candidate(&cmd, root, settings.timeout, &case, &project)? {
             for _ in 0..2 {
-                if candidate(&cmd, root, settings.timeout, &case)? != Some(code) {
+                if candidate(&cmd, root, settings.timeout, &case, &project)? != Some(code) {
                     eprintln!("FUZZ FLAKY seed={} iteration={i}: no stable reproduction", settings.seed);
                     return Ok(2);
                 }
@@ -514,7 +625,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                     budget -= 1;
                     let mut reduced = shrunk[..start].to_vec();
                     reduced.extend_from_slice(&shrunk[(start + chunk).min(shrunk.len())..]);
-                    if candidate(&cmd, root, settings.timeout, &reduced)? == Some(code) {
+                    if candidate(&cmd, root, settings.timeout, &reduced, &project)? == Some(code) {
                         shrunk = reduced;
                         granularity = 2;
                         shorter = true;
@@ -527,13 +638,13 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                 }
             }
             for _ in 0..2 {
-                if candidate(&cmd, root, settings.timeout, &shrunk)? != Some(code) {
+                if candidate(&cmd, root, settings.timeout, &shrunk, &project)? != Some(code) {
                     eprintln!("FUZZ FLAKY after minimization; preserving original failure");
                     shrunk = case.clone();
                     break;
                 }
             }
-            let saved = write_failure(root, &shrunk)?;
+            let saved = write_failure(root, &shrunk, &project)?;
             println!("FUZZ FAILURE seed={} iteration={i} exit={code} initial={} minimized={} path={}", settings.seed, case.len(), shrunk.len(), saved.display());
             return Ok(1);
         }
@@ -588,6 +699,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_discovery_uses_platform_path_components() {
+        assert!(is_native_test_path(&Path::new("tests").join("test_one.ores")));
+        assert!(is_native_test_path(&Path::new("tests").join("nested").join("two_test.ores")));
+        for path in [
+            PathBuf::from("test_one.ores"),
+            Path::new("tests-other").join("test_one.ores"),
+            Path::new("src").join("tests").join("test_one.ores"),
+            Path::new("tests").join("ordinary.ores"),
+            Path::new("tests").join("test_one.txt"),
+        ] {
+            assert!(!is_native_test_path(&path), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn native_discovery_filters_real_nested_files_on_each_host_os() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("tests").join("nested")).unwrap();
+        fs::create_dir(root.path().join("tests-other")).unwrap();
+        for path in [
+            Path::new("tests").join("test_one.ores"),
+            Path::new("tests").join("nested").join("two_test.ores"),
+            Path::new("tests").join("ordinary.ores"),
+            Path::new("tests-other").join("test_ignored.ores"),
+        ] {
+            fs::write(root.path().join(path), "").unwrap();
+        }
+        let selected: Vec<_> = super::super::discover(root.path()).unwrap().into_iter()
+            .filter(|name| is_native_test_path(Path::new(name))).collect();
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().any(|name| Path::new(name).ends_with("test_one.ores")));
+        assert!(selected.iter().any(|name| Path::new(name).ends_with("two_test.ores")));
+    }
+
+    #[test]
     fn corpus_stream_accepts_empty_and_exact_limit_binary_input() {
         assert_eq!(read_corpus_case(&b""[..], 4), Ok(Vec::new()));
         assert_eq!(read_corpus_case(&[0, 255, 128, 1][..], 4), Ok(vec![0, 255, 128, 1]));
@@ -624,7 +770,7 @@ mod tests {
         }
         let mut params = toml::Table::new();
         params.insert("corpus".into(), toml::Value::String("seeds".into()));
-        assert_eq!(corpus(root.path(), &params, seed.len()).unwrap_err(), "corpus byte budget exceeded");
+        assert_eq!(corpus(root.path(), &params, seed.len(), &ProjectRoot::new(root.path()).unwrap()).unwrap_err(), "corpus byte budget exceeded");
     }
 
     #[test]
@@ -640,12 +786,71 @@ mod tests {
         assert!(parse(&["--cases=0".into()]).is_err());
         assert!(parse(&["--fuzz".into(), "--race".into()]).is_err());
     }
+    #[cfg(unix)]
+    #[test]
+    fn timeout_terminates_a_dedicated_process_group() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 5");
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        let start = Instant::now();
+        let result = invoke(command, Duration::from_millis(100), None, true).unwrap();
+        assert!(result.timed_out);
+        assert!(result.code.is_none());
+        assert!(start.elapsed() < Duration::from_secs(4));
+    }
+
     #[test]
     fn stable_seed_reproducibility() {
         let mut a = Rng::new(42);
         let mut b = Rng::new(42);
         for _ in 0..1000 { assert_eq!(a.next(), b.next()); }
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn opened_corpus_descriptor_denies_symlinks_and_oversize() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("case");
+        std::fs::write(&source, b"abc").unwrap();
+        let relative = Path::new("case");
+        assert_eq!(super::fs_secure::read_project_file(dir.path(), relative, 3).unwrap(), b"abc");
+        assert!(super::fs_secure::read_project_file(dir.path(), relative, 2).is_err());
+        let alias = dir.path().join("alias");
+        symlink(&source, &alias).unwrap();
+        assert!(super::fs_secure::read_project_file(dir.path(), Path::new("alias"), 3).is_err());
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fuzz_failure_artifact_collision_denies_symlink_alias() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let payload = b"reproducible-crash";
+        let saved = write_failure(&root, payload, &ProjectRoot::new(&root).unwrap()).unwrap();
+        assert_eq!(write_failure(&root, payload, &ProjectRoot::new(&root).unwrap()).unwrap(), saved);
+        std::fs::remove_file(&saved).unwrap();
+        let external = root.join("external.bin");
+        std::fs::write(&external, payload).unwrap();
+        symlink(&external, &saved).unwrap();
+        assert!(write_failure(&root, payload, &ProjectRoot::new(&root).unwrap()).is_err());
+    }
+
+    #[test]
+    fn relative_path_lookup_uses_guest_project_root_not_caller_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join("bin")).unwrap();
+        let file = project.join("bin/oreslang-test");
+        std::fs::write(&file, b"dummy").unwrap();
+        let path = std::ffi::OsStr::new("bin");
+        assert_eq!(
+            resolve_path_candidate(Path::new("oreslang-test"), &project, path),
+            Some(file)
+        );
+    }
+
     #[test]
     fn machine_receipts_are_strict() {
         let good = "ORES_TEST|PASS|one\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n";
