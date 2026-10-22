@@ -3,6 +3,7 @@
 //! traces never authorize runtime instrumentation completeness.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(not(target_os = "linux"))]
 use std::io::Read;
 use std::path::{Component, Path};
 
@@ -350,11 +351,18 @@ pub(crate) fn relative_trace(root: &Path, name: &str) -> Result<std::path::PathB
 
 pub fn offline(root: &Path, name: &str) -> Result<i32, String> {
     let path = relative_trace(root,name)?;
-    let meta = path.metadata().map_err(|e| e.to_string())?;
-    if meta.len() > MAX_BYTES { return Err("trace exceeds 10 MB".into()); }
-    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    f.by_ref().take(MAX_BYTES+1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    let bytes = crate::fs_secure::read_project_file(root, Path::new(name), MAX_BYTES as usize)?;
+    #[cfg(not(target_os = "linux"))]
+    let bytes = {
+        let meta = path.metadata().map_err(|e| e.to_string())?;
+        if meta.len() > MAX_BYTES { return Err("trace exceeds 10 MB".into()); }
+        let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut data = Vec::new();
+        f.by_ref().take(MAX_BYTES+1).read_to_end(&mut data).map_err(|e| e.to_string())?;
+        data
+    };
+    if bytes.len() as u64 > MAX_BYTES { return Err("trace exceeds 10 MB".into()); }
     let contents = String::from_utf8(bytes).map_err(|_| "trace is not UTF-8")?;
     let result = analyze(&contents)?;
     if result.conflicts > 0 {
