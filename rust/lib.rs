@@ -74,6 +74,12 @@ fn source_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     return Ok(current);
 }
 
+#[cfg(target_os = "linux")]
+fn discover(root: &Path) -> Result<Vec<String>, String> {
+    fs_secure::discover_sources(root, &["target", "node_modules"], MAX_ENTRIES, MAX_FILES, 64)
+}
+
+#[cfg(not(target_os = "linux"))]
 fn discover(root: &Path) -> Result<Vec<String>, String> {
     let mut pending = vec![(root.to_path_buf(), 0)];
     let mut paths = Vec::new();
