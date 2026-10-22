@@ -630,6 +630,22 @@ mod tests {
         symlink(&source, &alias).unwrap();
         assert!(read_case_bounded(&alias, 3).is_err());
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fuzz_failure_artifact_collision_denies_symlink_alias() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let payload = b"reproducible-crash";
+        let saved = write_failure(&root, payload).unwrap();
+        assert_eq!(write_failure(&root, payload).unwrap(), saved);
+        std::fs::remove_file(&saved).unwrap();
+        let external = root.join("external.bin");
+        std::fs::write(&external, payload).unwrap();
+        symlink(&external, &saved).unwrap();
+        assert!(write_failure(&root, payload).is_err());
+    }
+
     #[test]
     fn machine_receipts_are_strict() {
         let good = "ORES_TEST|PASS|one\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n";
