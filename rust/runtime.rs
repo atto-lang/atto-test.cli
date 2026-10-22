@@ -367,6 +367,17 @@ fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(result)
 }
 
+// Bound bytes read from the opened stream as well as preflight file sizes.
+// This limits allocation if a regular corpus file grows during ingestion.
+fn read_corpus_case(input: impl Read, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    input.take(max_bytes as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() > max_bytes {
+        return Err("corpus case exceeds max_bytes while reading".into());
+    }
+    return Ok(bytes);
+}
+
 fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec<u8>>, String> {
     let name = params.get("corpus").map(|v| v.as_str().ok_or("fuzz.corpus must be a relative path")).transpose()?.unwrap_or("tests/corpus");
     let path = checked_project_path(root, name)?;
@@ -394,9 +405,14 @@ fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec
             return Err("corpus changed type or became a symlink".into());
         }
         if meta.len() > max_bytes as u64 { return Err("corpus case exceeds max_bytes".into()); }
-        consumed = consumed.checked_add(meta.len() as usize).ok_or("corpus byte budget overflow")?;
+        let file = File::open(&path).map_err(|e| e.to_string())?;
+        if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+            return Err("opened corpus input is not a regular file".into());
+        }
+        let bytes = read_corpus_case(file, max_bytes)?;
+        consumed = consumed.checked_add(bytes.len()).ok_or("corpus byte budget overflow")?;
         if consumed > MAX_CORPUS_BYTES { return Err("corpus byte budget exceeded".into()); }
-        cases.push(fs::read(&path).map_err(|e| e.to_string())?);
+        cases.push(bytes);
     }
     let mut unique = BTreeSet::new();
     cases.retain(|x| unique.insert(x.clone()));
@@ -570,6 +586,47 @@ pub fn run(args: &[OsString]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corpus_stream_accepts_empty_and_exact_limit_binary_input() {
+        assert_eq!(read_corpus_case(&b""[..], 4), Ok(Vec::new()));
+        assert_eq!(read_corpus_case(&[0, 255, 128, 1][..], 4), Ok(vec![0, 255, 128, 1]));
+    }
+
+    #[test]
+    fn corpus_stream_stops_after_one_byte_beyond_limit() {
+        let mut input = std::io::Cursor::new(vec![7; 100]);
+        assert!(read_corpus_case(&mut input, 8).is_err());
+        assert_eq!(input.position(), 9);
+        // A stream which keeps producing data must also terminate at the cap.
+        assert!(read_corpus_case(std::io::repeat(1), 8).is_err());
+    }
+
+    #[test]
+    fn corpus_stream_propagates_read_errors() {
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"));
+            }
+        }
+        assert!(read_corpus_case(Broken, 8).is_err());
+    }
+
+    #[test]
+    fn corpus_aggregate_budget_is_enforced_before_fuzz_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let seeds = root.path().join("seeds");
+        fs::create_dir(&seeds).unwrap();
+        let seed = vec![3; 65_536];
+        for n in 0..65 {
+            fs::write(seeds.join(format!("{n:03}.bin")), &seed).unwrap();
+        }
+        let mut params = toml::Table::new();
+        params.insert("corpus".into(), toml::Value::String("seeds".into()));
+        assert_eq!(corpus(root.path(), &params, seed.len()).unwrap_err(), "corpus byte budget exceeded");
+    }
+
     #[test]
     fn rejects_unsupported_race_without_python_fallback() {
         assert_eq!(run(&["--race".into()]), 2);
