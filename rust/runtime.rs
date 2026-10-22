@@ -2,7 +2,9 @@
 //! No Python runner, subprocess shell, or guest-authored success receipt.
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
+#[cfg(not(target_os = "linux"))]
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -112,7 +114,7 @@ fn manifest(root: &Path) -> Result<toml::Table, String> {
         Err(e) => Err(e.to_string()),
         Ok(meta) => {
             if !meta.is_file() || meta.file_type().is_symlink() { return Err("unsafe test manifest file".into()); }
-            super::read_bounded(&path)?.parse::<toml::Table>().map_err(|e| format!("invalid test manifest: {e}"))
+            super::read_bounded_project(root, Path::new("oreslang-test.toml"))?.parse::<toml::Table>().map_err(|e| format!("invalid test manifest: {e}"))
         }
     }
 }
@@ -370,27 +372,24 @@ fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
 /// Bound reads using the *opened file descriptor*. Linux also denies a final
 /// symlink and avoids FIFO blocking, even if a path changes after listing.
 /// Ancestor components still require descriptor-relative openat/openat2.
-fn read_case_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
+fn read_case_bounded(root: &Path, relative: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
     #[cfg(target_os = "linux")]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        OpenOptions::new().read(true)
-            .custom_flags(0o400000 | 0o4000) // O_NOFOLLOW | O_NONBLOCK
-            .open(path).map_err(|e| format!("{}: {e}", path.display()))?
-    };
+    {
+        return super::fs_secure::read_project_file(root, relative, max_bytes);
+    }
     #[cfg(not(target_os = "linux"))]
-    let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let meta = file.metadata().map_err(|e| e.to_string())?;
-    if !meta.is_file() || meta.len() > max_bytes as u64 {
-        return Err("corpus item is not a bounded regular file".into());
+    {
+        let path = root.join(relative);
+        let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let meta = file.metadata().map_err(|e| e.to_string())?;
+        if !meta.is_file() || meta.len() > max_bytes as u64 {
+            return Err("corpus item is not a bounded regular file".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(max_bytes as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+        if bytes.len() > max_bytes { return Err("corpus item grew beyond read budget".into()); }
+        return Ok(bytes);
     }
-    let mut bytes = Vec::new();
-    file.take(max_bytes as u64 + 1).read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() > max_bytes {
-        return Err("corpus item grew beyond read budget".into());
-    }
-    Ok(bytes)
 }
 
 fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec<u8>>, String> {
@@ -420,7 +419,9 @@ fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec
             return Err("corpus changed type or became a symlink".into());
         }
         if meta.len() > max_bytes as u64 { return Err("corpus case exceeds max_bytes".into()); }
-        let bytes = read_case_bounded(&path, max_bytes)?;
+        let filename = path.file_name().ok_or("corpus item missing filename")?;
+        let relative = Path::new(name).join(filename);
+        let bytes = read_case_bounded(root, &relative, max_bytes)?;
         consumed = consumed.checked_add(bytes.len()).ok_or("corpus byte budget overflow")?;
         if consumed > MAX_CORPUS_BYTES { return Err("corpus byte budget exceeded".into()); }
         cases.push(bytes);
@@ -440,25 +441,38 @@ fn candidate(cmd: &[String], root: &Path, timeout: Duration, bytes: &[u8]) -> Re
 }
 
 fn write_failure(root: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
-    let folder = checked_project_path(root, ".oreslang-test/failures")?;
-    fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-    // A preexisting symlink at either parent is never an acceptable target.
-    checked_project_path(root, ".oreslang-test/failures")?;
-    // Deterministic identity; do NOT claim FNV is a cryptographic digest.
-    let h = bytes.iter().fold(0xcbf29ce484222325u64, |h, x| (h ^ u64::from(*x)).wrapping_mul(0x100000001b3));
-    let path = folder.join(format!("fuzz-{h:016x}-{}.bin", bytes.len()));
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut f) => { f.write_all(bytes).map_err(|e| e.to_string())?; Ok(path) }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-            if !meta.is_file() || meta.file_type().is_symlink() || read_case_bounded(&path, bytes.len())? != bytes {
-                return Err("unsafe or colliding failure artifact".into());
+    // Stable filename is only a local deduplication hint, not a
+    // cryptographic authentication or an attacker-resistant digest.
+    let hash = bytes.iter().fold(0xcbf29ce484222325u64,
+        |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100000001b3));
+    let relative = Path::new(".oreslang-test/failures")
+        .join(format!("fuzz-{hash:016x}-{}.bin", bytes.len()));
+    #[cfg(target_os = "linux")]
+    {
+        super::fs_secure::create_or_match(root, &relative, bytes)?;
+        return Ok(root.join(relative));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let folder = checked_project_path(root, ".oreslang-test/failures")?;
+        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+        checked_project_path(root, ".oreslang-test/failures")?;
+        let path = root.join(&relative);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => { file.write_all(bytes).map_err(|e| e.to_string())?; Ok(path) }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+                if !meta.is_file() || meta.file_type().is_symlink()
+                    || read_case_bounded(root, &relative, bytes.len())? != bytes {
+                    return Err("unsafe or colliding failure artifact".into());
+                }
+                Ok(path)
             }
-            Ok(path)
+            Err(e) => Err(e.to_string()),
         }
-        Err(e) => Err(e.to_string()),
     }
 }
+
 fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, String> {
     let params = section(config, "fuzz")?.ok_or("missing [fuzz] section")?;
     let cmd = commands(params, "command")?;
@@ -624,11 +638,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("case");
         std::fs::write(&source, b"abc").unwrap();
-        assert_eq!(read_case_bounded(&source, 3).unwrap(), b"abc");
-        assert!(read_case_bounded(&source, 2).is_err());
+        let relative = Path::new("case");
+        assert_eq!(read_case_bounded(dir.path(), relative, 3).unwrap(), b"abc");
+        assert!(read_case_bounded(dir.path(), relative, 2).is_err());
         let alias = dir.path().join("alias");
         symlink(&source, &alias).unwrap();
-        assert!(read_case_bounded(&alias, 3).is_err());
+        assert!(read_case_bounded(dir.path(), Path::new("alias"), 3).is_err());
     }
     #[cfg(target_os = "linux")]
     #[test]
