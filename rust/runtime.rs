@@ -367,6 +367,32 @@ fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(result)
 }
 
+/// Bound reads using the *opened file descriptor*. Linux also denies a final
+/// symlink and avoids FIFO blocking, even if a path changes after listing.
+/// Ancestor components still require descriptor-relative openat/openat2.
+fn read_case_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
+    #[cfg(target_os = "linux")]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        OpenOptions::new().read(true)
+            .custom_flags(0o400000 | 0o4000) // O_NOFOLLOW | O_NONBLOCK
+            .open(path).map_err(|e| format!("{}: {e}", path.display()))?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() || meta.len() > max_bytes as u64 {
+        return Err("corpus item is not a bounded regular file".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(max_bytes as u64 + 1).read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > max_bytes {
+        return Err("corpus item grew beyond read budget".into());
+    }
+    Ok(bytes)
+}
+
 fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec<u8>>, String> {
     let name = params.get("corpus").map(|v| v.as_str().ok_or("fuzz.corpus must be a relative path")).transpose()?.unwrap_or("tests/corpus");
     let path = checked_project_path(root, name)?;
@@ -394,9 +420,10 @@ fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec
             return Err("corpus changed type or became a symlink".into());
         }
         if meta.len() > max_bytes as u64 { return Err("corpus case exceeds max_bytes".into()); }
-        consumed = consumed.checked_add(meta.len() as usize).ok_or("corpus byte budget overflow")?;
+        let bytes = read_case_bounded(&path, max_bytes)?;
+        consumed = consumed.checked_add(bytes.len()).ok_or("corpus byte budget overflow")?;
         if consumed > MAX_CORPUS_BYTES { return Err("corpus byte budget exceeded".into()); }
-        cases.push(fs::read(&path).map_err(|e| e.to_string())?);
+        cases.push(bytes);
     }
     let mut unique = BTreeSet::new();
     cases.retain(|x| unique.insert(x.clone()));
@@ -424,7 +451,7 @@ fn write_failure(root: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
         Ok(mut f) => { f.write_all(bytes).map_err(|e| e.to_string())?; Ok(path) }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-            if !meta.is_file() || meta.file_type().is_symlink() || fs::read(&path).map_err(|e| e.to_string())? != bytes {
+            if !meta.is_file() || meta.file_type().is_symlink() || read_case_bounded(&path, bytes.len())? != bytes {
                 return Err("unsafe or colliding failure artifact".into());
             }
             Ok(path)
@@ -588,6 +615,20 @@ mod tests {
         let mut a = Rng::new(42);
         let mut b = Rng::new(42);
         for _ in 0..1000 { assert_eq!(a.next(), b.next()); }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn opened_corpus_descriptor_denies_symlinks_and_oversize() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("case");
+        std::fs::write(&source, b"abc").unwrap();
+        assert_eq!(read_case_bounded(&source, 3).unwrap(), b"abc");
+        assert!(read_case_bounded(&source, 2).is_err());
+        let alias = dir.path().join("alias");
+        symlink(&source, &alias).unwrap();
+        assert!(read_case_bounded(&alias, 3).is_err());
     }
     #[test]
     fn machine_receipts_are_strict() {
