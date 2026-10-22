@@ -24,7 +24,9 @@ struct Settings {
     deadlock: bool,
     trace: Option<String>,
     logical: bool,
-    model: bool,
+    model: Option<String>,
+    max_schedules: u64,
+    schedule_limit_selected: bool,
     seed: u64,
     cases: usize,
     timeout: Duration,
@@ -34,7 +36,8 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
     let mut out = Settings {
         root: PathBuf::from("."), fuzz: false, security_fuzz: false,
         fuzz_profile_selected: false, race: false, deadlock: false,
-        trace: None, logical: false, model: false,
+        trace: None, logical: false, model: None,
+        max_schedules: 10000, schedule_limit_selected: false,
         seed: 1, cases: 100, timeout: Duration::from_secs(5),
     };
     let mut i = 0;
@@ -69,10 +72,12 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
                         out.timeout = Duration::from_secs_f64(t);
                     },
                     "--trace" => out.trace = Some(value),
-                    "--model" => out.model = true,
+                    "--model" => out.model = Some(value),
                     "--max-schedules" => {
                         let n = value.parse::<usize>().map_err(|_| "invalid --max-schedules")?;
                         if n == 0 || n > MAX_CASES { return Err("invalid --max-schedules".into()); }
+                        out.max_schedules = n as u64;
+                        out.schedule_limit_selected = true;
                     }
                     _ => unreachable!(),
                 }
@@ -85,14 +90,17 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
     if out.fuzz_profile_selected && !out.fuzz {
         return Err("--fuzz-profile requires --fuzz".into());
     }
-    if out.fuzz && (out.race || out.deadlock || out.trace.is_some() || out.logical || out.model) {
+    if out.fuzz && (out.race || out.deadlock || out.trace.is_some() || out.logical || out.model.is_some()) {
         return Err("fuzz and race modes are exclusive".into());
     }
     if out.trace.is_some() && !out.race && !out.deadlock {
         return Err("--trace requires --race and/or --deadlock".into());
     }
-    if (out.logical || out.model) && !out.race {
-        return Err("--logical/--model requires --race".into());
+    if out.logical && (!out.race || out.deadlock || out.trace.is_some() || out.model.is_none()) {
+        return Err("--logical requires --race --logical --model FILE without --deadlock/--trace".into());
+    }
+    if (out.model.is_some() || out.schedule_limit_selected) && !out.logical {
+        return Err("--model/--max-schedules requires --logical".into());
     }
     Ok(out)
 }
@@ -526,7 +534,7 @@ pub fn run(args: &[OsString]) -> i32 {
         if !root.is_dir() { return Err("project root must be a directory".into()); }
         let cfg = manifest(&root)?;
         if settings.deadlock {
-            if settings.logical || settings.model {
+            if settings.logical || settings.model.is_some() {
                 return Err("combined deadlock and logical-model checking is not implemented".into());
             }
             if let Some(name) = &settings.trace {
@@ -540,8 +548,10 @@ pub fn run(args: &[OsString]) -> i32 {
             return Err("runtime --deadlock is INCONCLUSIVE without an explicit offline --trace; trusted live event capture is unavailable".into());
         }
         if settings.race {
-            if settings.logical || settings.model {
-                return Err("runtime --race --logical is INCONCLUSIVE: Rust controlled-scheduler model support is pending".into());
+            if settings.logical {
+                return super::logical::offline(&root,
+                    settings.model.as_deref().ok_or("missing logical model")?,
+                    settings.max_schedules);
             }
             if let Some(path) = &settings.trace {
                 return super::race_offline::offline(&root, path);
@@ -564,6 +574,7 @@ mod tests {
     fn rejects_unsupported_race_without_python_fallback() {
         assert_eq!(run(&["--race".into()]), 2);
         assert_eq!(run(&["--race".into(), "--logical".into()]), 2);
+        assert_eq!(parse(&["--model".into(),"x.json".into()]).is_err(), true);
     }
     #[test]
     fn rejects_missing_arguments_and_invalid_timeouts() {
