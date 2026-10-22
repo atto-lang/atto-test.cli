@@ -43,6 +43,14 @@ This is black-box mutation fuzzing, not coverage-guided source fuzzing.
 Guest processes receive a minimal environment; unrelated CI secrets are not
 forwarded by default.
 
+The retained mutation pool is capped at 4096 cases and 16 MiB of case
+payload, including initial seeds and security-profile inputs. When the pool
+is full, fuzzing continues for the requested case count without retaining
+additional cases. This bounds retained payload, not total process memory;
+case buffers, allocator overhead and guest memory are separate. High-budget
+runs may generate different inputs than earlier versions after retention
+stops, so reproductions must record the CLI revision as well as the seed.
+
 Example project manifest:
 
     [native]

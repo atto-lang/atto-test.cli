@@ -13,6 +13,8 @@ const MAX_OUTPUT: u64 = 4_000_000;
 const MAX_CASES: usize = 1_000_000;
 const MAX_CORPUS_FILES: usize = 1024;
 const MAX_CORPUS_BYTES: usize = 4 * 1024 * 1024;
+const MAX_RETAINED_CASES: usize = 4096;
+const MAX_RETAINED_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]
 struct Settings {
@@ -424,6 +426,20 @@ fn write_failure(root: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
         Err(e) => Err(e.to_string()),
     }
 }
+// Retention is optional mutation feedback, not execution coverage. Once either
+// budget is full, keep executing cases without growing the retained pool.
+fn retain_sample(samples: &mut Vec<Vec<u8>>, retained_bytes: &mut usize, case: Vec<u8>) -> bool {
+    let Some(next) = retained_bytes.checked_add(case.len()) else {
+        return false;
+    };
+    if samples.len() >= MAX_RETAINED_CASES || next > MAX_RETAINED_BYTES {
+        return false;
+    }
+    samples.push(case);
+    *retained_bytes = next;
+    return true;
+}
+
 fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, String> {
     let params = section(config, "fuzz")?.ok_or("missing [fuzz] section")?;
     let cmd = commands(params, "command")?;
@@ -454,6 +470,14 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         let mut seen = BTreeSet::new();
         security.retain(|sample| seen.insert(sample.clone()));
         samples = security;
+    }
+    let mut retained_bytes = samples.iter().try_fold(0usize, |total, sample| {
+        total
+            .checked_add(sample.len())
+            .ok_or("retained fuzz byte count overflow")
+    })?;
+    if samples.len() > MAX_RETAINED_CASES || retained_bytes > MAX_RETAINED_BYTES {
+        return Err("initial fuzz pool exceeds retention budgets".into());
     }
     let mut rng = Rng::new(settings.seed);
     for i in 0..settings.cases {
@@ -513,7 +537,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             println!("FUZZ FAILURE seed={} iteration={i} exit={code} initial={} minimized={} path={}", settings.seed, case.len(), shrunk.len(), saved.display());
             return Ok(1);
         }
-        if samples.len() < 4096 { samples.push(case); }
+        retain_sample(&mut samples, &mut retained_bytes, case);
     }
     println!("FUZZ PASS cases={} seed={} (observed inputs only)", settings.cases, settings.seed);
     Ok(0)
@@ -560,6 +584,39 @@ pub fn run(args: &[OsString]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_fuzz_payload_accepts_exact_byte_limit_then_stops_growing() {
+        let mut samples = vec![vec![7; MAX_RETAINED_BYTES - 1]];
+        let mut bytes = samples[0].len();
+        assert!(retain_sample(&mut samples, &mut bytes, vec![8]));
+        assert_eq!(bytes, MAX_RETAINED_BYTES);
+        assert!(!retain_sample(&mut samples, &mut bytes, vec![9]));
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0][0], 7);
+        assert_eq!(samples[1], vec![8]);
+        assert_eq!(bytes, samples.iter().map(Vec::len).sum::<usize>());
+    }
+
+    #[test]
+    fn retained_fuzz_pool_bounds_empty_cases_by_count() {
+        let mut samples = vec![Vec::new(); MAX_RETAINED_CASES - 1];
+        let mut bytes = 0;
+        assert!(retain_sample(&mut samples, &mut bytes, Vec::new()));
+        assert!(!retain_sample(&mut samples, &mut bytes, Vec::new()));
+        assert_eq!(samples.len(), MAX_RETAINED_CASES);
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn retained_fuzz_pool_rejects_oversized_case_without_changing_state() {
+        let mut samples = vec![vec![1]];
+        let mut bytes = 1;
+        assert!(!retain_sample(&mut samples, &mut bytes, vec![2; MAX_RETAINED_BYTES]));
+        assert_eq!(samples, vec![vec![1]]);
+        assert_eq!(bytes, 1);
+    }
+
     #[test]
     fn rejects_unsupported_race_without_python_fallback() {
         assert_eq!(run(&["--race".into()]), 2);
