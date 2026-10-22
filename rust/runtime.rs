@@ -249,16 +249,36 @@ fn invoke(mut command: Command, timeout: Duration, bytes: Option<&[u8]>, capture
     let mut child = command.spawn().map_err(|e| format!("cannot spawn test command: {e}"))?;
     let start = Instant::now();
     let (code, timed_out) = loop {
-        if capture && (stdout.as_ref().is_some_and(|f| f.metadata().is_ok_and(|m| m.len() > MAX_OUTPUT))
-            || stderr.as_ref().is_some_and(|f| f.metadata().is_ok_and(|m| m.len() > MAX_OUTPUT)))
-        {
-            stop(&mut child);
-            return Err("test subprocess output limit exceeded".into());
+        if capture {
+            // A missing/unreadable capture must not silently disable the
+            // output budget while the child continues executing.
+            for output in [stdout.as_ref(), stderr.as_ref()].into_iter().flatten() {
+                match output.metadata() {
+                    Ok(meta) if meta.len() > MAX_OUTPUT => {
+                        stop(&mut child);
+                        return Err("test subprocess output limit exceeded".into());
+                    }
+                    Err(e) => {
+                        stop(&mut child);
+                        return Err(format!("cannot inspect test output capture: {e}"));
+                    }
+                    Ok(_) => {}
+                }
+            }
         }
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) => break (status.code(), false),
-            None if start.elapsed() >= timeout => { stop(&mut child); break (None, true); }
-            None => thread::sleep(Duration::from_millis(5)),
+        match child.try_wait() {
+            Ok(Some(status)) => break (status.code(), false),
+            Ok(None) if start.elapsed() >= timeout => {
+                stop(&mut child);
+                break (None, true);
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(5)),
+            Err(e) => {
+                // Failure to inspect child status is inconclusive, but
+                // must also terminate the spawned process group.
+                stop(&mut child);
+                return Err(format!("cannot inspect child process status: {e}"));
+            }
         }
     };
     drop(stdin_file);
@@ -652,6 +672,20 @@ mod tests {
         assert!(parse(&["--cases=0".into()]).is_err());
         assert!(parse(&["--fuzz".into(), "--race".into()]).is_err());
     }
+    #[cfg(unix)]
+    #[test]
+    fn timeout_terminates_a_dedicated_process_group() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 5");
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        let start = Instant::now();
+        let result = invoke(command, Duration::from_millis(100), None, true).unwrap();
+        assert!(result.timed_out);
+        assert!(result.code.is_none());
+        assert!(start.elapsed() < Duration::from_secs(4));
+    }
+
     #[test]
     fn stable_seed_reproducibility() {
         let mut a = Rng::new(42);
