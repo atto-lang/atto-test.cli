@@ -402,25 +402,29 @@ fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec
         Ok(m) if !m.is_dir() || m.file_type().is_symlink() => return Err("unsafe corpus directory".into()),
         _ => {}
     }
-    let mut names = Vec::new();
-    for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let ty = entry.file_type().map_err(|e| e.to_string())?;
-        if ty.is_symlink() { return Err("corpus symlinks are refused".into()); }
-        if ty.is_file() { names.push(entry.path()); }
-        else { return Err("corpus may contain only regular files".into()); }
-        if names.len() > MAX_CORPUS_FILES { return Err("corpus file limit exceeded".into()); }
-    }
-    names.sort();
-    let mut consumed = 0usize;
-    for path in names {
-        let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-        if !meta.is_file() || meta.file_type().is_symlink() {
-            return Err("corpus changed type or became a symlink".into());
+    #[cfg(target_os = "linux")]
+    let files = super::fs_secure::list_project_files(
+        root, Path::new(name), MAX_CORPUS_FILES
+    )?;
+    #[cfg(not(target_os = "linux"))]
+    let files = {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let ty = entry.file_type().map_err(|e| e.to_string())?;
+            if !ty.is_file() || ty.is_symlink() {
+                return Err("corpus may contain only regular files".into());
+            }
+            paths.push(Path::new(name).join(entry.file_name()));
+            if paths.len() > MAX_CORPUS_FILES {
+                return Err("corpus file limit exceeded".into());
+            }
         }
-        if meta.len() > max_bytes as u64 { return Err("corpus case exceeds max_bytes".into()); }
-        let filename = path.file_name().ok_or("corpus item missing filename")?;
-        let relative = Path::new(name).join(filename);
+        paths.sort();
+        paths
+    };
+    let mut consumed = 0usize;
+    for relative in files {
         let bytes = read_case_bounded(root, &relative, max_bytes)?;
         consumed = consumed.checked_add(bytes.len()).ok_or("corpus byte budget overflow")?;
         if consumed > MAX_CORPUS_BYTES { return Err("corpus byte budget exceeded".into()); }
