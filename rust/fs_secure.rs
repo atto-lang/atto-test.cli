@@ -111,6 +111,21 @@ impl ProjectRoot {
         Ok(Self { fd: root_fd(root)? })
     }
 
+    /// Check that an outward-facing pathname still denotes the pinned
+    /// directory before/after a subprocess or before reporting an artifact.
+    /// This is a detection gate, not an atomic path-rename lock.
+    pub fn verify_path(&self, path: &Path) -> Result<(), String> {
+        use std::os::unix::fs::MetadataExt;
+        let named = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        let pinned = self.fd.metadata().map_err(|e| e.to_string())?;
+        if !named.is_dir() || named.file_type().is_symlink()
+            || named.dev() != pinned.dev() || named.ino() != pinned.ino()
+        {
+            return Err("project path no longer identifies pinned root".into());
+        }
+        Ok(())
+    }
+
     pub fn corpus(&self, relative: &Path, max_files: usize, per_file: usize, total: usize)
         -> Result<Vec<Vec<u8>>, String>
     {
@@ -509,9 +524,11 @@ mod tests {
         std::fs::create_dir_all(root.join("corpus")).unwrap();
         std::fs::write(root.join("corpus/sample"), b"original").unwrap();
         let pinned = ProjectRoot::new(&root).unwrap();
+        pinned.verify_path(&root).unwrap();
         std::fs::rename(&root, tmp.path().join("previous")).unwrap();
         std::fs::create_dir_all(root.join("corpus")).unwrap();
         std::fs::write(root.join("corpus/sample"), b"replacement").unwrap();
+        assert!(pinned.verify_path(&root).is_err());
         assert_eq!(
             pinned.corpus(Path::new("corpus"), 2, 40, 100).unwrap(),
             vec![b"original".to_vec()]
