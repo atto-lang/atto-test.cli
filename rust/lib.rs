@@ -4,6 +4,7 @@ mod audit;
 pub mod race_evidence;
 mod race_offline;
 mod deadlock;
+mod logical;
 mod runtime;
 
 use std::ffi::OsString;
@@ -313,11 +314,13 @@ pub fn run(mut args: Vec<OsString>, core_launcher: bool) -> i32 {
        oreslang test --security | --anti-patterns
        oreslang test --fuzz [--fuzz-profile basic|security] [--seed N] [--cases N] [--timeout SECONDS]
        oreslang test --race --trace OFFLINE.jsonl
+       oreslang test --race --logical --model MODEL.json [--max-schedules N]
        oreslang test --deadlock --trace OFFLINE.jsonl
        oreslang test --race --deadlock --trace OFFLINE.jsonl
 
 All current CLI engines are Rust-only; no Python fallback.
-Uninstrumented --race/--deadlock and --logical are inconclusive (exit 2).
+Uninstrumented runtime --race/--deadlock are inconclusive (exit 2).
+--logical is a bounded Rust host model, not a runtime scheduling proof.
 Exit 0: scoped observed pass; 1: finding/failure; 2: invalid/inconclusive."#);
         return 0;
     }
