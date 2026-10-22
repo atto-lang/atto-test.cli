@@ -268,13 +268,31 @@ fn test_receipt(output: &str) -> Result<Counts, String> {
     if c.passed.checked_add(c.failed).and_then(|n| n.checked_add(c.skipped)) != Some(c.total) {
         return Err("inconsistent test counts".into());
     }
+    if c.passed == 0 && c.failed == 0 {
+        return Err("machine receipt has no executed cases (all skipped or filtered)".into());
+    }
     let mut observed = [0usize; 3];
+    let mut case_ids = BTreeSet::new();
     for line in output.lines().filter(|l| l.starts_with("ORES_TEST|")) {
         if line == summary { continue; }
-        if line.starts_with("ORES_TEST|PASS|") { observed[0] += 1; }
-        else if line.starts_with("ORES_TEST|FAIL|") { observed[1] += 1; }
-        else if line.starts_with("ORES_TEST|SKIP|") { observed[2] += 1; }
-        else { return Err("unexpected ORES_TEST record".into()); }
+        let (index, rest) = if let Some(rest) = line.strip_prefix("ORES_TEST|PASS|") {
+            (0, rest)
+        } else if let Some(rest) = line.strip_prefix("ORES_TEST|FAIL|") {
+            (1, rest)
+        } else if let Some(rest) = line.strip_prefix("ORES_TEST|SKIP|") {
+            (2, rest)
+        } else {
+            return Err("unexpected ORES_TEST record".into());
+        };
+        // Optional message fields do not change the identity of a case.
+        let id = rest.split('|').next().unwrap_or("");
+        if id.trim().is_empty() {
+            return Err("empty ORES_TEST case ID".into());
+        }
+        if !case_ids.insert(id) {
+            return Err("duplicate ORES_TEST case ID".into());
+        }
+        observed[index] = observed[index].checked_add(1).ok_or("test case count overflow")?;
     }
     if observed != [c.passed, c.failed, c.skipped] { return Err("test receipt case count mismatch".into()); }
     Ok(c)
@@ -560,6 +578,43 @@ pub fn run(args: &[OsString]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_receipts_require_executed_cases() {
+        for output in [
+            "ORES_TEST|SKIP|suite/disabled|reason\nORES_TEST|SUMMARY|total=1|passed=0|failed=0|skipped=1|filtered=0\n",
+            "ORES_TEST|SUMMARY|total=0|passed=0|failed=0|skipped=0|filtered=3\n",
+        ] {
+            assert!(test_receipt(output).is_err());
+        }
+    }
+
+    #[test]
+    fn machine_receipts_reject_duplicate_ids_even_across_statuses() {
+        for output in [
+            "ORES_TEST|PASS|suite/case|first\nORES_TEST|PASS|suite/case|second\nORES_TEST|SUMMARY|total=2|passed=2|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PASS|suite/case|\nORES_TEST|SKIP|suite/case|reason\nORES_TEST|SUMMARY|total=2|passed=1|failed=0|skipped=1|filtered=0\n",
+        ] {
+            assert!(test_receipt(output).is_err());
+        }
+    }
+
+    #[test]
+    fn machine_receipts_reject_empty_case_ids() {
+        for id in ["", " ", "\t"] {
+            let output = format!("ORES_TEST|PASS|{id}|message\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n");
+            assert!(test_receipt(&output).is_err());
+        }
+    }
+
+    #[test]
+    fn machine_receipts_preserve_distinct_case_outcomes_and_messages() {
+        let output = "ORES_TEST|PASS|suite/ok|message|extra\nORES_TEST|FAIL|suite/bad|reason\nORES_TEST|SKIP|suite/off|reason\nORES_TEST|SUMMARY|total=3|passed=1|failed=1|skipped=1|filtered=2\n";
+        assert_eq!(test_receipt(output), Ok(Counts {
+            total: 3, passed: 1, failed: 1, skipped: 1, filtered: 2,
+        }));
+    }
+
     #[test]
     fn rejects_unsupported_race_without_python_fallback() {
         assert_eq!(run(&["--race".into()]), 2);

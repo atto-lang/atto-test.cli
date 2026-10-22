@@ -192,3 +192,32 @@ fn bare_path_alias_to_own_cli_cannot_invoke_recursively() {
     assert_eq!(result.status.code(), Some(2), "{result:?}");
     assert!(String::from_utf8_lossy(&result.stderr).contains("recursion refused"));
 }
+
+#[cfg(unix)]
+#[test]
+fn native_runner_refuses_skipped_duplicate_and_empty_case_receipts() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("tests")).unwrap();
+    fs::write(root.path().join("tests/test_receipts.ores"), "").unwrap();
+    for receipt in [
+        "ORES_TEST|SKIP|suite/off|reason\nORES_TEST|SUMMARY|total=1|passed=0|failed=0|skipped=1|filtered=0\n",
+        "ORES_TEST|PASS|suite/same|first\nORES_TEST|PASS|suite/same|second\nORES_TEST|SUMMARY|total=2|passed=2|failed=0|skipped=0|filtered=0\n",
+        "ORES_TEST|PASS||message\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n",
+    ] {
+        let compiler = guest(root.path(), "receipt-compiler",
+            &format!("#!/bin/sh\nprintf '%s' '{receipt}'\n"));
+        let result = Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
+            .env("ORESLANG_BIN", compiler)
+            .arg("--root").arg(root.path()).output().unwrap();
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(String::from_utf8_lossy(&result.stderr).contains("invalid machine receipt"));
+        assert!(!String::from_utf8_lossy(&result.stdout).contains("PASS"));
+    }
+    // A real passed case may coexist with distinct skipped cases.
+    let compiler = guest(root.path(), "receipt-compiler",
+        "#!/bin/sh\nprintf 'ORES_TEST|PASS|suite/ok|\\nORES_TEST|SKIP|suite/off|reason\\nORES_TEST|SUMMARY|total=2|passed=1|failed=0|skipped=1|filtered=0\\n'\n");
+    let result = Command::new(env!("CARGO_BIN_EXE_oreslang-test"))
+        .env("ORESLANG_BIN", compiler)
+        .arg("--root").arg(root.path()).output().unwrap();
+    assert_eq!(result.status.code(), Some(0), "{result:?}");
+}

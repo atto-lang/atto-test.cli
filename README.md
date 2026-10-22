@@ -32,6 +32,12 @@ PASS/FAIL/SKIP + SUMMARY machine receipt. The CLI uses a bounded host-owned
 process runner, an allowlisted environment, process group isolation on
 Unix, timeout enforcement, and limits output captures to 4 MB per stream.
 
+A native receipt must include at least one executed PASS or FAIL case;
+all-skipped or all-filtered suites cannot pass. Case IDs must be nonblank
+and unique within each invocation, including across PASS, FAIL and SKIP.
+Optional message fields do not change case identity. Invalid receipts make
+the native suite fail with exit 1.
+
 **Fuzzing:** [fuzz].command must be a TOML array of a real executable and
 argv. Corpus default tests/corpus; max_bytes defaults to 256 (range 1..65536).
 The Rust engine uses deterministic SplitMix64 byte mutation and deduplicated
