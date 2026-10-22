@@ -131,6 +131,26 @@ fn commands(params: &toml::Table, key: &str) -> Result<Vec<String>, String> {
             .ok_or_else(|| format!("{key} requires nonempty strings without NUL"))).collect()
 }
 
+fn resolve_path_candidate(
+    executable: &Path,
+    project_root: &Path,
+    search_path: &std::ffi::OsStr,
+) -> Option<PathBuf> {
+    std::env::split_paths(search_path)
+        .map(|directory| {
+            // The child runs with current_dir(project_root). A PATH entry
+            // such as "." or "bin" must resolve against THAT directory,
+            // not the CLI process's original working directory.
+            let directory = if directory.is_absolute() {
+                directory
+            } else {
+                project_root.join(directory)
+            };
+            directory.join(executable)
+        })
+        .find(|candidate| candidate.is_file())
+}
+
 fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     let first = cmd.first().ok_or("empty command")?;
     let wrapper = std::env::current_exe().map_err(|e| e.to_string())?.canonicalize().map_err(|e| e.to_string())?;
@@ -149,11 +169,8 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     // Otherwise --fuzz [fuzz].command=["oreslang-test"] can recursively invoke
     // this CLI until host process/file budgets are exhausted.
     let candidate = if program.components().count() == 1 {
-        std::env::var_os("PATH").and_then(|paths| {
-            std::env::split_paths(&paths)
-                .map(|directory| directory.join(&program))
-                .find(|path| path.is_file())
-        })
+        std::env::var_os("PATH")
+            .and_then(|paths| resolve_path_candidate(&program, root, &paths))
     } else {
         Some(program.clone())
     };
@@ -663,6 +680,20 @@ mod tests {
         std::fs::write(&external, payload).unwrap();
         symlink(&external, &saved).unwrap();
         assert!(write_failure(&root, payload).is_err());
+    }
+
+    #[test]
+    fn relative_path_lookup_uses_guest_project_root_not_caller_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join("bin")).unwrap();
+        let file = project.join("bin/oreslang-test");
+        std::fs::write(&file, b"dummy").unwrap();
+        let path = std::ffi::OsStr::new("bin");
+        assert_eq!(
+            resolve_path_candidate(Path::new("oreslang-test"), &project, path),
+            Some(file)
+        );
     }
 
     #[test]
