@@ -400,6 +400,7 @@ impl Rng {
 /// Reject path escapes and symlinked ancestors before accessing project-owned
 /// input/output. This is a preflight boundary check, not an atomic openat2
 /// guarantee against a concurrently malicious local filesystem writer.
+#[cfg(not(target_os = "linux"))]
 fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     let relative = Path::new(name);
     if relative.as_os_str().is_empty() || relative.is_absolute()
@@ -425,6 +426,7 @@ fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
 
 // Bound bytes read from the opened stream as well as preflight file sizes.
 // This limits allocation if a regular corpus file grows during ingestion.
+#[cfg(any(test, not(target_os = "linux")))]
 fn read_corpus_case(input: impl Read, max_bytes: usize) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     input.take(max_bytes as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
@@ -455,10 +457,10 @@ fn read_case_bounded(root: &Path, relative: &Path, max_bytes: usize) -> Result<V
     }
 }
 
-fn corpus(root: &Path, params: &toml::Table, max_bytes: usize, _project: &ProjectRoot) -> Result<Vec<Vec<u8>>, String> {
+fn corpus(_root: &Path, params: &toml::Table, max_bytes: usize, _project: &ProjectRoot) -> Result<Vec<Vec<u8>>, String> {
     let name = params.get("corpus").map(|v| v.as_str().ok_or("fuzz.corpus must be a relative path")).transpose()?.unwrap_or("tests/corpus");
     #[cfg(not(target_os = "linux"))]
-    let path = checked_project_path(root, name)?;
+    let path = checked_project_path(_root, name)?;
     let mut cases = vec![vec![], vec![0], vec![255]];
     #[cfg(not(target_os = "linux"))]
     match fs::symlink_metadata(&path) {
@@ -469,9 +471,9 @@ fn corpus(root: &Path, params: &toml::Table, max_bytes: usize, _project: &Projec
     }
     #[cfg(target_os = "linux")]
     {
-        // Reuse the same project-root descriptor as the future failure
+        // Reuse the same project-_root descriptor as the future failure
         // artifact write. Absent optional corpora remain empty without a
-        // pathname fallback into a different project root.
+        // pathname fallback into a different project _root.
         cases.extend(_project.corpus(
             Path::new(name), MAX_CORPUS_FILES, max_bytes, MAX_CORPUS_BYTES,
         )?);
@@ -493,7 +495,7 @@ fn corpus(root: &Path, params: &toml::Table, max_bytes: usize, _project: &Projec
         files.sort();
         let mut consumed = 0usize;
         for relative in files {
-            let bytes = read_case_bounded(root, &relative, max_bytes)?;
+            let bytes = read_case_bounded(_root, &relative, max_bytes)?;
             consumed = consumed.checked_add(bytes.len()).ok_or("corpus byte budget overflow")?;
             if consumed > MAX_CORPUS_BYTES {
                 return Err("corpus byte budget exceeded".into());
@@ -815,11 +817,11 @@ mod tests {
         let source = dir.path().join("case");
         std::fs::write(&source, b"abc").unwrap();
         let relative = Path::new("case");
-        assert_eq!(super::fs_secure::read_project_file(dir.path(), relative, 3).unwrap(), b"abc");
-        assert!(super::fs_secure::read_project_file(dir.path(), relative, 2).is_err());
+        assert_eq!(crate::fs_secure::read_project_file(dir.path(), relative, 3).unwrap(), b"abc");
+        assert!(crate::fs_secure::read_project_file(dir.path(), relative, 2).is_err());
         let alias = dir.path().join("alias");
         symlink(&source, &alias).unwrap();
-        assert!(super::fs_secure::read_project_file(dir.path(), Path::new("alias"), 3).is_err());
+        assert!(crate::fs_secure::read_project_file(dir.path(), Path::new("alias"), 3).is_err());
     }
     #[cfg(target_os = "linux")]
     #[test]
