@@ -9,12 +9,12 @@
 #![cfg(target_os = "linux")]
 
 use std::ffi::{CString, OsStr};
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 const O_RDONLY: i32 = 0;
 const O_WRONLY: i32 = 1;
@@ -104,7 +104,7 @@ fn open_input(root: &Path, relative: &Path) -> Result<File, String> {
 pub fn read_project_file(root: &Path, relative: &Path, max_bytes: usize)
     -> Result<Vec<u8>, String>
 {
-    let mut file = open_input(root, relative)?;
+    let file = open_input(root, relative)?;
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() || meta.len() > max_bytes as u64 {
         return Err("input is not a bounded regular file".into());
@@ -115,6 +115,35 @@ pub fn read_project_file(root: &Path, relative: &Path, max_bytes: usize)
         return Err("input grew beyond its read budget".into());
     }
     Ok(bytes)
+}
+
+/// List only regular corpus files using an anchored, already-opened
+/// directory descriptor. /proc/self/fd is a Linux-only handle to that open
+/// directory; it does not re-resolve the original untrusted project path.
+/// If procfs is unavailable, fail closed rather than falling back to read_dir
+/// by pathname (which would reintroduce ancestor substitution).
+pub fn list_project_files(root: &Path, relative: &Path, max_files: usize)
+    -> Result<Vec<PathBuf>, String>
+{
+    let (parent, name) = parent_and_name(root, relative, false)?;
+    let directory = opened(unsafe {
+        openat(parent.as_raw_fd(), name.as_ptr(),
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
+    })?;
+    let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    let mut found = Vec::new();
+    for entry in fs::read_dir(&fd_path).map_err(|e| format!("secure corpus listing denied: {e}"))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
+            return Err("corpus directory contains a symlink or nonregular entry".into());
+        }
+        found.push(relative.join(entry.file_name()));
+        if found.len() > max_files {
+            return Err("corpus file count exceeds admission budget".into());
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 /// Create an immutable fuzz reproducer only if absent, or compare an existing
@@ -137,7 +166,7 @@ pub fn create_or_match(root: &Path, relative: &Path, expected: &[u8])
     if std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists {
         return Err(format!("cannot create reproducer: {}", std::io::Error::last_os_error()));
     }
-    let mut existing = opened(unsafe {
+    let existing = opened(unsafe {
         openat(parent.as_raw_fd(), name.as_ptr(),
             O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0)
     })?;
@@ -191,6 +220,25 @@ mod tests {
         std::fs::rename(root.join(".oreslang-test"), root.join(".renamed")).unwrap();
         symlink(&outside, root.join(".oreslang-test")).unwrap();
         assert!(create_or_match(&root, output, b"abc").is_err());
+    }
+
+    #[test]
+    fn anchored_listing_rejects_changed_ancestor_and_nonregular_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(root.join("tests/corpus")).unwrap();
+        std::fs::write(root.join("tests/corpus/a"), b"data").unwrap();
+        assert_eq!(
+            list_project_files(&root, Path::new("tests/corpus"), 1).unwrap(),
+            vec![PathBuf::from("tests/corpus/a")]
+        );
+        assert!(list_project_files(&root, Path::new("tests/corpus"), 0).is_err());
+        symlink(root.join("tests/corpus/a"), root.join("tests/corpus/alias")).unwrap();
+        assert!(list_project_files(&root, Path::new("tests/corpus"), 3).is_err());
+        std::fs::remove_file(root.join("tests/corpus/alias")).unwrap();
+        std::fs::rename(root.join("tests"), root.join("original-tests")).unwrap();
+        symlink(root.join("original-tests"), root.join("tests")).unwrap();
+        assert!(list_project_files(&root, Path::new("tests/corpus"), 3).is_err());
     }
 
     #[test]
