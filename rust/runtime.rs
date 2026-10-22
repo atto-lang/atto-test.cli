@@ -389,6 +389,7 @@ fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
 /// Bound reads using the *opened file descriptor*. Linux also denies a final
 /// symlink and avoids FIFO blocking, even if a path changes after listing.
 /// Ancestor components still require descriptor-relative openat/openat2.
+#[cfg(not(target_os = "linux"))]
 fn read_case_bounded(root: &Path, relative: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
     #[cfg(target_os = "linux")]
     {
@@ -420,32 +421,38 @@ fn corpus(root: &Path, params: &toml::Table, max_bytes: usize) -> Result<Vec<Vec
         _ => {}
     }
     #[cfg(target_os = "linux")]
-    let files = super::fs_secure::list_project_files(
-        root, Path::new(name), MAX_CORPUS_FILES
-    )?;
+    {
+        // One open corpus directory, not a pathname list followed by
+        // independent reopen calls. This binds file reads to the same
+        // directory even if an ancestor is renamed concurrently.
+        cases.extend(super::fs_secure::read_corpus_snapshot(
+            root, Path::new(name), MAX_CORPUS_FILES, max_bytes, MAX_CORPUS_BYTES,
+        )?);
+    }
     #[cfg(not(target_os = "linux"))]
-    let files = {
-        let mut paths = Vec::new();
+    {
+        let mut files = Vec::new();
         for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             let ty = entry.file_type().map_err(|e| e.to_string())?;
             if !ty.is_file() || ty.is_symlink() {
                 return Err("corpus may contain only regular files".into());
             }
-            paths.push(Path::new(name).join(entry.file_name()));
-            if paths.len() > MAX_CORPUS_FILES {
+            files.push(Path::new(name).join(entry.file_name()));
+            if files.len() > MAX_CORPUS_FILES {
                 return Err("corpus file limit exceeded".into());
             }
         }
-        paths.sort();
-        paths
-    };
-    let mut consumed = 0usize;
-    for relative in files {
-        let bytes = read_case_bounded(root, &relative, max_bytes)?;
-        consumed = consumed.checked_add(bytes.len()).ok_or("corpus byte budget overflow")?;
-        if consumed > MAX_CORPUS_BYTES { return Err("corpus byte budget exceeded".into()); }
-        cases.push(bytes);
+        files.sort();
+        let mut consumed = 0usize;
+        for relative in files {
+            let bytes = read_case_bounded(root, &relative, max_bytes)?;
+            consumed = consumed.checked_add(bytes.len()).ok_or("corpus byte budget overflow")?;
+            if consumed > MAX_CORPUS_BYTES {
+                return Err("corpus byte budget exceeded".into());
+            }
+            cases.push(bytes);
+        }
     }
     let mut unique = BTreeSet::new();
     cases.retain(|x| unique.insert(x.clone()));
@@ -660,11 +667,11 @@ mod tests {
         let source = dir.path().join("case");
         std::fs::write(&source, b"abc").unwrap();
         let relative = Path::new("case");
-        assert_eq!(read_case_bounded(dir.path(), relative, 3).unwrap(), b"abc");
-        assert!(read_case_bounded(dir.path(), relative, 2).is_err());
+        assert_eq!(super::fs_secure::read_project_file(dir.path(), relative, 3).unwrap(), b"abc");
+        assert!(super::fs_secure::read_project_file(dir.path(), relative, 2).is_err());
         let alias = dir.path().join("alias");
         symlink(&source, &alias).unwrap();
-        assert!(read_case_bounded(dir.path(), Path::new("alias"), 3).is_err());
+        assert!(super::fs_secure::read_project_file(dir.path(), Path::new("alias"), 3).is_err());
     }
     #[cfg(target_os = "linux")]
     #[test]
