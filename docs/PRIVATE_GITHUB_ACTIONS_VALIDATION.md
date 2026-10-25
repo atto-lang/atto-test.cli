@@ -1,6 +1,6 @@
 # Private cross-organization Rust CI validation
 
-Status as of 2026-10-21: **no confirmed usable private-hosted runner**.
+Status as of 2026-10-22: **no confirmed usable source-private runner**.
 This is an execution/runbook gate, not successful CI evidence.
 
 ## Diagnosis completed
@@ -23,6 +23,37 @@ This is an execution/runbook gate, not successful CI evidence.
   `cargo` commands. **No private source was copied to the public repo.**
   This narrows the issue to private-repository admission/billing rather than
   a universal GitHub-hosted Linux runner outage.
+
+## Source-local runner unblock checklist (admin action)
+
+The current PR-head Linux/macOS/Windows matrix still fails before allocating
+a runner (job `steps: []`, empty `runner_name`). This cannot be diagnosed
+as a Rust compilation failure or even uniquely as exhausted Actions minutes.
+
+1. Inspect source-repository/org Actions usage, spending cap, active payment,
+   workflow restrictions, eligible runner groups, and each failed run's
+   GitHub UI failure banner/annotations. The integration cannot administer
+   these settings.
+2. Prefer restoring the existing GitHub-hosted source-repo runners.
+   Alternatively provision an ephemeral, single-use self-hosted runner
+   **inside the private source repo**, not in an unapproved external org;
+   assign only a dedicated runner label and prohibit untrusted fork PRs
+   from using it. No long-lived credentials, broad network access, or caches.
+3. Execute the exact PR-head checkout verifier before Cargo. Require
+   successful recorded steps for `rustc --version`, `cargo --version`,
+   `cargo test --locked`, `cargo build --locked --bins`,
+   `cargo clippy --locked --all-targets -- -D warnings`, and
+   `cargo fmt --all --check`. Collect logs and the checked Git tree.
+4. Independently run Linux symlink-ancestor, FIFO, pathname traversal,
+   corpus directory listing, and fuzz collision regressions; on macOS and
+   Windows explicitly record that current filesystem admission is still
+   preflight/path-based rather than Linux descriptor-relative.
+5. Do not merge or delete Python comparison oracles solely on structural
+   tests. Run real backend/guest conformance and review the remaining
+   guest-provided native receipt spoofing and subprocess containment gaps.
+
+No cross-organization private tree copying or public-runner fallback is
+authorized by this checklist.
 
 ## Controlled mirror protocol (once a PRIVATE runner actually works)
 

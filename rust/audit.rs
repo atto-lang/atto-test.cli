@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
+#[cfg(not(target_os = "linux"))]
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -90,6 +91,21 @@ fn discover(root: &Path, explicit: &[String]) -> Result<Vec<String>,String> {
         for p in explicit { safe_path(root,p)?; selected.insert(p.clone()); }
         return Ok(selected.into_iter().collect());
     }
+    #[cfg(target_os = "linux")]
+    {
+        let sources = crate::fs_secure::discover_sources(
+            root,
+            &[".git", ".oreslang-test", "target", "build", "dist",
+              "vendor", "node_modules", "__pycache__", ".venv"],
+            50_000, MAX_FILES, 64,
+        )?;
+        if sources.is_empty() {
+            return Err("no Oreslang audit sources found (inconclusive)".into());
+        }
+        return Ok(sources);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
     let skip=[".git",".oreslang-test","target","build","dist","vendor","node_modules","__pycache__",".venv"];
     let mut pending=vec![(root.to_path_buf(),0usize)];
     let mut result=Vec::new();
@@ -116,14 +132,28 @@ fn discover(root: &Path, explicit: &[String]) -> Result<Vec<String>,String> {
     result.sort();
     if result.is_empty() { return Err("no Oreslang audit sources found (inconclusive)".into()); }
     Ok(result)
+    }
 }
-fn read_source(path: &Path) -> Result<String,String> {
-    let m=fs::symlink_metadata(path).map_err(|e|e.to_string())?;
-    if !m.is_file() || m.file_type().is_symlink() || m.len()>MAX_FILE as u64 {return Err("unsafe or oversized audit input".into());}
-    let mut buf=Vec::new();
-    fs::File::open(path).map_err(|e|e.to_string())?.take(MAX_FILE as u64+1)
-        .read_to_end(&mut buf).map_err(|e|e.to_string())?;
-    if buf.len()>MAX_FILE {return Err("audit file read budget exceeded".into());}
+fn read_source(root: &Path, name: &str) -> Result<String,String> {
+    #[cfg(target_os = "linux")]
+    let buf = crate::fs_secure::read_project_file(root, Path::new(name), MAX_FILE)?;
+    #[cfg(not(target_os = "linux"))]
+    let buf = {
+        let path = root.join(name);
+        let meta = fs::symlink_metadata(&path).map_err(|e|e.to_string())?;
+        if !meta.is_file() || meta.file_type().is_symlink()
+            || meta.len()>MAX_FILE as u64 {
+            return Err("unsafe or oversized audit input".into());
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(&path).map_err(|e|e.to_string())?
+            .take(MAX_FILE as u64+1).read_to_end(&mut bytes)
+            .map_err(|e|e.to_string())?;
+        if bytes.len()>MAX_FILE {
+            return Err("audit file read budget exceeded".into());
+        }
+        bytes
+    };
     String::from_utf8(buf).map_err(|_|"invalid UTF-8 audit source".into())
 }
 #[derive(Debug)]
@@ -318,8 +348,8 @@ pub fn run(args:&[OsString])->i32 {
         let mut findings=Vec::new();
         let mut total=0usize;
         for file in &paths {
-            let path=safe_path(&root,file)?;
-            let source=read_source(&path)?;
+            safe_path(&root,file)?;
+            let source=read_source(&root, file)?;
             total=total.checked_add(source.len()).ok_or("audit byte count overflow")?;
             if total>MAX_TOTAL{return Err("audit exceeds 16 MB source budget (inconclusive)".into());}
             scan(&mut findings,file,&source,opts.security,opts.anti)?;
