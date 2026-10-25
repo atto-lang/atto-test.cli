@@ -2,9 +2,9 @@
 //! No Python runner, subprocess shell, or guest-authored success receipt.
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs::{self, File};
 #[cfg(not(target_os = "linux"))]
 use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -17,8 +17,12 @@ use super::fs_secure::ProjectRoot;
 struct ProjectRoot;
 #[cfg(not(target_os = "linux"))]
 impl ProjectRoot {
-    fn new(_root: &Path) -> Result<Self, String> { Ok(Self) }
-    fn verify_path(&self, _root: &Path) -> Result<(), String> { Ok(()) }
+    fn new(_root: &Path) -> Result<Self, String> {
+        Ok(Self)
+    }
+    fn verify_path(&self, _root: &Path) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 const MAX_OUTPUT: u64 = 4_000_000;
@@ -48,25 +52,42 @@ struct Settings {
 
 fn parse(args: &[OsString]) -> Result<Settings, String> {
     let mut out = Settings {
-        root: PathBuf::from("."), fuzz: false, security_fuzz: false,
-        fuzz_profile_selected: false, race: false, deadlock: false,
-        trace: None, logical: false, model: None,
-        max_schedules: 10000, schedule_limit_selected: false,
-        seed: 1, cases: 100, timeout: Duration::from_secs(5),
+        root: PathBuf::from("."),
+        fuzz: false,
+        security_fuzz: false,
+        fuzz_profile_selected: false,
+        race: false,
+        deadlock: false,
+        trace: None,
+        logical: false,
+        model: None,
+        max_schedules: 10000,
+        schedule_limit_selected: false,
+        seed: 1,
+        cases: 100,
+        timeout: Duration::from_secs(5),
     };
     let mut i = 0;
     while i < args.len() {
         let word = args[i].to_str().ok_or("non-UTF-8 CLI argument")?;
-        let (key, inline) = word.split_once('=').map_or((word, None), |(k,v)| (k, Some(v)));
+        let (key, inline) = word
+            .split_once('=')
+            .map_or((word, None), |(k, v)| (k, Some(v)));
         match key {
             "--fuzz" if inline.is_none() => out.fuzz = true,
             "--race" if inline.is_none() => out.race = true,
             "--deadlock" if inline.is_none() => out.deadlock = true,
             "--logical" if inline.is_none() => out.logical = true,
-            "--root" | "--seed" | "--cases" | "--timeout" | "--fuzz-profile" | "--trace" | "--model" | "--max-schedules" => {
-                let value = if let Some(v) = inline { v.to_owned() } else {
+            "--root" | "--seed" | "--cases" | "--timeout" | "--fuzz-profile" | "--trace"
+            | "--model" | "--max-schedules" => {
+                let value = if let Some(v) = inline {
+                    v.to_owned()
+                } else {
                     i += 1;
-                    args.get(i).and_then(|a| a.to_str()).ok_or_else(|| format!("{key} needs a value"))?.to_owned()
+                    args.get(i)
+                        .and_then(|a| a.to_str())
+                        .ok_or_else(|| format!("{key} needs a value"))?
+                        .to_owned()
                 };
                 match key {
                     "--root" => out.root = PathBuf::from(value),
@@ -77,19 +98,27 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
                             "security" => true,
                             _ => return Err("fuzz profile must be basic or security".into()),
                         };
-                    },
+                    }
                     "--seed" => out.seed = value.parse::<u64>().map_err(|_| "invalid --seed")?,
-                    "--cases" => out.cases = value.parse::<usize>().map_err(|_| "invalid --cases")?,
+                    "--cases" => {
+                        out.cases = value.parse::<usize>().map_err(|_| "invalid --cases")?
+                    }
                     "--timeout" => {
                         let t = value.parse::<f64>().map_err(|_| "invalid --timeout")?;
-                        if !t.is_finite() || !(0.01..=600.0).contains(&t) { return Err("timeout must be 0.01..600 seconds".into()); }
+                        if !t.is_finite() || !(0.01..=600.0).contains(&t) {
+                            return Err("timeout must be 0.01..600 seconds".into());
+                        }
                         out.timeout = Duration::from_secs_f64(t);
-                    },
+                    }
                     "--trace" => out.trace = Some(value),
                     "--model" => out.model = Some(value),
                     "--max-schedules" => {
-                        let n = value.parse::<usize>().map_err(|_| "invalid --max-schedules")?;
-                        if n == 0 || n > MAX_CASES { return Err("invalid --max-schedules".into()); }
+                        let n = value
+                            .parse::<usize>()
+                            .map_err(|_| "invalid --max-schedules")?;
+                        if n == 0 || n > MAX_CASES {
+                            return Err("invalid --max-schedules".into());
+                        }
                         out.max_schedules = n as u64;
                         out.schedule_limit_selected = true;
                     }
@@ -100,18 +129,24 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
         }
         i += 1;
     }
-    if out.cases == 0 || out.cases > MAX_CASES { return Err("cases must be 1..1000000".into()); }
+    if out.cases == 0 || out.cases > MAX_CASES {
+        return Err("cases must be 1..1000000".into());
+    }
     if out.fuzz_profile_selected && !out.fuzz {
         return Err("--fuzz-profile requires --fuzz".into());
     }
-    if out.fuzz && (out.race || out.deadlock || out.trace.is_some() || out.logical || out.model.is_some()) {
+    if out.fuzz
+        && (out.race || out.deadlock || out.trace.is_some() || out.logical || out.model.is_some())
+    {
         return Err("fuzz and race modes are exclusive".into());
     }
     if out.trace.is_some() && !out.race && !out.deadlock {
         return Err("--trace requires --race and/or --deadlock".into());
     }
     if out.logical && (!out.race || out.deadlock || out.trace.is_some() || out.model.is_none()) {
-        return Err("--logical requires --race --logical --model FILE without --deadlock/--trace".into());
+        return Err(
+            "--logical requires --race --logical --model FILE without --deadlock/--trace".into(),
+        );
     }
     if (out.model.is_some() || out.schedule_limit_selected) && !out.logical {
         return Err("--model/--max-schedules requires --logical".into());
@@ -125,22 +160,45 @@ fn manifest(root: &Path) -> Result<toml::Table, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
         Err(e) => Err(e.to_string()),
         Ok(meta) => {
-            if !meta.is_file() || meta.file_type().is_symlink() { return Err("unsafe test manifest file".into()); }
-            super::read_bounded_project(root, Path::new("oreslang-test.toml"))?.parse::<toml::Table>().map_err(|e| format!("invalid test manifest: {e}"))
+            if !meta.is_file() || meta.file_type().is_symlink() {
+                return Err("unsafe test manifest file".into());
+            }
+            super::read_bounded_project(root, Path::new("oreslang-test.toml"))?
+                .parse::<toml::Table>()
+                .map_err(|e| format!("invalid test manifest: {e}"))
         }
     }
 }
 
 fn section<'a>(config: &'a toml::Table, name: &str) -> Result<Option<&'a toml::Table>, String> {
-    config.get(name).map(|v| v.as_table().ok_or_else(|| format!("[{name}] must be a table"))).transpose()
+    config
+        .get(name)
+        .map(|v| {
+            v.as_table()
+                .ok_or_else(|| format!("[{name}] must be a table"))
+        })
+        .transpose()
 }
 
 fn commands(params: &toml::Table, key: &str) -> Result<Vec<String>, String> {
-    let value = params.get(key).ok_or_else(|| format!("missing configured {key}"))?;
-    let array = value.as_array().ok_or_else(|| format!("{key} must be an argv array"))?;
-    if array.is_empty() || array.len() > 64 { return Err(format!("{key} needs 1..64 arguments")); }
-    array.iter().map(|v| v.as_str().filter(|s| !s.is_empty() && !s.contains('\0')).map(str::to_owned)
-            .ok_or_else(|| format!("{key} requires nonempty strings without NUL"))).collect()
+    let value = params
+        .get(key)
+        .ok_or_else(|| format!("missing configured {key}"))?;
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("{key} must be an argv array"))?;
+    if array.is_empty() || array.len() > 64 {
+        return Err(format!("{key} needs 1..64 arguments"));
+    }
+    array
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .filter(|s| !s.is_empty() && !s.contains('\0'))
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{key} requires nonempty strings without NUL"))
+        })
+        .collect()
 }
 
 fn resolve_path_candidate(
@@ -165,13 +223,20 @@ fn resolve_path_candidate(
 
 fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     let first = cmd.first().ok_or("empty command")?;
-    let wrapper = std::env::current_exe().map_err(|e| e.to_string())?.canonicalize().map_err(|e| e.to_string())?;
+    let wrapper = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
     let program = if Path::new(first).components().count() > 1 {
         // Explicit relative executables stay inside the project root.
-        if Path::new(first).is_absolute() { PathBuf::from(first) } else {
+        if Path::new(first).is_absolute() {
+            PathBuf::from(first)
+        } else {
             let path = root.join(first);
             let canonical = path.canonicalize().map_err(|e| e.to_string())?;
-            if !canonical.starts_with(root) { return Err("command escapes project root".into()); }
+            if !canonical.starts_with(root) {
+                return Err("command escapes project root".into());
+            }
             canonical
         }
     } else {
@@ -181,8 +246,7 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     // Otherwise --fuzz [fuzz].command=["oreslang-test"] can recursively invoke
     // this CLI until host process/file budgets are exhausted.
     let candidate = if program.components().count() == 1 {
-        std::env::var_os("PATH")
-            .and_then(|paths| resolve_path_candidate(&program, root, &paths))
+        std::env::var_os("PATH").and_then(|paths| resolve_path_candidate(&program, root, &paths))
     } else {
         Some(program.clone())
     };
@@ -191,17 +255,33 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang"),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang-test"),
     ];
-    if candidate.as_ref().and_then(|path| path.canonicalize().ok())
-        .is_some_and(|actual| forbidden.iter().any(|path| {
-            path.canonicalize().ok().as_ref() == Some(&actual)
-        }))
+    if candidate
+        .as_ref()
+        .and_then(|path| path.canonicalize().ok())
+        .is_some_and(|actual| {
+            forbidden
+                .iter()
+                .any(|path| path.canonicalize().ok().as_ref() == Some(&actual))
+        })
     {
         return Err("test executable resolves to a Rust CLI wrapper (recursion refused)".into());
     }
     let mut c = Command::new(program);
     c.args(&cmd[1..]).current_dir(root).env_clear();
-    for key in ["PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT", "WINDIR"] {
-        if let Some(v) = std::env::var_os(key) { c.env(key, v); }
+    for key in [
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "SYSTEMROOT",
+        "WINDIR",
+    ] {
+        if let Some(v) = std::env::var_os(key) {
+            c.env(key, v);
+        }
     }
     #[cfg(unix)]
     {
@@ -214,10 +294,14 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
 fn stop(child: &mut Child) {
     #[cfg(unix)]
     {
-        unsafe extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
         if let Ok(pid) = i32::try_from(child.id()) {
             // Negative pid identifies the private process group established at spawn.
-            unsafe { kill(-pid, 9); }
+            unsafe {
+                kill(-pid, 9);
+            }
         }
     }
     let _ = child.kill();
@@ -235,30 +319,55 @@ struct ProcessResult {
 fn read_small(mut file: File) -> Result<String, String> {
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
-    file.take(MAX_OUTPUT + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_OUTPUT { return Err("test subprocess output limit exceeded".into()); }
+    file.take(MAX_OUTPUT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_OUTPUT {
+        return Err("test subprocess output limit exceeded".into());
+    }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn invoke(mut command: Command, timeout: Duration, bytes: Option<&[u8]>, capture: bool)
-    -> Result<ProcessResult, String>
-{
+fn invoke(
+    mut command: Command,
+    timeout: Duration,
+    bytes: Option<&[u8]>,
+    capture: bool,
+) -> Result<ProcessResult, String> {
     let mut stdin_file = None;
     if let Some(input) = bytes {
         let mut f = tempfile::tempfile().map_err(|e| e.to_string())?;
-        f.write_all(input).and_then(|_| f.seek(SeekFrom::Start(0)).map(|_| ())).map_err(|e| e.to_string())?;
+        f.write_all(input)
+            .and_then(|_| f.seek(SeekFrom::Start(0)).map(|_| ()))
+            .map_err(|e| e.to_string())?;
         command.stdin(Stdio::from(f.try_clone().map_err(|e| e.to_string())?));
         stdin_file = Some(f);
     } else {
         command.stdin(Stdio::null());
     }
-    let mut stdout = if capture { Some(tempfile::tempfile().map_err(|e| e.to_string())?) } else { None };
-    let mut stderr = if capture { Some(tempfile::tempfile().map_err(|e| e.to_string())?) } else { None };
-    if let Some(f) = &stdout { command.stdout(Stdio::from(f.try_clone().map_err(|e| e.to_string())?)); }
-    else { command.stdout(Stdio::null()); }
-    if let Some(f) = &stderr { command.stderr(Stdio::from(f.try_clone().map_err(|e| e.to_string())?)); }
-    else { command.stderr(Stdio::null()); }
-    let mut child = command.spawn().map_err(|e| format!("cannot spawn test command: {e}"))?;
+    let mut stdout = if capture {
+        Some(tempfile::tempfile().map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let mut stderr = if capture {
+        Some(tempfile::tempfile().map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    if let Some(f) = &stdout {
+        command.stdout(Stdio::from(f.try_clone().map_err(|e| e.to_string())?));
+    } else {
+        command.stdout(Stdio::null());
+    }
+    if let Some(f) = &stderr {
+        command.stderr(Stdio::from(f.try_clone().map_err(|e| e.to_string())?));
+    } else {
+        command.stderr(Stdio::null());
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("cannot spawn test command: {e}"))?;
     let start = Instant::now();
     let (code, timed_out) = loop {
         if capture {
@@ -295,53 +404,113 @@ fn invoke(mut command: Command, timeout: Duration, bytes: Option<&[u8]>, capture
     };
     drop(stdin_file);
     Ok(ProcessResult {
-        code, timed_out,
-        output: match stdout.take() { Some(f) => read_small(f)?, None => String::new() },
-        stderr: match stderr.take() { Some(f) => read_small(f)?, None => String::new() },
+        code,
+        timed_out,
+        output: match stdout.take() {
+            Some(f) => read_small(f)?,
+            None => String::new(),
+        },
+        stderr: match stderr.take() {
+            Some(f) => read_small(f)?,
+            None => String::new(),
+        },
     })
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Counts { total: usize, passed: usize, failed: usize, skipped: usize, filtered: usize }
+struct Counts {
+    total: usize,
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+    filtered: usize,
+}
 
 fn test_receipt(output: &str) -> Result<Counts, String> {
-    let mut summaries = output.lines().filter(|l| l.starts_with("ORES_TEST|SUMMARY|"));
+    let mut summaries = output
+        .lines()
+        .filter(|l| l.starts_with("ORES_TEST|SUMMARY|"));
     let summary = summaries.next().ok_or("missing ORES_TEST summary")?;
-    if summaries.next().is_some() { return Err("duplicate ORES_TEST summaries".into()); }
+    if summaries.next().is_some() {
+        return Err("duplicate ORES_TEST summaries".into());
+    }
     let mut fields = BTreeMap::new();
     for pair in summary.split('|').skip(2) {
-        let (key,value) = pair.split_once('=').ok_or("malformed ORES_TEST summary")?;
-        if !["total","passed","failed","skipped","filtered"].contains(&key) || fields.insert(key, value.parse::<usize>().map_err(|_| "invalid test count")?).is_some() {
+        let (key, value) = pair.split_once('=').ok_or("malformed ORES_TEST summary")?;
+        if !["total", "passed", "failed", "skipped", "filtered"].contains(&key)
+            || fields
+                .insert(
+                    key,
+                    value.parse::<usize>().map_err(|_| "invalid test count")?,
+                )
+                .is_some()
+        {
             return Err("unknown/duplicate test count".into());
         }
     }
-    if fields.len() != 5 { return Err("incomplete test counts".into()); }
+    if fields.len() != 5 {
+        return Err("incomplete test counts".into());
+    }
     let c = Counts {
-        total: fields["total"], passed: fields["passed"],
-        failed: fields["failed"], skipped: fields["skipped"], filtered: fields["filtered"],
+        total: fields["total"],
+        passed: fields["passed"],
+        failed: fields["failed"],
+        skipped: fields["skipped"],
+        filtered: fields["filtered"],
     };
     if c.total == 0 {
         // A missing test discovery path must not be reported as green.
         return Err("machine receipt executed zero tests".into());
     }
-    if c.passed.checked_add(c.failed).and_then(|n| n.checked_add(c.skipped)) != Some(c.total) {
+    if c.passed
+        .checked_add(c.failed)
+        .and_then(|n| n.checked_add(c.skipped))
+        != Some(c.total)
+    {
         return Err("inconsistent test counts".into());
     }
-    let mut observed = [0usize; 3];
-    for line in output.lines().filter(|l| l.starts_with("ORES_TEST|")) {
-        if line == summary { continue; }
-        if line.starts_with("ORES_TEST|PASS|") { observed[0] += 1; }
-        else if line.starts_with("ORES_TEST|FAIL|") { observed[1] += 1; }
-        else if line.starts_with("ORES_TEST|SKIP|") { observed[2] += 1; }
-        else { return Err("unexpected ORES_TEST record".into()); }
+    if c.passed == 0 && c.failed == 0 {
+        return Err("machine receipt has no executed cases (all skipped or filtered)".into());
     }
-    if observed != [c.passed, c.failed, c.skipped] { return Err("test receipt case count mismatch".into()); }
+    let mut observed = [0usize; 3];
+    let mut case_ids = BTreeSet::new();
+    for line in output.lines().filter(|l| l.starts_with("ORES_TEST|")) {
+        if line == summary {
+            continue;
+        }
+        let (index, rest) = if let Some(rest) = line.strip_prefix("ORES_TEST|PASS|") {
+            (0, rest)
+        } else if let Some(rest) = line.strip_prefix("ORES_TEST|FAIL|") {
+            (1, rest)
+        } else if let Some(rest) = line.strip_prefix("ORES_TEST|SKIP|") {
+            (2, rest)
+        } else {
+            return Err("unexpected ORES_TEST record".into());
+        };
+        // Optional message fields do not change the identity of a case.
+        let id = rest.split('|').next().unwrap_or("");
+        if id.trim().is_empty() {
+            return Err("empty ORES_TEST case ID".into());
+        }
+        if !case_ids.insert(id) {
+            return Err("duplicate ORES_TEST case ID".into());
+        }
+        observed[index] = observed[index]
+            .checked_add(1)
+            .ok_or("test case count overflow")?;
+    }
+    if observed != [c.passed, c.failed, c.skipped] {
+        return Err("test receipt case count mismatch".into());
+    }
     Ok(c)
 }
 
 // Use platform path components: discovered Windows paths contain backslashes.
 fn is_native_test_path(path: &Path) -> bool {
-    let base = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let base = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
     return path.starts_with("tests")
         && path.extension().is_some_and(|ext| ext == "ores")
         && (base.starts_with("test_") || base.ends_with("_test.ores"));
@@ -351,9 +520,16 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
     let params = section(config, "native")?;
     let mut files = Vec::new();
     if let Some(value) = params.and_then(|p| p.get("files")) {
-        let arr = value.as_array().ok_or("[native].files must be a source list")?;
+        let arr = value
+            .as_array()
+            .ok_or("[native].files must be a source list")?;
         for value in arr {
-            files.push(value.as_str().ok_or("[native].files must contain strings")?.to_owned());
+            files.push(
+                value
+                    .as_str()
+                    .ok_or("[native].files must contain strings")?
+                    .to_owned(),
+            );
         }
     } else {
         for name in super::discover(root)? {
@@ -362,7 +538,9 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
             }
         }
     }
-    if files.is_empty() || files.len() > 512 { return Err("native tests require 1..512 source files".into()); }
+    if files.is_empty() || files.len() > 512 {
+        return Err("native tests require 1..512 source files".into());
+    }
     let core = std::env::var("ORESLANG_BIN").unwrap_or_else(|_| "oreslang-core".into());
     let mut failures = 0;
     for name in files {
@@ -371,22 +549,40 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
         let result = invoke(sanitize_command(&args, root)?, timeout, None, true)?;
         if result.timed_out || result.code != Some(0) {
             failures += 1;
-            eprintln!("FAIL {name}: timed_out={} exit={:?} {}", result.timed_out, result.code, result.stderr.chars().take(1000).collect::<String>());
+            eprintln!(
+                "FAIL {name}: timed_out={} exit={:?} {}",
+                result.timed_out,
+                result.code,
+                result.stderr.chars().take(1000).collect::<String>()
+            );
             continue;
         }
         match test_receipt(&result.output) {
-            Ok(counts) if counts.failed == 0 => println!("PASS {name}: {} passed, {} skipped", counts.passed, counts.skipped),
-            Ok(counts) => { failures += 1; eprintln!("FAIL {name}: {} failed tests", counts.failed); },
-            Err(e) => { failures += 1; eprintln!("FAIL {name}: invalid machine receipt: {e}"); },
+            Ok(counts) if counts.failed == 0 => println!(
+                "PASS {name}: {} passed, {} skipped",
+                counts.passed, counts.skipped
+            ),
+            Ok(counts) => {
+                failures += 1;
+                eprintln!("FAIL {name}: {} failed tests", counts.failed);
+            }
+            Err(e) => {
+                failures += 1;
+                eprintln!("FAIL {name}: invalid machine receipt: {e}");
+            }
         }
     }
     Ok(i32::from(failures != 0))
 }
 
 #[derive(Clone)]
-struct Rng { value: u64 }
+struct Rng {
+    value: u64,
+}
 impl Rng {
-    fn new(seed: u64) -> Self { Self { value: seed } }
+    fn new(seed: u64) -> Self {
+        Self { value: seed }
+    }
     fn next(&mut self) -> u64 {
         self.value = self.value.wrapping_add(0x9E3779B97F4A7C15);
         let mut z = self.value;
@@ -395,7 +591,9 @@ impl Rng {
         z ^ (z >> 31)
     }
     fn range(&mut self, upper: usize) -> usize {
-        if upper == 0 { return 0; }
+        if upper == 0 {
+            return 0;
+        }
         (self.next() % upper as u64) as usize
     }
 }
@@ -405,9 +603,14 @@ impl Rng {
 #[cfg(not(target_os = "linux"))]
 fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     let relative = Path::new(name);
-    if relative.as_os_str().is_empty() || relative.is_absolute()
-        || relative.components().any(|c| !matches!(c,
-            std::path::Component::Normal(_) | std::path::Component::CurDir))
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|c| {
+            !matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
     {
         return Err("unsafe project-relative path".into());
     }
@@ -416,7 +619,10 @@ fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
         result.push(part);
         match fs::symlink_metadata(&result) {
             Ok(meta) if meta.file_type().is_symlink() => {
-                return Err(format!("symlinked project path refused: {}", result.display()));
+                return Err(format!(
+                    "symlinked project path refused: {}",
+                    result.display()
+                ));
             }
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -431,7 +637,10 @@ fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
 #[cfg(any(test, not(target_os = "linux")))]
 fn read_corpus_case(input: impl Read, max_bytes: usize) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    input.take(max_bytes as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    input
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     if bytes.len() > max_bytes {
         return Err("corpus case exceeds max_bytes while reading".into());
     }
@@ -459,8 +668,17 @@ fn read_case_bounded(root: &Path, relative: &Path, max_bytes: usize) -> Result<V
     }
 }
 
-fn corpus(_root: &Path, params: &toml::Table, max_bytes: usize, _project: &ProjectRoot) -> Result<Vec<Vec<u8>>, String> {
-    let name = params.get("corpus").map(|v| v.as_str().ok_or("fuzz.corpus must be a relative path")).transpose()?.unwrap_or("tests/corpus");
+fn corpus(
+    _root: &Path,
+    params: &toml::Table,
+    max_bytes: usize,
+    _project: &ProjectRoot,
+) -> Result<Vec<Vec<u8>>, String> {
+    let name = params
+        .get("corpus")
+        .map(|v| v.as_str().ok_or("fuzz.corpus must be a relative path"))
+        .transpose()?
+        .unwrap_or("tests/corpus");
     #[cfg(not(target_os = "linux"))]
     let path = checked_project_path(_root, name)?;
     let mut cases = vec![vec![], vec![0], vec![255]];
@@ -468,7 +686,9 @@ fn corpus(_root: &Path, params: &toml::Table, max_bytes: usize, _project: &Proje
     match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cases),
         Err(e) => return Err(e.to_string()),
-        Ok(m) if !m.is_dir() || m.file_type().is_symlink() => return Err("unsafe corpus directory".into()),
+        Ok(m) if !m.is_dir() || m.file_type().is_symlink() => {
+            return Err("unsafe corpus directory".into())
+        }
         _ => {}
     }
     #[cfg(target_os = "linux")]
@@ -477,7 +697,10 @@ fn corpus(_root: &Path, params: &toml::Table, max_bytes: usize, _project: &Proje
         // artifact write. Absent optional corpora remain empty without a
         // pathname fallback into a different project _root.
         cases.extend(_project.corpus(
-            Path::new(name), MAX_CORPUS_FILES, max_bytes, MAX_CORPUS_BYTES,
+            Path::new(name),
+            MAX_CORPUS_FILES,
+            max_bytes,
+            MAX_CORPUS_BYTES,
         )?);
     }
     #[cfg(not(target_os = "linux"))]
@@ -498,7 +721,9 @@ fn corpus(_root: &Path, params: &toml::Table, max_bytes: usize, _project: &Proje
         let mut consumed = 0usize;
         for relative in files {
             let bytes = read_case_bounded(_root, &relative, max_bytes)?;
-            consumed = consumed.checked_add(bytes.len()).ok_or("corpus byte budget overflow")?;
+            consumed = consumed
+                .checked_add(bytes.len())
+                .ok_or("corpus byte budget overflow")?;
             if consumed > MAX_CORPUS_BYTES {
                 return Err("corpus byte budget exceeded".into());
             }
@@ -511,13 +736,25 @@ fn corpus(_root: &Path, params: &toml::Table, max_bytes: usize, _project: &Proje
 }
 
 fn classify(result: &ProcessResult) -> Result<Option<i32>, String> {
-    if result.timed_out || result.code.is_none() { return Err("guest timed out or terminated abnormally; cannot classify fuzz failure".into()); }
-    if result.code == Some(0) { Ok(None) } else { Ok(result.code) }
+    if result.timed_out || result.code.is_none() {
+        return Err(
+            "guest timed out or terminated abnormally; cannot classify fuzz failure".into(),
+        );
+    }
+    if result.code == Some(0) {
+        Ok(None)
+    } else {
+        Ok(result.code)
+    }
 }
 
-fn candidate(cmd: &[String], root: &Path, timeout: Duration, bytes: &[u8],
-    project: &ProjectRoot) -> Result<Option<i32>, String>
-{
+fn candidate(
+    cmd: &[String],
+    root: &Path,
+    timeout: Duration,
+    bytes: &[u8],
+    project: &ProjectRoot,
+) -> Result<Option<i32>, String> {
     project.verify_path(root)?;
     let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), false)?;
     project.verify_path(root)?;
@@ -527,10 +764,11 @@ fn candidate(cmd: &[String], root: &Path, timeout: Duration, bytes: &[u8],
 fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<PathBuf, String> {
     // Stable filename is only a local deduplication hint, not a
     // cryptographic authentication or an attacker-resistant digest.
-    let hash = bytes.iter().fold(0xcbf29ce484222325u64,
-        |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100000001b3));
-    let relative = Path::new(".oreslang-test/failures")
-        .join(format!("fuzz-{hash:016x}-{}.bin", bytes.len()));
+    let hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+    });
+    let relative =
+        Path::new(".oreslang-test/failures").join(format!("fuzz-{hash:016x}-{}.bin", bytes.len()));
     #[cfg(target_os = "linux")]
     {
         _project.verify_path(root)?;
@@ -547,11 +785,16 @@ fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<Pa
         checked_project_path(root, ".oreslang-test/failures")?;
         let path = root.join(&relative);
         match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => { file.write_all(bytes).map_err(|e| e.to_string())?; Ok(path) }
+            Ok(mut file) => {
+                file.write_all(bytes).map_err(|e| e.to_string())?;
+                Ok(path)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-                if !meta.is_file() || meta.file_type().is_symlink()
-                    || read_case_bounded(root, &relative, bytes.len())? != bytes {
+                if !meta.is_file()
+                    || meta.file_type().is_symlink()
+                    || read_case_bounded(root, &relative, bytes.len())? != bytes
+                {
                     return Err("unsafe or colliding failure artifact".into());
                 }
                 Ok(path)
@@ -581,7 +824,9 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         Some(v) => v.as_integer().ok_or("invalid fuzz.max_bytes")?,
         None => 256,
     };
-    if !(1..=65_536).contains(&max_bytes) { return Err("fuzz.max_bytes must be 1..65536".into()); }
+    if !(1..=65_536).contains(&max_bytes) {
+        return Err("fuzz.max_bytes must be 1..65536".into());
+    }
     let project = ProjectRoot::new(root)?;
     let mut samples = corpus(root, params, max_bytes as usize, &project)?;
     project.verify_path(root)?;
@@ -590,11 +835,14 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         // Put these before the ordinary corpus so a bounded --cases also
         // exercises the security profile with a deterministic order.
         let mut security = vec![
-            b"../".repeat(10), b"..%2f..%2f".to_vec(),
-            b"%00%00".to_vec(), vec![0xff, 0xfe, 0xc0, 0xaf],
+            b"../".repeat(10),
+            b"..%2f..%2f".to_vec(),
+            b"%00%00".to_vec(),
+            vec![0xff, 0xfe, 0xc0, 0xaf],
             b"\\u0000\\uD800".to_vec(),
             b"<script>alert(1)</script>".to_vec(),
-            b"' OR 1=1 --".to_vec(), b"../../etc/passwd".to_vec(),
+            b"' OR 1=1 --".to_vec(),
+            b"../../etc/passwd".to_vec(),
             vec![b'A'; max_bytes as usize],
             vec![b'['; max_bytes as usize],
         ];
@@ -617,12 +865,16 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
     }
     let mut rng = Rng::new(settings.seed);
     for i in 0..settings.cases {
-        let case = if i < samples.len() { samples[i].clone() } else {
+        let case = if i < samples.len() {
+            samples[i].clone()
+        } else {
             let base = &samples[rng.range(samples.len())];
             let mut bytes = base.clone();
             if bytes.is_empty() || rng.range(4) == 0 {
                 bytes = vec![0; rng.range(max_bytes as usize + 1)];
-                for x in &mut bytes { *x = rng.next() as u8; }
+                for x in &mut bytes {
+                    *x = rng.next() as u8;
+                }
             } else {
                 for _ in 0..(1 + rng.range(4)) {
                     let idx = rng.range(bytes.len());
@@ -635,7 +887,10 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         if let Some(code) = candidate(&cmd, root, settings.timeout, &case, &project)? {
             for _ in 0..2 {
                 if candidate(&cmd, root, settings.timeout, &case, &project)? != Some(code) {
-                    eprintln!("FUZZ FLAKY seed={} iteration={i}: no stable reproduction", settings.seed);
+                    eprintln!(
+                        "FUZZ FLAKY seed={} iteration={i}: no stable reproduction",
+                        settings.seed
+                    );
                     return Ok(2);
                 }
             }
@@ -646,7 +901,9 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                 let chunk = shrunk.len().div_ceil(granularity);
                 let mut shorter = false;
                 for start in (0..shrunk.len()).step_by(chunk.max(1)) {
-                    if budget == 0 { break; }
+                    if budget == 0 {
+                        break;
+                    }
                     budget -= 1;
                     let mut reduced = shrunk[..start].to_vec();
                     reduced.extend_from_slice(&shrunk[(start + chunk).min(shrunk.len())..]);
@@ -658,7 +915,9 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                     }
                 }
                 if !shorter {
-                    if granularity >= shrunk.len() { break; }
+                    if granularity >= shrunk.len() {
+                        break;
+                    }
                     granularity = (granularity * 2).min(shrunk.len());
                 }
             }
@@ -670,29 +929,42 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                 }
             }
             let saved = write_failure(root, &shrunk, &project)?;
-            println!("FUZZ FAILURE seed={} iteration={i} exit={code} initial={} minimized={} path={}", settings.seed, case.len(), shrunk.len(), saved.display());
+            println!(
+                "FUZZ FAILURE seed={} iteration={i} exit={code} initial={} minimized={} path={}",
+                settings.seed,
+                case.len(),
+                shrunk.len(),
+                saved.display()
+            );
             return Ok(1);
         }
         retain_sample(&mut samples, &mut retained_bytes, case);
     }
-    println!("FUZZ PASS cases={} seed={} (observed inputs only)", settings.cases, settings.seed);
+    println!(
+        "FUZZ PASS cases={} seed={} (observed inputs only)",
+        settings.cases, settings.seed
+    );
     Ok(0)
 }
 
 pub fn run(args: &[OsString]) -> i32 {
-    let result = (|| -> Result<i32,String> {
+    let result = (|| -> Result<i32, String> {
         let settings = parse(args)?;
         let root = settings.root.canonicalize().map_err(|e| e.to_string())?;
-        if !root.is_dir() { return Err("project root must be a directory".into()); }
+        if !root.is_dir() {
+            return Err("project root must be a directory".into());
+        }
         let cfg = manifest(&root)?;
         if settings.deadlock {
             if settings.logical || settings.model.is_some() {
-                return Err("combined deadlock and logical-model checking is not implemented".into());
+                return Err(
+                    "combined deadlock and logical-model checking is not implemented".into(),
+                );
             }
             if let Some(name) = &settings.trace {
-                let deadlocks = super::deadlock::offline(&root,name)?;
+                let deadlocks = super::deadlock::offline(&root, name)?;
                 if settings.race {
-                    let races = super::race_offline::offline(&root,name)?;
+                    let races = super::race_offline::offline(&root, name)?;
                     return Ok(deadlocks.max(races));
                 }
                 return Ok(deadlocks);
@@ -701,27 +973,78 @@ pub fn run(args: &[OsString]) -> i32 {
         }
         if settings.race {
             if settings.logical {
-                return super::logical::offline(&root,
+                return super::logical::offline(
+                    &root,
                     settings.model.as_deref().ok_or("missing logical model")?,
-                    settings.max_schedules);
+                    settings.max_schedules,
+                );
             }
             if let Some(path) = &settings.trace {
                 return super::race_offline::offline(&root, path);
             }
             return Err("runtime --race is INCONCLUSIVE: trusted backend trace admission is not implemented; use --trace for explicitly offline Rust analysis".into());
         }
-        if settings.fuzz { fuzz(&root, &cfg, &settings) }
-        else { native(&root, &cfg, settings.timeout) }
+        if settings.fuzz {
+            fuzz(&root, &cfg, &settings)
+        } else {
+            native(&root, &cfg, settings.timeout)
+        }
     })();
     match result {
         Ok(code) => code,
-        Err(message) => { eprintln!("oreslang test: {message}"); 2 }
+        Err(message) => {
+            eprintln!("oreslang test: {message}");
+            2
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_receipts_require_executed_cases() {
+        for output in [
+            "ORES_TEST|SKIP|suite/disabled|reason\nORES_TEST|SUMMARY|total=1|passed=0|failed=0|skipped=1|filtered=0\n",
+            "ORES_TEST|SUMMARY|total=0|passed=0|failed=0|skipped=0|filtered=3\n",
+        ] {
+            assert!(test_receipt(output).is_err());
+        }
+    }
+
+    #[test]
+    fn machine_receipts_reject_duplicate_ids_even_across_statuses() {
+        for output in [
+            "ORES_TEST|PASS|suite/case|first\nORES_TEST|PASS|suite/case|second\nORES_TEST|SUMMARY|total=2|passed=2|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PASS|suite/case|\nORES_TEST|SKIP|suite/case|reason\nORES_TEST|SUMMARY|total=2|passed=1|failed=0|skipped=1|filtered=0\n",
+        ] {
+            assert!(test_receipt(output).is_err());
+        }
+    }
+
+    #[test]
+    fn machine_receipts_reject_empty_case_ids() {
+        for id in ["", " ", "\t"] {
+            let output = format!("ORES_TEST|PASS|{id}|message\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n");
+            assert!(test_receipt(&output).is_err());
+        }
+    }
+
+    #[test]
+    fn machine_receipts_preserve_distinct_case_outcomes_and_messages() {
+        let output = "ORES_TEST|PASS|suite/ok|message|extra\nORES_TEST|FAIL|suite/bad|reason\nORES_TEST|SKIP|suite/off|reason\nORES_TEST|SUMMARY|total=3|passed=1|failed=1|skipped=1|filtered=2\n";
+        assert_eq!(
+            test_receipt(output),
+            Ok(Counts {
+                total: 3,
+                passed: 1,
+                failed: 1,
+                skipped: 1,
+                filtered: 2,
+            })
+        );
+    }
 
     #[test]
     fn retained_fuzz_payload_accepts_exact_byte_limit_then_stops_growing() {
@@ -750,15 +1073,23 @@ mod tests {
     fn retained_fuzz_pool_rejects_oversized_case_without_changing_state() {
         let mut samples = vec![vec![1]];
         let mut bytes = 1;
-        assert!(!retain_sample(&mut samples, &mut bytes, vec![2; MAX_RETAINED_BYTES]));
+        assert!(!retain_sample(
+            &mut samples,
+            &mut bytes,
+            vec![2; MAX_RETAINED_BYTES]
+        ));
         assert_eq!(samples, vec![vec![1]]);
         assert_eq!(bytes, 1);
     }
 
     #[test]
     fn native_discovery_uses_platform_path_components() {
-        assert!(is_native_test_path(&Path::new("tests").join("test_one.ores")));
-        assert!(is_native_test_path(&Path::new("tests").join("nested").join("two_test.ores")));
+        assert!(is_native_test_path(
+            &Path::new("tests").join("test_one.ores")
+        ));
+        assert!(is_native_test_path(
+            &Path::new("tests").join("nested").join("two_test.ores")
+        ));
         for path in [
             PathBuf::from("test_one.ores"),
             Path::new("tests-other").join("test_one.ores"),
@@ -783,17 +1114,27 @@ mod tests {
         ] {
             fs::write(root.path().join(path), "").unwrap();
         }
-        let selected: Vec<_> = super::super::discover(root.path()).unwrap().into_iter()
-            .filter(|name| is_native_test_path(Path::new(name))).collect();
+        let selected: Vec<_> = super::super::discover(root.path())
+            .unwrap()
+            .into_iter()
+            .filter(|name| is_native_test_path(Path::new(name)))
+            .collect();
         assert_eq!(selected.len(), 2);
-        assert!(selected.iter().any(|name| Path::new(name).ends_with("test_one.ores")));
-        assert!(selected.iter().any(|name| Path::new(name).ends_with("two_test.ores")));
+        assert!(selected
+            .iter()
+            .any(|name| Path::new(name).ends_with("test_one.ores")));
+        assert!(selected
+            .iter()
+            .any(|name| Path::new(name).ends_with("two_test.ores")));
     }
 
     #[test]
     fn corpus_stream_accepts_empty_and_exact_limit_binary_input() {
         assert_eq!(read_corpus_case(&b""[..], 4), Ok(Vec::new()));
-        assert_eq!(read_corpus_case(&[0, 255, 128, 1][..], 4), Ok(vec![0, 255, 128, 1]));
+        assert_eq!(
+            read_corpus_case(&[0, 255, 128, 1][..], 4),
+            Ok(vec![0, 255, 128, 1])
+        );
     }
 
     #[test]
@@ -810,7 +1151,10 @@ mod tests {
         struct Broken;
         impl Read for Broken {
             fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied",
+                ));
             }
         }
         assert!(read_corpus_case(Broken, 8).is_err());
@@ -832,14 +1176,23 @@ mod tests {
         } else {
             "corpus byte budget exceeded"
         };
-        assert_eq!(corpus(root.path(), &params, seed.len(), &ProjectRoot::new(root.path()).unwrap()).unwrap_err(), expected);
+        assert_eq!(
+            corpus(
+                root.path(),
+                &params,
+                seed.len(),
+                &ProjectRoot::new(root.path()).unwrap()
+            )
+            .unwrap_err(),
+            expected
+        );
     }
 
     #[test]
     fn rejects_unsupported_race_without_python_fallback() {
         assert_eq!(run(&["--race".into()]), 2);
         assert_eq!(run(&["--race".into(), "--logical".into()]), 2);
-        assert!(parse(&["--model".into(),"x.json".into()]).is_err());
+        assert!(parse(&["--model".into(), "x.json".into()]).is_err());
     }
     #[test]
     fn rejects_missing_arguments_and_invalid_timeouts() {
@@ -866,7 +1219,9 @@ mod tests {
     fn stable_seed_reproducibility() {
         let mut a = Rng::new(42);
         let mut b = Rng::new(42);
-        for _ in 0..1000 { assert_eq!(a.next(), b.next()); }
+        for _ in 0..1000 {
+            assert_eq!(a.next(), b.next());
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -877,7 +1232,10 @@ mod tests {
         let source = dir.path().join("case");
         std::fs::write(&source, b"abc").unwrap();
         let relative = Path::new("case");
-        assert_eq!(crate::fs_secure::read_project_file(dir.path(), relative, 3).unwrap(), b"abc");
+        assert_eq!(
+            crate::fs_secure::read_project_file(dir.path(), relative, 3).unwrap(),
+            b"abc"
+        );
         assert!(crate::fs_secure::read_project_file(dir.path(), relative, 2).is_err());
         let alias = dir.path().join("alias");
         symlink(&source, &alias).unwrap();
@@ -891,7 +1249,10 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         let payload = b"reproducible-crash";
         let saved = write_failure(&root, payload, &ProjectRoot::new(&root).unwrap()).unwrap();
-        assert_eq!(write_failure(&root, payload, &ProjectRoot::new(&root).unwrap()).unwrap(), saved);
+        assert_eq!(
+            write_failure(&root, payload, &ProjectRoot::new(&root).unwrap()).unwrap(),
+            saved
+        );
         std::fs::remove_file(&saved).unwrap();
         let external = root.join("external.bin");
         std::fs::write(&external, payload).unwrap();
@@ -916,12 +1277,32 @@ mod tests {
     #[test]
     fn machine_receipts_are_strict() {
         let good = "ORES_TEST|PASS|one\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n";
-        assert_eq!(test_receipt(good), Ok(Counts { total:1,passed:1,failed:0,skipped:0,filtered:0 }));
+        assert_eq!(
+            test_receipt(good),
+            Ok(Counts {
+                total: 1,
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                filtered: 0
+            })
+        );
         assert!(test_receipt(&format!("{good}{good}")).is_err());
-        assert!(test_receipt("ORES_TEST|SUMMARY|total=0|passed=0|passed=0|failed=0|skipped=0|filtered=0").is_err());
-        assert!(test_receipt("ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0").is_err());
-        assert!(test_receipt("ORES_TEST|SUMMARY|total=0|passed=0|failed=0|skipped=0|filtered=0").is_err());
-        assert!(test_receipt("ORES_TEST|PASS|one\nORES_TEST|SUMMARY|total=2|passed=1|failed=0|skipped=0|filtered=0").is_err());
+        assert!(test_receipt(
+            "ORES_TEST|SUMMARY|total=0|passed=0|passed=0|failed=0|skipped=0|filtered=0"
+        )
+        .is_err());
+        assert!(
+            test_receipt("ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0")
+                .is_err()
+        );
+        assert!(
+            test_receipt("ORES_TEST|SUMMARY|total=0|passed=0|failed=0|skipped=0|filtered=0")
+                .is_err()
+        );
+        assert!(test_receipt(
+            "ORES_TEST|PASS|one\nORES_TEST|SUMMARY|total=2|passed=1|failed=0|skipped=0|filtered=0"
+        )
+        .is_err());
     }
 }
-
