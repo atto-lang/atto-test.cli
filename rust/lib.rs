@@ -1,13 +1,13 @@
-pub mod effects;
-pub mod reactive;
 mod audit;
-pub mod race_evidence;
-mod race_offline;
 mod deadlock;
-mod logical;
-mod runtime;
+pub mod effects;
 #[cfg(target_os = "linux")]
 mod fs_secure;
+mod logical;
+pub mod race_evidence;
+mod race_offline;
+pub mod reactive;
+mod runtime;
 
 use std::ffi::OsString;
 use std::fs;
@@ -25,13 +25,20 @@ const MAX_ENTRIES: usize = 20_000;
 fn read_bounded(path: &Path) -> Result<String, String> {
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err(format!("expected regular source/config file: {}", path.display()));
+        return Err(format!(
+            "expected regular source/config file: {}",
+            path.display()
+        ));
     }
     let mut bytes = Vec::new();
-    file.take(effects::MAX_SOURCE as u64 + 1).read_to_end(&mut bytes)
+    file.take(effects::MAX_SOURCE as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     if bytes.len() > effects::MAX_SOURCE {
-        return Err(format!("file exceeds 256 KiB analysis bound: {}", path.display()));
+        return Err(format!(
+            "file exceeds 256 KiB analysis bound: {}",
+            path.display()
+        ));
     }
     String::from_utf8(bytes).map_err(|_| format!("invalid UTF-8: {}", path.display()))
 }
@@ -40,9 +47,8 @@ fn read_bounded_project(root: &Path, relative: &Path) -> Result<String, String> 
     #[cfg(target_os = "linux")]
     {
         let bytes = fs_secure::read_project_file(root, relative, effects::MAX_SOURCE)?;
-        return String::from_utf8(bytes).map_err(|_| {
-            format!("invalid UTF-8 project input: {}", relative.display())
-        });
+        return String::from_utf8(bytes)
+            .map_err(|_| format!("invalid UTF-8 project input: {}", relative.display()));
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -76,7 +82,13 @@ fn source_path(root: &Path, name: &str) -> Result<PathBuf, String> {
 
 #[cfg(target_os = "linux")]
 fn discover(root: &Path) -> Result<Vec<String>, String> {
-    fs_secure::discover_sources(root, &["target", "node_modules"], MAX_ENTRIES, MAX_FILES, 64)
+    fs_secure::discover_sources(
+        root,
+        &["target", "node_modules"],
+        MAX_ENTRIES,
+        MAX_FILES,
+        64,
+    )
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -328,7 +340,8 @@ pub fn run(mut args: Vec<OsString>, core_launcher: bool) -> i32 {
         }
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!(r#"usage: oreslang test [--root DIR] [--effects [--effects-strict] [--file SOURCE]...]
+        println!(
+            r#"usage: oreslang test [--root DIR] [--effects [--effects-strict] [--file SOURCE]...]
        oreslang test --audit [--audit-file SOURCE] [--fail-on SEVERITY] [--audit-format text|json]
        oreslang test --security | --anti-patterns
        oreslang test --fuzz [--fuzz-profile basic|security] [--seed N] [--cases N] [--timeout SECONDS]
@@ -340,7 +353,8 @@ pub fn run(mut args: Vec<OsString>, core_launcher: bool) -> i32 {
 All current CLI engines are Rust-only; no Python fallback.
 Uninstrumented runtime --race/--deadlock are inconclusive (exit 2).
 --logical is a bounded Rust host model, not a runtime scheduling proof.
-Exit 0: scoped observed pass; 1: finding/failure; 2: invalid/inconclusive."#);
+Exit 0: scoped observed pass; 1: finding/failure; 2: invalid/inconclusive."#
+        );
         return 0;
     }
     if args.iter().any(|a| {
@@ -361,10 +375,21 @@ Exit 0: scoped observed pass; 1: finding/failure; 2: invalid/inconclusive."#);
         }
     }
     if args.iter().any(|arg| {
-        matches!(arg.to_str(), Some("--security" | "--anti-patterns" | "--audit" | "--audit-file"
-            | "--fail-on" | "--audit-format"))
-        || arg.to_str().is_some_and(|s| s.starts_with("--audit-file=")
-            || s.starts_with("--fail-on=") || s.starts_with("--audit-format="))
+        matches!(
+            arg.to_str(),
+            Some(
+                "--security"
+                    | "--anti-patterns"
+                    | "--audit"
+                    | "--audit-file"
+                    | "--fail-on"
+                    | "--audit-format"
+            )
+        ) || arg.to_str().is_some_and(|s| {
+            s.starts_with("--audit-file=")
+                || s.starts_with("--fail-on=")
+                || s.starts_with("--audit-format=")
+        })
     }) {
         return audit::run(&args);
     }

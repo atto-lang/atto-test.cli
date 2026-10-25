@@ -74,8 +74,10 @@ pub fn validate_shape(receipt: &Summary<'_>, host: &Binding<'_>) -> Result<(), &
     if !is_bounded_run_id(host.run_id) || receipt.run_id != host.run_id {
         return Err("missing or mismatched host run identity");
     }
-    if !matches!(receipt.backend, "llvm" | "graalvm" | "wasm" | "js" | "dotnet")
-        || receipt.backend != host.backend
+    if !matches!(
+        receipt.backend,
+        "llvm" | "graalvm" | "wasm" | "js" | "dotnet"
+    ) || receipt.backend != host.backend
     {
         return Err("backend identity mismatch");
     }
@@ -88,7 +90,8 @@ pub fn validate_shape(receipt: &Summary<'_>, host: &Binding<'_>) -> Result<(), &
     if !receipt.complete || receipt.dropped != 0 {
         return Err("incomplete runtime event coverage");
     }
-    if receipt.emitted == 0 || receipt.emitted > MAX_EVENTS
+    if receipt.emitted == 0
+        || receipt.emitted > MAX_EVENTS
         || receipt.emitted != receipt.stored
         || receipt.emitted != receipt.final_sequence
     {

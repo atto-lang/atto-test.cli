@@ -7,17 +7,38 @@ const MAX_DEMAND: u32 = 4096;
 const MAX_IDENTITY_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceMode { HotSingle, Cold }
+pub enum SourceMode {
+    HotSingle,
+    Cold,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    Subscribe { subscription: String, source: String, mode: SourceMode },
-    Request { subscription: String, count: u32 },
-    Next { subscription: String },
-    Complete { subscription: String },
-    Cancel { subscription: String },
-    Error { subscription: String, reason: String },
-    Dispose { subscription: String },
+    Subscribe {
+        subscription: String,
+        source: String,
+        mode: SourceMode,
+    },
+    Request {
+        subscription: String,
+        count: u32,
+    },
+    Next {
+        subscription: String,
+    },
+    Complete {
+        subscription: String,
+    },
+    Cancel {
+        subscription: String,
+    },
+    Error {
+        subscription: String,
+        reason: String,
+    },
+    Dispose {
+        subscription: String,
+    },
 }
 
 impl Event {
@@ -67,43 +88,68 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
             return Err(format!("event {position}: invalid subscription identity"));
         }
         if let Event::Subscribe { source, mode, .. } = event {
-            if !identity(source) { return Err("invalid reactive source identity".into()); }
-            if subscribers.contains_key(id) { return Err("duplicate subscription identity".into()); }
+            if !identity(source) {
+                return Err("invalid reactive source identity".into());
+            }
+            if subscribers.contains_key(id) {
+                return Err("duplicate subscription identity".into());
+            }
             let assigned = sources.entry(source.clone()).or_default();
             if *mode == SourceMode::HotSingle && !assigned.is_empty() {
                 return Err("hot single-consumer source cannot multicast".into());
             }
-            if *mode == SourceMode::Cold && assigned.iter().any(|earlier| {
-                subscribers.get(earlier).is_some_and(|x| x.mode == SourceMode::HotSingle)
-            }) {
+            if *mode == SourceMode::Cold
+                && assigned.iter().any(|earlier| {
+                    subscribers
+                        .get(earlier)
+                        .is_some_and(|x| x.mode == SourceMode::HotSingle)
+                })
+            {
                 return Err("mixed source cardinality modes".into());
             }
             assigned.insert(id.to_owned());
-            subscribers.insert(id.to_owned(), Subscriber {
-                mode: *mode, requested: 0, terminal: false, disposed: false,
-            });
+            subscribers.insert(
+                id.to_owned(),
+                Subscriber {
+                    mode: *mode,
+                    requested: 0,
+                    terminal: false,
+                    disposed: false,
+                },
+            );
             continue;
         }
-        let state = subscribers.get_mut(id)
+        let state = subscribers
+            .get_mut(id)
             .ok_or_else(|| format!("event {position}: operation before subscribe"))?;
         if let Event::Dispose { .. } = event {
-            if state.disposed { return Err("duplicate reactive disposal".into()); }
-            if !state.terminal { return Err("disposal without terminal cause".into()); }
+            if state.disposed {
+                return Err("duplicate reactive disposal".into());
+            }
+            if !state.terminal {
+                return Err("disposal without terminal cause".into());
+            }
             state.disposed = true;
             continue;
         }
-        if state.terminal { return Err("reactive event after terminal".into()); }
+        if state.terminal {
+            return Err("reactive event after terminal".into());
+        }
         match event {
             Event::Request { count, .. } => {
                 if *count == 0 || *count > MAX_DEMAND {
                     return Err("reactive demand increment must be 1..4096".into());
                 }
-                state.requested = state.requested.checked_add(*count)
+                state.requested = state
+                    .requested
+                    .checked_add(*count)
                     .filter(|x| *x <= MAX_DEMAND)
                     .ok_or("reactive outstanding demand exceeds 4096")?;
             }
             Event::Next { .. } => {
-                if state.requested == 0 { return Err("next without downstream demand".into()); }
+                if state.requested == 0 {
+                    return Err("next without downstream demand".into());
+                }
                 state.requested -= 1;
                 next_count += 1;
             }
@@ -121,12 +167,17 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
             Event::Subscribe { .. } | Event::Dispose { .. } => unreachable!(),
         }
     }
-    if subscribers.values().any(|state| state.terminal && !state.disposed) {
+    if subscribers
+        .values()
+        .any(|state| state.terminal && !state.disposed)
+    {
         return Err("terminated subscription missing exact-once disposal".into());
     }
     Ok(Report {
-        events: events.len(), subscriptions: subscribers.len(),
-        next: next_count, terminals: terminal_count,
+        events: events.len(),
+        subscriptions: subscribers.len(),
+        next: next_count,
+        terminals: terminal_count,
         active: subscribers.len() - terminal_count,
     })
 }
@@ -135,61 +186,140 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
 mod tests {
     use super::*;
     fn s(id: &str, source: &str, mode: SourceMode) -> Event {
-        Event::Subscribe { subscription: id.into(), source: source.into(), mode }
+        Event::Subscribe {
+            subscription: id.into(),
+            source: source.into(),
+            mode,
+        }
     }
     fn req(id: &str, count: u32) -> Event {
-        Event::Request { subscription: id.into(), count }
+        Event::Request {
+            subscription: id.into(),
+            count,
+        }
     }
-    fn next(id: &str) -> Event { Event::Next { subscription: id.into() } }
-    fn complete(id: &str) -> Event { Event::Complete { subscription: id.into() } }
-    fn dispose(id: &str) -> Event { Event::Dispose { subscription: id.into() } }
+    fn next(id: &str) -> Event {
+        Event::Next {
+            subscription: id.into(),
+        }
+    }
+    fn complete(id: &str) -> Event {
+        Event::Complete {
+            subscription: id.into(),
+        }
+    }
+    fn dispose(id: &str) -> Event {
+        Event::Dispose {
+            subscription: id.into(),
+        }
+    }
 
     #[test]
     fn complete_bounded_backpressure_and_terminal_disposal_pass() {
         let events = [
             s("sub1", "source", SourceMode::HotSingle),
             req("sub1", 2),
-            next("sub1"), next("sub1"), complete("sub1"), dispose("sub1"),
+            next("sub1"),
+            next("sub1"),
+            complete("sub1"),
+            dispose("sub1"),
         ];
-        assert_eq!(analyze(&events), Ok(Report {
-            events: 6, subscriptions: 1, next: 2, terminals: 1, active: 0,
-        }));
+        assert_eq!(
+            analyze(&events),
+            Ok(Report {
+                events: 6,
+                subscriptions: 1,
+                next: 2,
+                terminals: 1,
+                active: 0,
+            })
+        );
     }
 
     #[test]
     fn no_demand_or_repeated_terminal_or_missing_disposal_fails() {
-        assert!(analyze(&[s("x","a",SourceMode::Cold), next("x")]).is_err());
-        assert!(analyze(&[s("x","a",SourceMode::Cold), req("x", 4096), req("x", 1)]).is_err());
-        assert!(analyze(&[s("x","a",SourceMode::Cold), complete("x")]).is_err());
-        assert!(analyze(&[s("x","a",SourceMode::Cold), complete("x"), complete("x"), dispose("x")]).is_err());
-        assert!(analyze(&[s("x","a",SourceMode::Cold), complete("x"), dispose("x"), dispose("x")]).is_err());
+        assert!(analyze(&[s("x", "a", SourceMode::Cold), next("x")]).is_err());
+        assert!(analyze(&[s("x", "a", SourceMode::Cold), req("x", 4096), req("x", 1)]).is_err());
+        assert!(analyze(&[s("x", "a", SourceMode::Cold), complete("x")]).is_err());
+        assert!(analyze(&[
+            s("x", "a", SourceMode::Cold),
+            complete("x"),
+            complete("x"),
+            dispose("x")
+        ])
+        .is_err());
+        assert!(analyze(&[
+            s("x", "a", SourceMode::Cold),
+            complete("x"),
+            dispose("x"),
+            dispose("x")
+        ])
+        .is_err());
     }
 
     #[test]
     fn source_cardinality_and_identity_are_preserved() {
-        assert!(analyze(&[s("one","src",SourceMode::HotSingle),
-                          s("two","src",SourceMode::Cold)]).is_err());
-        assert!(analyze(&[s("one","src",SourceMode::Cold),
-                          s("two","src",SourceMode::HotSingle)]).is_err());
-        assert!(analyze(&[s("one","src",SourceMode::Cold),
-                          s("one","else",SourceMode::Cold)]).is_err());
-        assert_eq!(analyze(&[s("one","src",SourceMode::Cold),
-                            s("two","src",SourceMode::Cold)]).unwrap().active, 2);
+        assert!(analyze(&[
+            s("one", "src", SourceMode::HotSingle),
+            s("two", "src", SourceMode::Cold)
+        ])
+        .is_err());
+        assert!(analyze(&[
+            s("one", "src", SourceMode::Cold),
+            s("two", "src", SourceMode::HotSingle)
+        ])
+        .is_err());
+        assert!(analyze(&[
+            s("one", "src", SourceMode::Cold),
+            s("one", "else", SourceMode::Cold)
+        ])
+        .is_err());
+        assert_eq!(
+            analyze(&[
+                s("one", "src", SourceMode::Cold),
+                s("two", "src", SourceMode::Cold)
+            ])
+            .unwrap()
+            .active,
+            2
+        );
     }
 
     #[test]
     fn cancellation_failure_and_late_next_are_distinct() {
-        assert!(analyze(&[s("x","src",SourceMode::Cold),
-            Event::Error { subscription: "x".into(), reason: "".into() }]).is_err());
-        assert!(analyze(&[s("x","src",SourceMode::Cold),
-            Event::Cancel { subscription: "x".into() }, next("x")]).is_err());
-        assert_eq!(analyze(&[s("x","src",SourceMode::Cold),
-            Event::Error { subscription: "x".into(), reason: "I/O failure".into() },
-            dispose("x")]).unwrap().terminals, 1);
+        assert!(analyze(&[
+            s("x", "src", SourceMode::Cold),
+            Event::Error {
+                subscription: "x".into(),
+                reason: "".into()
+            }
+        ])
+        .is_err());
+        assert!(analyze(&[
+            s("x", "src", SourceMode::Cold),
+            Event::Cancel {
+                subscription: "x".into()
+            },
+            next("x")
+        ])
+        .is_err());
+        assert_eq!(
+            analyze(&[
+                s("x", "src", SourceMode::Cold),
+                Event::Error {
+                    subscription: "x".into(),
+                    reason: "I/O failure".into()
+                },
+                dispose("x")
+            ])
+            .unwrap()
+            .terminals,
+            1
+        );
     }
 
     #[test]
     fn excessive_work_does_not_certify_empty_results() {
-        assert!(analyze(&vec![s("x","src",SourceMode::Cold); MAX_EVENTS + 1]).is_err());
+        assert!(analyze(&vec![s("x", "src", SourceMode::Cold); MAX_EVENTS + 1]).is_err());
     }
 }

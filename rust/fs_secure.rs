@@ -58,9 +58,11 @@ fn opened(fd: i32) -> Result<File, String> {
 }
 
 fn root_fd(root: &Path) -> Result<File, String> {
-    let file = OpenOptions::new().read(true)
+    let file = OpenOptions::new()
+        .read(true)
         .custom_flags(O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        .open(root).map_err(|e| format!("cannot open project root: {e}"))?;
+        .open(root)
+        .map_err(|e| format!("cannot open project root: {e}"))?;
     if !file.metadata().map_err(|e| e.to_string())?.is_dir() {
         return Err("project root is not a directory".into());
     }
@@ -71,19 +73,30 @@ fn step_dir(current: &File, component: &OsStr, create: bool) -> Result<File, Str
     let name = c_name(component)?;
     if create {
         let status = unsafe { mkdirat(current.as_raw_fd(), name.as_ptr(), 0o700) };
-        if status < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists {
-            return Err(format!("cannot create project output directory: {}", std::io::Error::last_os_error()));
+        if status < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(format!(
+                "cannot create project output directory: {}",
+                std::io::Error::last_os_error()
+            ));
         }
     }
     opened(unsafe {
-        openat(current.as_raw_fd(), name.as_ptr(),
-            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
-    }).map_err(|e| format!("unsafe or missing project path component: {e}"))
+        openat(
+            current.as_raw_fd(),
+            name.as_ptr(),
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
+            0,
+        )
+    })
+    .map_err(|e| format!("unsafe or missing project path component: {e}"))
 }
 
-fn parent_and_name_fd(root: &File, relative: &Path, create_dirs: bool)
-    -> Result<(File, CString), String>
-{
+fn parent_and_name_fd(
+    root: &File,
+    relative: &Path,
+    create_dirs: bool,
+) -> Result<(File, CString), String> {
     let parts = components(relative)?;
     let mut current = root.try_clone().map_err(|e| e.to_string())?;
     for component in &parts[..parts.len() - 1] {
@@ -93,9 +106,11 @@ fn parent_and_name_fd(root: &File, relative: &Path, create_dirs: bool)
     Ok((current, name))
 }
 
-fn parent_and_name(root: &Path, relative: &Path, create_dirs: bool)
-    -> Result<(File, CString), String>
-{
+fn parent_and_name(
+    root: &Path,
+    relative: &Path,
+    create_dirs: bool,
+) -> Result<(File, CString), String> {
     let fd = root_fd(root)?;
     parent_and_name_fd(&fd, relative, create_dirs)
 }
@@ -118,17 +133,23 @@ impl ProjectRoot {
         use std::os::unix::fs::MetadataExt;
         let named = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
         let pinned = self.fd.metadata().map_err(|e| e.to_string())?;
-        if !named.is_dir() || named.file_type().is_symlink()
-            || named.dev() != pinned.dev() || named.ino() != pinned.ino()
+        if !named.is_dir()
+            || named.file_type().is_symlink()
+            || named.dev() != pinned.dev()
+            || named.ino() != pinned.ino()
         {
             return Err("project path no longer identifies pinned root".into());
         }
         Ok(())
     }
 
-    pub fn corpus(&self, relative: &Path, max_files: usize, per_file: usize, total: usize)
-        -> Result<Vec<Vec<u8>>, String>
-    {
+    pub fn corpus(
+        &self,
+        relative: &Path,
+        max_files: usize,
+        per_file: usize,
+        total: usize,
+    ) -> Result<Vec<Vec<u8>>, String> {
         read_corpus_fd(&self.fd, relative, max_files, per_file, total)
     }
 
@@ -140,21 +161,30 @@ impl ProjectRoot {
 fn open_input(root: &Path, relative: &Path) -> Result<File, String> {
     let (parent, name) = parent_and_name(root, relative, false)?;
     opened(unsafe {
-        openat(parent.as_raw_fd(), name.as_ptr(),
-            O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0)
-    }).map_err(|e| format!("unsafe project input: {e}"))
+        openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
+            0,
+        )
+    })
+    .map_err(|e| format!("unsafe project input: {e}"))
 }
 
-pub fn read_project_file(root: &Path, relative: &Path, max_bytes: usize)
-    -> Result<Vec<u8>, String>
-{
+pub fn read_project_file(
+    root: &Path,
+    relative: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
     let file = open_input(root, relative)?;
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() || meta.len() > max_bytes as u64 {
         return Err("input is not a bounded regular file".into());
     }
     let mut bytes = Vec::new();
-    file.take(max_bytes as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    file.take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     if bytes.len() > max_bytes {
         return Err("input grew beyond its read budget".into());
     }
@@ -167,13 +197,19 @@ pub fn read_project_file(root: &Path, relative: &Path, max_bytes: usize)
 /// If procfs is unavailable, fail closed rather than falling back to read_dir
 /// by pathname (which would reintroduce ancestor substitution).
 #[cfg(test)]
-pub fn list_project_files(root: &Path, relative: &Path, max_files: usize)
-    -> Result<Vec<PathBuf>, String>
-{
+pub fn list_project_files(
+    root: &Path,
+    relative: &Path,
+    max_files: usize,
+) -> Result<Vec<PathBuf>, String> {
     let (parent, name) = parent_and_name(root, relative, false)?;
     let directory = opened(unsafe {
-        openat(parent.as_raw_fd(), name.as_ptr(),
-            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
+        openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
+            0,
+        )
     })?;
     let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
     let mut found = Vec::new();
@@ -200,15 +236,18 @@ pub fn list_project_files(root: &Path, relative: &Path, max_files: usize)
 /// This is not a frozen filesystem snapshot: an adversary with write access
 /// can still change bytes in an already opened regular file. Do not claim
 /// cryptographic provenance or snapshot isolation from this interface.
-fn read_corpus_directory(directory: &File, max_files: usize, per_file: usize, total: usize)
-    -> Result<Vec<Vec<u8>>, String>
-{
+fn read_corpus_directory(
+    directory: &File,
+    max_files: usize,
+    per_file: usize,
+    total: usize,
+) -> Result<Vec<Vec<u8>>, String> {
     use std::os::unix::fs::MetadataExt;
     let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
     let mut records = Vec::new();
     let mut aggregate = 0usize;
-    for entry in fs::read_dir(&fd_path)
-        .map_err(|e| format!("secure corpus enumeration denied: {e}"))?
+    for entry in
+        fs::read_dir(&fd_path).map_err(|e| format!("secure corpus enumeration denied: {e}"))?
     {
         let entry = entry.map_err(|e| e.to_string())?;
         if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
@@ -221,8 +260,12 @@ fn read_corpus_directory(directory: &File, max_files: usize, per_file: usize, to
         let name = entry.file_name();
         let c = c_name(&name)?;
         let input = opened(unsafe {
-            openat(directory.as_raw_fd(), c.as_ptr(),
-                O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0)
+            openat(
+                directory.as_raw_fd(),
+                c.as_ptr(),
+                O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
+                0,
+            )
         })?;
         let actual = input.metadata().map_err(|e| e.to_string())?;
         if !actual.is_file() || actual.dev() != listed.dev() || actual.ino() != listed.ino() {
@@ -232,12 +275,15 @@ fn read_corpus_directory(directory: &File, max_files: usize, per_file: usize, to
             return Err("corpus entry exceeds case byte budget".into());
         }
         let mut data = Vec::new();
-        input.take(per_file as u64 + 1).read_to_end(&mut data)
+        input
+            .take(per_file as u64 + 1)
+            .read_to_end(&mut data)
             .map_err(|e| e.to_string())?;
         if data.len() > per_file {
             return Err("corpus case grew beyond read limit".into());
         }
-        aggregate = aggregate.checked_add(data.len())
+        aggregate = aggregate
+            .checked_add(data.len())
             .ok_or("corpus aggregate budget overflow")?;
         if aggregate > total {
             return Err("corpus aggregate budget exhausted".into());
@@ -257,8 +303,12 @@ fn open_corpus_directory(root: &File, relative: &Path) -> Result<Option<File>, S
     for component in components(relative)? {
         let name = c_name(component)?;
         let fd = unsafe {
-            openat(current.as_raw_fd(), name.as_ptr(),
-                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
+            openat(
+                current.as_raw_fd(),
+                name.as_ptr(),
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
+                0,
+            )
         };
         if fd < 0 {
             let error = std::io::Error::last_os_error();
@@ -320,7 +370,8 @@ pub fn discover_sources(
             .map_err(|e| format!("secure source discovery unavailable: {e}"))?
         {
             let entry = entry.map_err(|e| e.to_string())?;
-            visited_entries = visited_entries.checked_add(1)
+            visited_entries = visited_entries
+                .checked_add(1)
                 .ok_or("source discovery counter overflow")?;
             if visited_entries > max_entries {
                 return Err("source discovery entry budget exhausted".into());
@@ -338,15 +389,25 @@ pub fn discover_sources(
             if kind.is_dir() {
                 let child = step_dir(&directory, &name, false)?;
                 pending.push((child, child_relative, depth + 1));
-            } else if kind.is_file() && child_relative.extension().is_some_and(|ext| ext == "ores") {
+            } else if kind.is_file() && child_relative.extension().is_some_and(|ext| ext == "ores")
+            {
                 let fd = opened(unsafe {
-                    openat(directory.as_raw_fd(), c_name(&name)?.as_ptr(),
-                        O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0)
+                    openat(
+                        directory.as_raw_fd(),
+                        c_name(&name)?.as_ptr(),
+                        O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
+                        0,
+                    )
                 })?;
                 if !fd.metadata().map_err(|e| e.to_string())?.is_file() {
                     return Err("source file changed type during discovery".into());
                 }
-                found.push(child_relative.to_str().ok_or("non-UTF-8 source path")?.to_owned());
+                found.push(
+                    child_relative
+                        .to_str()
+                        .ok_or("non-UTF-8 source path")?
+                        .to_owned(),
+                );
                 if found.len() > max_files {
                     return Err("source discovery file budget exhausted".into());
                 }
@@ -360,34 +421,47 @@ pub fn discover_sources(
 /// Create an immutable fuzz reproducer only if absent, or compare an existing
 /// bounded regular file at the securely opened parent. No path-based
 /// read-after-check, symlink following, or truncation.
-fn create_or_match_fd(root: &File, relative: &Path, expected: &[u8])
-    -> Result<(), String>
-{
+fn create_or_match_fd(root: &File, relative: &Path, expected: &[u8]) -> Result<(), String> {
     let (parent, name) = parent_and_name_fd(root, relative, true)?;
     let fd = unsafe {
-        openat(parent.as_raw_fd(), name.as_ptr(),
-            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+            0o600,
+        )
     };
     if fd >= 0 {
         let mut file = opened(fd)?;
-        file.write_all(expected).map_err(|e| format!("cannot write reproducer: {e}"))?;
-        file.sync_all().map_err(|e| format!("cannot sync reproducer: {e}"))?;
+        file.write_all(expected)
+            .map_err(|e| format!("cannot write reproducer: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("cannot sync reproducer: {e}"))?;
         return Ok(());
     }
     if std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists {
-        return Err(format!("cannot create reproducer: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "cannot create reproducer: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     let existing = opened(unsafe {
-        openat(parent.as_raw_fd(), name.as_ptr(),
-            O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0)
+        openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
+            0,
+        )
     })?;
     let metadata = existing.metadata().map_err(|e| e.to_string())?;
     if !metadata.is_file() || metadata.len() != expected.len() as u64 {
         return Err("colliding reproducer is not the same bounded file".into());
     }
     let mut bytes = Vec::new();
-    existing.take(expected.len() as u64 + 1)
-        .read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    existing
+        .take(expected.len() as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
     if bytes != expected {
         return Err("fuzz reproducer collision or hostile content".into());
     }
@@ -395,9 +469,7 @@ fn create_or_match_fd(root: &File, relative: &Path, expected: &[u8])
 }
 
 #[cfg(test)]
-pub fn create_or_match(root: &Path, relative: &Path, expected: &[u8])
-    -> Result<(), String>
-{
+pub fn create_or_match(root: &Path, relative: &Path, expected: &[u8]) -> Result<(), String> {
     ProjectRoot::new(root)?.reproducer(relative, expected)
 }
 
@@ -412,7 +484,10 @@ mod tests {
         let root = tmp.path().join("project");
         std::fs::create_dir_all(root.join("inputs")).unwrap();
         std::fs::write(root.join("inputs/safe.ores"), b"safe").unwrap();
-        assert_eq!(read_project_file(&root, Path::new("inputs/safe.ores"), 4).unwrap(), b"safe");
+        assert_eq!(
+            read_project_file(&root, Path::new("inputs/safe.ores"), 4).unwrap(),
+            b"safe"
+        );
 
         let outside = tmp.path().join("outside");
         std::fs::create_dir(&outside).unwrap();
@@ -465,13 +540,16 @@ mod tests {
         let root = tmp.path().join("project");
         std::fs::create_dir_all(root.join("tests/corpus")).unwrap();
         std::fs::write(root.join("tests/corpus/a"), b"original").unwrap();
-        let (parent, name) = parent_and_name(
-            &root, Path::new("tests/corpus"), false
-        ).unwrap();
+        let (parent, name) = parent_and_name(&root, Path::new("tests/corpus"), false).unwrap();
         let directory = opened(unsafe {
-            openat(parent.as_raw_fd(), name.as_ptr(),
-                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
-        }).unwrap();
+            openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC,
+                0,
+            )
+        })
+        .unwrap();
         std::fs::rename(root.join("tests/corpus"), root.join("tests/previous")).unwrap();
         std::fs::create_dir(root.join("tests/corpus")).unwrap();
         std::fs::write(root.join("tests/corpus/a"), b"replacement").unwrap();
@@ -491,7 +569,10 @@ mod tests {
         let root = tmp.path().join("project");
         std::fs::create_dir(&root).unwrap();
         let pinned = ProjectRoot::new(&root).unwrap();
-        assert!(pinned.corpus(Path::new("tests/corpus"), 3, 10, 20).unwrap().is_empty());
+        assert!(pinned
+            .corpus(Path::new("tests/corpus"), 3, 10, 20)
+            .unwrap()
+            .is_empty());
         std::fs::create_dir(root.join("tests")).unwrap();
         let external = tmp.path().join("external");
         std::fs::create_dir(&external).unwrap();
@@ -573,7 +654,9 @@ mod tests {
         assert!(read_project_file(&root, Path::new("large.bin"), 3).is_err());
         let fifo = root.join("fifo");
         use std::os::unix::ffi::OsStrExt;
-        unsafe extern "C" { fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32; }
+        unsafe extern "C" {
+            fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
+        }
         let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { mkfifo(name.as_ptr(), 0o600) }, 0);
         assert!(read_project_file(&root, Path::new("fifo"), 10).is_err());
