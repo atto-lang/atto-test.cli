@@ -1,0 +1,3 @@
+2 [undeclared-effect] work contains throw; consider annotating throws (catch/trap handles only throw, not raise/panic)
+3 [undeclared-effect] work contains raise; consider annotating raises (catch/trap handles only throw, not raise/panic)
+4 [undeclared-effect] work contains panic; consider annotating panics (catch/trap handles only throw, not raise/panic)

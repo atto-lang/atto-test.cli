@@ -1,5 +1,23 @@
-# Reactive composition trace model v1
+# Reactive composition trace model v1 (Rust host reference)
 
-Draft test helper `analyze_reactive_events` consumes finite host-provided event records with `subscribe`, `request`, `next`, `complete`, `cancel`, `error`, `dispose` operations. Each event has a subscription identity; subscribe also identifies source and mode (`hot_single` or `cold`). Requests grant bounded downstream demand. A hot single-consumer source cannot masquerade as multicast. Failure and cancellation remain distinct from normal completion. Every observed terminal requires exactly one disposal.
+The source branch now uses `oreslang_test::reactive::analyze`, written in
+**Rust**, rather than the prior Python `analyze_reactive_events` prototype.
+The Rust API consumes typed `Event` variants: `Subscribe`, `Request`,
+`Next`, `Complete`, `Cancel`, `Error`, and `Dispose`.
 
-This is a host **protocol model**, not runtime instrumentation, not a `--race` proof, not a scheduler simulator, and not a new `--fuzz` CLI option. These invariants should later be checked against freshly captured source actor/Observable/Stream traces from Java and LLVM; they do not replace existing race/fuzz tests. Versioned cross-repo contract: common-source #36, RX implementation #12. Run `python3 -m unittest discover -s tests -v`.
+The bounded host model checks single-consumer source cardinality,
+cold/hot mode isolation, explicit downstream demand, single terminal
+cause, and exactly one disposal after termination. Invalid identities,
+excessive demand, and events after completion or cancellation fail
+closed. Capacity is limited to 100,000 events.
+
+Use `cargo test --locked reactive` (and the full Rust test suite) on an
+authorized exact-head runner. No Python tests are required.
+
+**Scope:** This is a typed *host-side protocol model*, not runtime
+instrumentation, a scheduler simulator, source-language implementation, or
+proof against races. A trusted capture adapter from Java/LLVM reactive
+sources, JSONL schema validation, and runtime coverage accounting
+remain future work. It is not currently a public `--reactive` CLI option.
+The common-source and reactive-runtime contracts still require separate
+backend parity validation.
