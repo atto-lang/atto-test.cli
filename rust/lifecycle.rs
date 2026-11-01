@@ -99,8 +99,14 @@ pub(super) fn verify(output: &str) -> Result<Counts, String> {
                     return Err("OPEN after case completion".into());
                 }
                 let key = ((*kind).to_owned(), (*handle).to_owned());
-                if !case.seen.insert(key.clone()) || !case.pending.insert(key) {
-                    return Err("duplicate lifecycle resource".into());
+                // A handle denotes one logical resource, not an arbitrary
+                // (kind, handle) pair. Reusing it across kinds creates ABA
+                // ambiguity in cross-backend lifecycle instrumentation.
+                if case.seen.iter().any(|(_, used)| used == *handle)
+                    || !case.seen.insert(key.clone())
+                    || !case.pending.insert(key)
+                {
+                    return Err("duplicate lifecycle resource handle".into());
                 }
             }
             ["CLOSE", id, kind, handle, outcome] if started => {
@@ -154,6 +160,11 @@ pub(super) fn verify(output: &str) -> Result<Counts, String> {
     ];
     if observed[0] == 0 && observed[1] == 0 {
         return Err("lifecycle suite executed zero test bodies".into());
+    }
+    if result.total > 10_000 || result.filtered > 10_000
+        || result.total.checked_add(result.filtered).is_none()
+    {
+        return Err("lifecycle discovery count exceeds budget".into());
     }
     if observed != [result.passed, result.failed, result.skipped]
         || observed.iter().sum::<usize>() != result.total
