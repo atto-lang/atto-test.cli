@@ -84,6 +84,17 @@ fn trailing_incomplete_machine_prefix_is_fail_closed() {
 }
 
 #[test]
+fn invalid_utf8_capture_never_produces_a_valid_machine_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    let script = format!(
+        "#!/bin/sh\ncat <<'RECEIPT'\n{SUCCESS}RECEIPT\nprintf '\\377'\n"
+    );
+    let result = run_script(root.path(), &script, &[]);
+    assert_eq!(result.status.code(), Some(2), "{result:?}");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("not valid UTF-8"));
+}
+
+#[test]
 fn ordinary_logging_does_not_break_a_complete_receipt() {
     let root = tempfile::tempdir().unwrap();
     let source = print_receipt(&format!("ordinary guest log\n{SUCCESS}more diagnostic lines\n"));
