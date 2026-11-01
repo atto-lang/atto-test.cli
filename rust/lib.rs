@@ -7,6 +7,7 @@ mod logical;
 pub mod race_evidence;
 mod race_offline;
 pub mod reactive;
+pub mod reactive_async;
 mod runtime;
 
 use std::ffi::OsString;
