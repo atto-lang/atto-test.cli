@@ -202,6 +202,28 @@ mod tests {
     }
 
     #[test]
+    fn rejects_incomplete_discovery_bad_ids_and_bad_counts() {
+        let all_skipped = "ORES_TEST_V2|RUN_BEGIN|2\nORES_TEST_V2|CASE_BEGIN|skipped\nORES_TEST_V2|CASE_END|skipped|SKIP\nORES_TEST_V2|RUN_END|total=1|passed=0|failed=0|skipped=1|filtered=0\n";
+        let unfinished_case = "ORES_TEST_V2|RUN_BEGIN|2\nORES_TEST_V2|CASE_BEGIN|unfinished\nORES_TEST_V2|RUN_END|total=1|passed=1|failed=0|skipped=0|filtered=0\n";
+        for text in [
+            all_skipped.to_owned(),
+            unfinished_case.to_owned(),
+            GOOD.replace("|CASE_BEGIN|suite/async", "|CASE_BEGIN|suite/async with spaces"),
+            GOOD.replace("|OPEN|suite/async|actor|a1", "|OPEN|suite/async|thread|a1"),
+            GOOD.replace("|OPEN|suite/async|actor|a1", "|OPEN|suite/other|actor|a1"),
+            GOOD.replace("|CLOSE|suite/async|actor|a1", "|CLOSE|suite/wrong|actor|a1"),
+            GOOD.replace("|RUN_END|total=1", "|RUN_END|total=1|total=1"),
+            GOOD.replace("|RUN_END|total=1", "|RUN_END|total=+1"),
+            GOOD.replace("|RUN_END|total=1", "|RUN_END|total=18446744073709551616000"),
+            GOOD.replace("|RUN_END|total=1", "|RUN_END|unknown=1"),
+            GOOD.replace("|CASE_END|suite/async|PASS", "|CASE_END|suite/async|TODO"),
+            GOOD.replace("|RUN_BEGIN|2", "|RUN_BEGIN|3"),
+        ] {
+            assert!(verify(&text).is_err(), "accepted invalid lifecycle stream: {text}");
+        }
+    }
+
+    #[test]
     fn interleaved_cases_and_cleanup_on_failure() {
         let data = "ORES_TEST_V2|RUN_BEGIN|2\nORES_TEST_V2|CASE_BEGIN|a\nORES_TEST_V2|OPEN|a|task|one\nORES_TEST_V2|CASE_BEGIN|b\nORES_TEST_V2|OPEN|b|actor|two\nORES_TEST_V2|CLOSE|a|task|one|error\nORES_TEST_V2|CLOSE|b|actor|two|ok\nORES_TEST_V2|CASE_END|a|FAIL\nORES_TEST_V2|CASE_END|b|PASS\nORES_TEST_V2|RUN_END|total=2|passed=1|failed=1|skipped=0|filtered=0\n";
         assert_eq!(verify(data).unwrap().failed, 1);
