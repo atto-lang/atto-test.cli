@@ -405,6 +405,25 @@ mod tests {
     }
 
     #[test]
+    fn bounded_ten_thousand_case_discovery_cannot_overflow() {
+        let mut at_limit = String::from("ORES_TEST_V2|RUN_BEGIN|2\n");
+        for index in 0..10_000 {
+            at_limit.push_str(&format!("ORES_TEST_V2|CASE_BEGIN|case/{index}\n"));
+            at_limit.push_str(&format!("ORES_TEST_V2|CASE_END|case/{index}|PASS\n"));
+        }
+        let valid = format!(
+            "{at_limit}ORES_TEST_V2|RUN_END|total=10000|passed=10000|failed=0|skipped=0|filtered=0\n"
+        );
+        assert_eq!(verify(&valid).unwrap().passed, 10_000);
+        at_limit.push_str("ORES_TEST_V2|CASE_BEGIN|case/overflow\n");
+        at_limit.push_str("ORES_TEST_V2|CASE_END|case/overflow|PASS\n");
+        let excessive = format!(
+            "{at_limit}ORES_TEST_V2|RUN_END|total=10001|passed=10001|failed=0|skipped=0|filtered=0\n"
+        );
+        assert!(verify(&excessive).is_err());
+    }
+
+    #[test]
     fn rejects_oversized_identifiers_and_noncanonical_resources() {
         let allowed = "x".repeat(256);
         let rejected = "x".repeat(257);
