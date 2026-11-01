@@ -93,6 +93,31 @@ Pony's `long_test`, `expect_action`, `complete_action` and `dispose_when_done`\n
    independently compile and run real `.ores` cases; report each backend's
    unsupported feature explicitly, not as a skip counted toward passing.
 
+## Additional adversarial suite (this PR)
+
+The extended Rust tests enumerate all **24** completion orders for callback,
+task, actor and await handles, all **81** combinations of their
+`ok|error|cancel` outcomes (each checked against PASS and FAIL),
+multiple interleaved cases, cross-case close spoofing and a 10,001-case
+discovery overflow boundary. Mutated transcripts exercise duplicate
+RUN_BEGIN/CASE_BEGIN/CLOSE/CASE_END/RUN_END, unknown statuses, outstanding
+resources, late case events and truncated reserved machine prefixes.
+
+The CLI subprocess tests also check whether a guest can produce a valid-looking
+PASS receipt and then exit nonzero, exceed its output budget, time out,
+or leave a background Unix process alive after its parent exits.
+The launcher now sends SIGKILL to its **own guest process group** after normal
+child exit as well as on timeout, before it reports a result.
+This is **best-effort cleanup**: a descendant can escape by creating a new
+session/process group; on Windows there is not yet equivalent Job Object
+containment. Neither guard authenticates guest-reported actor retirement,
+which must be verified through compiler/runtime-owned instrumentation.
+
+All added cases are still **authored/unexecuted** as long as the source CI jobs
+have `steps=[]` and no local Cargo toolchain is available. Treat CI
+admission failure separately from test failure and do not report these as
+native guest passes.
+
 ## Host-only regression commands
 
 ```sh
