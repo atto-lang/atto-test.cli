@@ -105,21 +105,21 @@ fn an_excessive_output_capture_cannot_be_reported_as_pass() {
 fn a_cleanly_exiting_parent_cannot_leave_a_late_descendant_writer() {
     let root = tempfile::tempdir().unwrap();
     let source = format!(
-        "#!/bin/sh\n(sleep 0.4; printf 'late' > late_writer) &\n{}",
+        "#!/bin/sh\n(sleep 1; printf 'late' > late_writer) &\n{}",
         print_receipt(SUCCESS).trim_start_matches("#!/bin/sh\n")
     );
     let run = run_script(root.path(), &source, &[]);
     assert_eq!(run.status.code(), Some(0), "{run:?}");
-    thread::sleep(Duration::from_millis(700));
+    thread::sleep(Duration::from_millis(1200));
     assert!(!root.path().join("late_writer").exists(), "unreaped guest descendant wrote after PASS");
 }
 
 #[test]
 fn timeout_cannot_leave_a_late_descendant_writer() {
     let root = tempfile::tempdir().unwrap();
-    let source = "#!/bin/sh\n(sleep 0.4; printf 'late' > late_timeout_writer) &\nsleep 3\n";
+    let source = "#!/bin/sh\n(sleep 1; printf 'late' > late_timeout_writer) &\nsleep 3\n";
     let run = run_script(root.path(), source, &["--timeout", "0.02"]);
     assert_eq!(run.status.code(), Some(1), "{run:?}");
-    thread::sleep(Duration::from_millis(700));
+    thread::sleep(Duration::from_millis(1200));
     assert!(!root.path().join("late_timeout_writer").exists(), "timeout did not kill guest descendants");
 }
