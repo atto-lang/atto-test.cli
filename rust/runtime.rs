@@ -291,19 +291,26 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     Ok(c)
 }
 
-fn stop(child: &mut Child) {
-    #[cfg(unix)]
-    {
-        unsafe extern "C" {
-            fn kill(pid: i32, signal: i32) -> i32;
-        }
-        if let Ok(pid) = i32::try_from(child.id()) {
-            // Negative pid identifies the private process group established at spawn.
-            unsafe {
-                kill(-pid, 9);
-            }
+// A Unix guest runs in a process group distinct from the Rust launcher.
+// Reap the group not only on timeout: an otherwise successful compiler
+// command may leave background helpers writing into stale test captures.
+#[cfg(unix)]
+fn kill_guest_group(leader: u32) {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    if let Ok(pid) = i32::try_from(leader) {
+        // Negative pid identifies the process group established at spawn.
+        // This cannot contain descendants which deliberately call setsid().
+        unsafe {
+            kill(-pid, 9);
         }
     }
+}
+
+fn stop(child: &mut Child) {
+    #[cfg(unix)]
+    kill_guest_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -402,6 +409,12 @@ fn invoke(
             }
         }
     };
+    // The parent process exiting does not mean its process-group descendants
+    // exited. Always terminate remaining group members before final reporting.
+    // This is best-effort containment, not an OS sandbox or complete setsid
+    // descendant tracking. On Windows this path needs a Job Object adapter.
+    #[cfg(unix)]
+    kill_guest_group(child.id());
     drop(stdin_file);
     Ok(ProcessResult {
         code,
