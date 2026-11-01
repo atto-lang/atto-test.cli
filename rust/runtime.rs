@@ -494,9 +494,16 @@ fn test_receipt(output: &str) -> Result<Counts, String> {
     }
     let mut observed = [0usize; 3];
     let mut case_ids = BTreeSet::new();
+    let mut saw_summary = false;
     for line in output.lines().filter(|l| l.starts_with("ORES_TEST|")) {
         if line == summary {
+            saw_summary = true;
             continue;
+        }
+        // A terminal summary cannot precede case completions. Otherwise a
+        // suite can pass even while a later callback writes case results.
+        if saw_summary {
+            return Err("ORES_TEST case emitted after terminal SUMMARY".into());
         }
         let (index, rest) = if let Some(rest) = line.strip_prefix("ORES_TEST|PASS|") {
             (0, rest)
