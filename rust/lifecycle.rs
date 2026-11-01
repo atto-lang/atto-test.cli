@@ -227,6 +227,94 @@ mod tests {
     }
 
     #[test]
+    fn all_twenty_four_async_completion_orders_remain_valid() {
+        let start = concat!(
+            "ORES_TEST_V2|RUN_BEGIN|2\n",
+            "ORES_TEST_V2|CASE_BEGIN|async\n",
+            "ORES_TEST_V2|OPEN|async|callback|cb\n",
+            "ORES_TEST_V2|OPEN|async|task|t\n",
+            "ORES_TEST_V2|OPEN|async|actor|a\n",
+            "ORES_TEST_V2|OPEN|async|await|w\n"
+        );
+        let closings = [
+            "ORES_TEST_V2|CLOSE|async|callback|cb|ok\n",
+            "ORES_TEST_V2|CLOSE|async|task|t|ok\n",
+            "ORES_TEST_V2|CLOSE|async|actor|a|ok\n",
+            "ORES_TEST_V2|CLOSE|async|await|w|ok\n",
+        ];
+        let end = concat!(
+            "ORES_TEST_V2|CASE_END|async|PASS\n",
+            "ORES_TEST_V2|RUN_END|total=1|passed=1|failed=0|skipped=0|filtered=0\n"
+        );
+        let mut orders = 0;
+        for a in 0..4 {
+            for b in 0..4 {
+                for c in 0..4 {
+                    for d in 0..4 {
+                        if a == b || a == c || a == d || b == c || b == d || c == d {
+                            continue;
+                        }
+                        orders += 1;
+                        let valid = format!(
+                            "{start}{}{}{}{}{end}",
+                            closings[a], closings[b], closings[c], closings[d]
+                        );
+                        assert!(verify(&valid).is_ok(), "rejected valid completion ordering");
+                        let incomplete = format!(
+                            "{start}{}{}{}{end}",
+                            closings[a], closings[b], closings[c]
+                        );
+                        assert!(verify(&incomplete).is_err(), "accepted incomplete ordering");
+                    }
+                }
+            }
+        }
+        assert_eq!(orders, 24);
+    }
+
+    #[test]
+    fn eighty_one_async_completion_outcome_combinations() {
+        let start = concat!(
+            "ORES_TEST_V2|RUN_BEGIN|2\n",
+            "ORES_TEST_V2|CASE_BEGIN|async\n",
+            "ORES_TEST_V2|OPEN|async|callback|cb\n",
+            "ORES_TEST_V2|OPEN|async|task|t\n",
+            "ORES_TEST_V2|OPEN|async|actor|a\n",
+            "ORES_TEST_V2|OPEN|async|await|w\n"
+        );
+        let mut cases = 0;
+        for callback in ["ok", "error", "cancel"] {
+            for task in ["ok", "error", "cancel"] {
+                for actor in ["ok", "error", "cancel"] {
+                    for awaited in ["ok", "error", "cancel"] {
+                        cases += 1;
+                        let completes = format!(
+                            "ORES_TEST_V2|CLOSE|async|callback|cb|{callback}\n\
+                             ORES_TEST_V2|CLOSE|async|task|t|{task}\n\
+                             ORES_TEST_V2|CLOSE|async|actor|a|{actor}\n\
+                             ORES_TEST_V2|CLOSE|async|await|w|{awaited}\n"
+                        );
+                        let pass = format!(
+                            "{start}{completes}ORES_TEST_V2|CASE_END|async|PASS\n\
+                             ORES_TEST_V2|RUN_END|total=1|passed=1|failed=0|skipped=0|filtered=0\n"
+                        );
+                        let all_ok = [callback, task, actor, awaited]
+                            .iter()
+                            .all(|outcome| *outcome == "ok");
+                        assert_eq!(verify(&pass).is_ok(), all_ok);
+                        let fail = format!(
+                            "{start}{completes}ORES_TEST_V2|CASE_END|async|FAIL\n\
+                             ORES_TEST_V2|RUN_END|total=1|passed=0|failed=1|skipped=0|filtered=0\n"
+                        );
+                        assert_eq!(verify(&fail).unwrap().failed, 1);
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 81);
+    }
+
+    #[test]
     fn adversarial_lifecycle_mutations_cannot_claim_pass() {
         let mutations = [
             ("ORES_TEST_V2|RUN_BEGIN|2\n", ""),
