@@ -48,6 +48,20 @@ individual completed cases. Empty/all-skipped, missing, duplicated, dangling,
 late, unknown or malformed lifecycle records are refused. Limits: 10,000
 cases, 100,000 lifecycle records, and 256 bytes per identifier.
 
+## Canonical cross-backend receipt boundaries
+
+The independent [five-backend reference oracle](https://github.com/ores-truffle-oreslang/oreslang-platform-conformance/pull/282)
+provides source-free negative/positive regression tests for the exact five
+requested backend identities: Java, LLVM, WASM, Cranelift and .NET. It is a
+**host reference**, not independent backend execution evidence.
+
+Both reference and CLI v2 parser now require LF-terminated, UTF-8 input;
+reject mixed/truncated reserved machine-record prefixes, CR/NUL control bytes,
+cross-kind same-handle ABA, nonmatching terminal counts and discovery
+`total + filtered > 10_000`. The launcher also rejects non-UTF-8 captured
+guest output before attempting machine-record parsing. This closes a lossy
+decoder ambiguity; it does not authenticate the event producer.
+
 ## Important evidence boundary
 
 This parser is **not authenticated**. A guest can omit OPEN events or print
