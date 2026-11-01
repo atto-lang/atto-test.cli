@@ -68,12 +68,12 @@ rating leaderboard. No verified cross-framework score ranking is implied.
 | Actor ecosystem | Tool 1 | Tool 2 | Oreslang feature to adopt |
 |---|---|---|---|
 | Erlang / OTP | [EUnit](https://www.erlang.org/docs/26/apps/eunit/chapter.html) | [Common Test](https://www.erlang.org/doc/apps/common_test/users_guide.html) | Per-test process isolation, timetraps, suite/fixture lifecycle, distributed-node diagnostics |
-| Elixir / BEAM | [ExUnit](https://hexdocs.pm/ex_unit/ExUnit.html) | [ExUnitProperties / StreamData](https://stream-data.hexdocs.pm/ExUnitProperties.html) | Supervised async tests, on-exit cleanup, seeded and shrunk properties |
+| Pony actor runtime | [PonyTest UnitTest](https://www.ponylang.io/use/testing/) | [PonyTest Property](https://www.ponylang.io/use/testing/) | Exact-once expected async actions, long-test timeouts, actor disposal and shrinking (two modes of one framework) |
 | Akka / Apache Pekko | [Typed ActorTestKit](https://doc.akka.io/libraries/akka-core/current/typed/testing-async.html) | [BehaviorTestKit](https://pekko.apache.org/docs/pekko/current/typed/testing-sync.html) | TestProbe mailbox assertions, synchronous behavior model vs real scheduler |
 | Microsoft Orleans | [InProcessTestCluster](https://dotnet.github.io/orleans/docs/grains/testing/) | [OrleansTestKit](https://github.com/OrleansContrib/OrleansTestKit) | Full activation/cluster fidelity vs isolated grain doubles; never confuse the two |
 | Actix / Rust async actors | [actix_rt::test](https://docs.rs/actix-rt/latest/actix_rt/attr.test.html) | [tokio::test](https://docs.rs/tokio/latest/tokio/attr.test.html) | Async task execution, structured child tracking and scheduler/clock test controls |
 
-## Native Oreslang core TestKit acceptance gates
+Pony's `long_test`, `expect_action`, `complete_action` and `dispose_when_done`\nare especially relevant to late callbacks and actor lifetime: they demonstrate\nwhy merely returning from a test body is not proof of async completion.\nElixir's [ExUnit](https://hexdocs.pm/ex_unit/ExUnit.html) and\n[StreamData](https://stream-data.hexdocs.pm/ExUnitProperties.html)\nremain useful additional BEAM-language design references, but are not counted\nas a separate actor *runtime* from Erlang/OTP.\n\n## Native Oreslang core TestKit acceptance gates
 
 1. **Callbacks:** synchronously completed, late, repeated, never-called, double-called,
    cross-test and error-first callbacks. Cancellation must suppress post-close
