@@ -65,8 +65,11 @@ pub(super) fn verify(output: &str) -> Result<Counts, String> {
     let mut cases: BTreeMap<String, Case> = BTreeMap::new();
     let mut events = 0usize;
     for line in output.lines() {
-        if line.starts_with("ORES_TEST|") {
-            return Err("mixed v1/v2 machine receipts".into());
+        // The entire ORES_TEST namespace is reserved, including truncated
+        // records such as "ORES_TEST_V2" without the final delimiter.
+        // Ignoring malformed machine-looking lines could mask lost writes.
+        if line.starts_with("ORES_TEST") && !line.starts_with("ORES_TEST_V2|") {
+            return Err("mixed or malformed lifecycle machine receipt".into());
         }
         let Some(record) = line.strip_prefix("ORES_TEST_V2|") else {
             continue;
