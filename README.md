@@ -44,6 +44,15 @@ and unique within each invocation, including across PASS, FAIL and SKIP.
 Optional message fields do not change case identity. Invalid receipts make
 the native suite fail with exit 1.
 
+**Experimental async/actor receipt validation:** set `[native].receipt = "lifecycle-v2"`
+for strict `ORES_TEST_V2` structural lifecycle verification of callbacks, tasks,
+actors, and awaits. A case cannot report PASS with outstanding OPEN handles,
+failed/cancelled CLOSE records, duplicate completion or mismatched RUN_END.
+The default remains `v1` and mixed protocols are rejected. This does **not**
+implement the guest TestKit or authenticate guest lifecycle events: runtime
+provenance and real compiler execution remain release blockers. See
+[Native lifecycle v2](docs/NATIVE_LIFECYCLE_V2.md).
+
 **Fuzzing:** [fuzz].command must be a TOML array of a real executable and
 argv. Corpus default tests/corpus; max_bytes defaults to 256 (range 1..65536).
 The Rust engine uses deterministic SplitMix64 byte mutation and deduplicated
