@@ -3,6 +3,7 @@ mod deadlock;
 pub mod effects;
 #[cfg(target_os = "linux")]
 mod fs_secure;
+mod lifecycle;
 mod logical;
 pub mod race_evidence;
 mod race_offline;
