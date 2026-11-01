@@ -427,8 +427,12 @@ struct Counts {
 }
 
 fn test_receipt(output: &str) -> Result<Counts, String> {
-    if output.lines().any(|line| line.starts_with("ORES_TEST_V2|")) {
-        return Err("v2 lifecycle events require [native].receipt = 'lifecycle-v2'".into());
+    // Reject truncated and mixed-version machine records rather than
+    // silently treating them as unrelated guest log output.
+    if output.lines().any(|line| {
+        line.starts_with("ORES_TEST") && !line.starts_with("ORES_TEST|")
+    }) {
+        return Err("malformed or mixed-version ORES_TEST record".into());
     }
     let mut summaries = output
         .lines()
