@@ -427,6 +427,9 @@ struct Counts {
 }
 
 fn test_receipt(output: &str) -> Result<Counts, String> {
+    if output.lines().any(|line| line.starts_with("ORES_TEST_V2|")) {
+        return Err("v2 lifecycle events require [native].receipt = 'lifecycle-v2'".into());
+    }
     let mut summaries = output
         .lines()
         .filter(|l| l.starts_with("ORES_TEST|SUMMARY|"));
@@ -518,6 +521,14 @@ fn is_native_test_path(path: &Path) -> bool {
 
 fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, String> {
     let params = section(config, "native")?;
+    let lifecycle_v2 = match params.and_then(|p| p.get("receipt")) {
+        None => false,
+        Some(value) => match value.as_str() {
+            Some("v1") => false,
+            Some("lifecycle-v2") => true,
+            _ => return Err("[native].receipt must be v1 or lifecycle-v2".into()),
+        },
+    };
     let mut files = Vec::new();
     if let Some(value) = params.and_then(|p| p.get("files")) {
         let arr = value
@@ -557,7 +568,18 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
             );
             continue;
         }
-        match test_receipt(&result.output) {
+        let receipt = if lifecycle_v2 {
+            super::lifecycle::verify(&result.output).map(|c| Counts {
+                total: c.total,
+                passed: c.passed,
+                failed: c.failed,
+                skipped: c.skipped,
+                filtered: c.filtered,
+            })
+        } else {
+            test_receipt(&result.output)
+        };
+        match receipt {
             Ok(counts) if counts.failed == 0 => println!(
                 "PASS {name}: {} passed, {} skipped",
                 counts.passed, counts.skipped
