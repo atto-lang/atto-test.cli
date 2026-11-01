@@ -166,7 +166,11 @@ model's schedule or that its instrumentation covered all memory accesses.
   These are conservative detection checks, **not** atomic snapshot isolation
   or protection against concurrent writes to already-open regular files.
   The non-Linux fallback still uses pathname-based preflight checks.
-  Descendant process containment, OS-level resource isolation and
+  On Unix, the launcher now also kills surviving members of the guest's
+  isolated process group after normal parent exit (not only on timeout).
+  This reduces late-writer leaks but does not contain descendants that
+  escape via setsid(), and Windows Job Object containment remains pending.
+  Full descendant containment, OS-level resource isolation and
   cryptographic authenticity of guest test receipts remain open gates.
 - `--deadlock --trace file.jsonl` analyzes observed lock ordering and
   outstanding wait cycles in Rust. It is offline only and does not certify
