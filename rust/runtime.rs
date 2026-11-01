@@ -1078,6 +1078,23 @@ mod tests {
     }
 
     #[test]
+    fn legacy_receipts_reject_late_case_events_and_truncated_marker_lines() {
+        let summary = "ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n";
+        let pass = "ORES_TEST|PASS|suite/sync\n";
+        assert!(test_receipt(&format!("{pass}{summary}")).is_ok());
+        for malformed in [
+            format!("{summary}{pass}"),
+            format!("{pass}{summary}ORES_TEST\n"),
+            format!("{pass}{summary}ORES_TEST_V2\n"),
+            format!("{pass}{summary}ORES_TEST_V2|RUN_BEGIN|2\n"),
+            format!("ORES_TEST|PASS|suite/other\n{pass}{summary}"),
+            format!("{pass}{summary}ORES_TEST|FAIL|late\n"),
+        ] {
+            assert!(test_receipt(&malformed).is_err(), "accepted malformed v1 receipt: {malformed}");
+        }
+    }
+
+    #[test]
     fn machine_receipts_preserve_distinct_case_outcomes_and_messages() {
         let output = "ORES_TEST|PASS|suite/ok|message|extra\nORES_TEST|FAIL|suite/bad|reason\nORES_TEST|SKIP|suite/off|reason\nORES_TEST|SUMMARY|total=3|passed=1|failed=1|skipped=1|filtered=2\n";
         assert_eq!(
