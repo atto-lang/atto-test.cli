@@ -227,6 +227,109 @@ mod tests {
     }
 
     #[test]
+    fn adversarial_lifecycle_mutations_cannot_claim_pass() {
+        let mutations = [
+            ("ORES_TEST_V2|RUN_BEGIN|2\n", ""),
+            ("ORES_TEST_V2|RUN_BEGIN|2\n", "ORES_TEST_V2|RUN_BEGIN|2\nORES_TEST_V2|RUN_BEGIN|2\n"),
+            ("ORES_TEST_V2|CASE_BEGIN|suite/async\n", ""),
+            ("ORES_TEST_V2|CASE_BEGIN|suite/async\n", "ORES_TEST_V2|CASE_BEGIN|suite/async\nORES_TEST_V2|CASE_BEGIN|suite/async\n"),
+            ("ORES_TEST_V2|OPEN|suite/async|callback|cb\n", ""),
+            ("ORES_TEST_V2|CLOSE|suite/async|callback|cb|ok\n", ""),
+            ("ORES_TEST_V2|CLOSE|suite/async|callback|cb|ok\n", "ORES_TEST_V2|CLOSE|suite/async|callback|cb|ok\nORES_TEST_V2|CLOSE|suite/async|callback|cb|ok\n"),
+            ("ORES_TEST_V2|OPEN|suite/async|task|t1\n", "ORES_TEST_V2|OPEN|suite/async|task|other\n"),
+            ("ORES_TEST_V2|CLOSE|suite/async|task|t1|ok\n", "ORES_TEST_V2|CLOSE|suite/async|task|t2|ok\n"),
+            ("ORES_TEST_V2|CLOSE|suite/async|actor|a1|ok\n", "ORES_TEST_V2|CLOSE|suite/async|actor|a1|cancel\n"),
+            ("ORES_TEST_V2|CLOSE|suite/async|await|aw1|ok\n", "ORES_TEST_V2|CLOSE|suite/async|await|aw1|error\n"),
+            ("ORES_TEST_V2|CASE_END|suite/async|PASS\n", "ORES_TEST_V2|CASE_END|suite/async|FAIL\nORES_TEST_V2|CASE_END|suite/async|PASS\n"),
+            ("ORES_TEST_V2|CASE_END|suite/async|PASS\n", ""),
+            ("ORES_TEST_V2|RUN_END|total=1|passed=1|failed=0|skipped=0|filtered=0\n", ""),
+            ("ORES_TEST_V2|RUN_END|total=1|passed=1|failed=0|skipped=0|filtered=0\n", "ORES_TEST_V2|RUN_END|total=1|passed=1|failed=0|skipped=0|filtered=0\nORES_TEST_V2|RUN_END|total=1|passed=1|failed=0|skipped=0|filtered=0\n"),
+            ("ORES_TEST_V2|RUN_BEGIN|2", "ORES_TEST_V2|RUN_BEGIN|3"),
+            ("ORES_TEST_V2|RUN_END|total=1", "ORES_TEST_V2|RUN_END|total=2"),
+            ("ORES_TEST_V2|RUN_END|total=1", "ORES_TEST_V2|RUN_END|total=01|total=1"),
+        ];
+        for (from, to) in mutations {
+            let altered = GOOD.replacen(from, to, 1);
+            assert_ne!(GOOD, altered, "mutation fixture must change baseline");
+            assert!(verify(&altered).is_err(), "accepted invalid mutation: {altered}");
+        }
+    }
+
+    #[test]
+    fn truncated_machine_prefixes_are_never_ignored() {
+        for invalid in ["ORES_TEST", "ORES_TEST_V2", "ORES_TEST_V2_BAD", "ORES_TEST|PASS|legacy"] {
+            let output = format!("{GOOD}{invalid}\n");
+            assert!(verify(&output).is_err(), "accepted reserved prefix: {invalid}");
+        }
+    }
+
+    #[test]
+    fn callback_task_actor_and_await_handles_do_not_reopen() {
+        for (kind, handle) in [
+            ("callback", "cb"),
+            ("task", "t1"),
+            ("actor", "a1"),
+            ("await", "aw1"),
+        ] {
+            let original = format!("ORES_TEST_V2|OPEN|suite/async|{kind}|{handle}\n");
+            let duplicate = format!("{original}{original}");
+            let output = GOOD.replacen(&original, &duplicate, 1);
+            assert!(verify(&output).is_err(), "accepted reopened {kind} handle");
+        }
+    }
+
+    #[test]
+    fn failed_case_must_drain_its_children_before_end() {
+        let failed = GOOD.replace("|CASE_END|suite/async|PASS", "|CASE_END|suite/async|FAIL")
+            .replace("|passed=1|failed=0", "|passed=0|failed=1");
+        assert_eq!(verify(&failed).unwrap().failed, 1);
+        for (kind, handle) in [
+            ("callback", "cb"),
+            ("task", "t1"),
+            ("actor", "a1"),
+            ("await", "aw1"),
+        ] {
+            let closed = format!("ORES_TEST_V2|CLOSE|suite/async|{kind}|{handle}|ok\n");
+            assert!(verify(&failed.replace(&closed, "")).is_err(), "undrained {kind}");
+        }
+    }
+
+    #[test]
+    fn concurrent_cases_can_interleave_without_cross_scope_completion() {
+        let valid = concat!(
+            "ORES_TEST_V2|RUN_BEGIN|2\n",
+            "ORES_TEST_V2|CASE_BEGIN|a\n",
+            "ORES_TEST_V2|CASE_BEGIN|b\n",
+            "ORES_TEST_V2|OPEN|a|task|child\n",
+            "ORES_TEST_V2|OPEN|b|task|child\n",
+            "ORES_TEST_V2|CLOSE|b|task|child|ok\n",
+            "ORES_TEST_V2|CLOSE|a|task|child|ok\n",
+            "ORES_TEST_V2|CASE_END|a|PASS\n",
+            "ORES_TEST_V2|CASE_END|b|PASS\n",
+            "ORES_TEST_V2|RUN_END|total=2|passed=2|failed=0|skipped=0|filtered=0\n"
+        );
+        assert_eq!(verify(valid).unwrap().passed, 2);
+        let cross_scope = valid.replacen(
+            "ORES_TEST_V2|CLOSE|b|task|child|ok\n",
+            "ORES_TEST_V2|CLOSE|a|task|child|ok\n", 1
+        );
+        assert!(verify(&cross_scope).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_identifiers_and_noncanonical_resources() {
+        let allowed = "x".repeat(256);
+        let rejected = "x".repeat(257);
+        let one = GOOD.replace("suite/async", &allowed);
+        assert!(verify(&one).is_ok());
+        assert!(verify(&GOOD.replace("suite/async", &rejected)).is_err());
+        assert!(verify(&GOOD.replace("|callback|cb", &format!("|callback|{rejected}"))).is_err());
+        for bad in ["callback/other", "actor ", "TASK", "", "actor|bad"] {
+            assert!(verify(&GOOD.replace("|OPEN|suite/async|actor|a1", &format!("|OPEN|suite/async|{bad}|a1"))).is_err());
+        }
+    }
+
+    #[test]
     fn interleaved_cases_and_cleanup_on_failure() {
         let data = "ORES_TEST_V2|RUN_BEGIN|2\nORES_TEST_V2|CASE_BEGIN|a\nORES_TEST_V2|OPEN|a|task|one\nORES_TEST_V2|CASE_BEGIN|b\nORES_TEST_V2|OPEN|b|actor|two\nORES_TEST_V2|CLOSE|a|task|one|error\nORES_TEST_V2|CLOSE|b|actor|two|ok\nORES_TEST_V2|CASE_END|a|FAIL\nORES_TEST_V2|CASE_END|b|PASS\nORES_TEST_V2|RUN_END|total=2|passed=1|failed=1|skipped=0|filtered=0\n";
         assert_eq!(verify(data).unwrap().failed, 1);
