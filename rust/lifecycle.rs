@@ -59,6 +59,15 @@ fn summary(parts: &[&str]) -> Result<Counts, String> {
 }
 
 pub(super) fn verify(output: &str) -> Result<Counts, String> {
+    // Require canonical LF termination and ASCII machine records. Rust's
+    // str::lines() otherwise accepts a silently truncated final record.
+    if output.len() > 4_000_000
+        || !output.ends_with('\n')
+        || output.contains('\r')
+        || output.contains('\0')
+    {
+        return Err("noncanonical or unbounded lifecycle output".into());
+    }
     let mut started = false;
     let mut finished = false;
     let mut reported = None;
@@ -162,7 +171,7 @@ pub(super) fn verify(output: &str) -> Result<Counts, String> {
         return Err("lifecycle suite executed zero test bodies".into());
     }
     if result.total > 10_000 || result.filtered > 10_000
-        || result.total.checked_add(result.filtered).is_none()
+        || result.total.checked_add(result.filtered).is_none_or(|sum| sum > 10_000)
     {
         return Err("lifecycle discovery count exceeds budget".into());
     }
@@ -352,6 +361,16 @@ mod tests {
             assert_ne!(GOOD, altered, "mutation fixture must change baseline");
             assert!(verify(&altered).is_err(), "accepted invalid mutation: {altered}");
         }
+    }
+
+    #[test]
+    fn canonical_line_endings_and_discovery_budget_match_shared_reference() {
+        assert!(verify(GOOD).is_ok());
+        assert!(verify(GOOD.trim_end_matches('\n')).is_err());
+        assert!(verify(&GOOD.replace("\n", "\r\n")).is_err());
+        assert!(verify(&GOOD.replace("filtered=0", "filtered=10000")).is_err());
+        assert!(verify(&GOOD.replace("filtered=0", "filtered=9999")).is_ok());
+        assert!(verify(&GOOD.replace("filtered=0", "filtered=10001")).is_err());
     }
 
     #[test]
