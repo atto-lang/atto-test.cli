@@ -332,7 +332,7 @@ fn read_small(mut file: File) -> Result<String, String> {
     if bytes.len() as u64 > MAX_OUTPUT {
         return Err("test subprocess output limit exceeded".into());
     }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    String::from_utf8(bytes).map_err(|_| "test subprocess capture is not valid UTF-8".into())
 }
 
 fn invoke(
