@@ -95,3 +95,36 @@ The hardening revision strengthens the host-only tool without claiming language-
 - `python -m unittest discover -s tests -v` covers 28 cases including race-history and synchronization adversarial examples. The local audit test result is **not** a GitHub Actions result until the complete exact Git tree has run on a CI runner.
 
 The `finish` event is an extension of the v1 JSONL trace vocabulary. Existing traces with independent root tasks remain valid; actual `fork` traces should emit corresponding task completion events. This remains host-side analysis of observed events, and runtime coverage must be separately attested before claiming race freedom.
+
+### Static failure analysis
+
+```sh
+oreslang test --analyze
+oreslang test --analyze --race --trace tests/traces/ordered.jsonl
+oreslang test --analyze --fuzz --seed 7 --cases 100
+```
+
+Analysis alone does not run guest tests. When combined with race or fuzz mode,
+failed analysis prevents the test run. By default it discovers `.ores` files
+outside hidden, target and node_modules directories and invokes
+`ORESLANG_BIN --analyze FILE` (default executable: `oreslang-core`). Use a compiler
+that supports failure analysis. Missing compilers, invalid inputs and timeouts
+fail the command; compiler warnings and suggestions remain advisory.
+
+```toml
+[analysis]
+files = ["src/main.ores", "tests/test_failures.ores"]
+# Optional argv prefix; the selected absolute source path is appended.
+command = ["oreslang-core", "--analyze"]
+```
+
+The initial compiler analyzer reports optional `throws`, `raises`, and `panics`
+signature suggestions, propagates known direct-call effects, and reports unknown
+dispatch. It does not prove race freedom or replace runtime race instrumentation
+or fuzzing. Java/Graal currently implements the failure operations; other backend
+lowering remains separate work.
+
+The compiler understands `unchecked call()` as a per-call opt-out from declared
+failure effects; known body effects and unresolved calls remain visible.
+Analysis discovery prunes ignored and symlink directories before traversal.
+Invalid `[analysis]` configuration is reported as a usage error.

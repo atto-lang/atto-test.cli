@@ -120,6 +120,41 @@ def run_native(root, config, timeout):
     return 1 if failed else 0
 
 
+def analyze(root, config, timeout):
+    params = config.get("analysis", {})
+    if not isinstance(params, dict):
+        raise UsageError("analysis must be a TOML table")
+    command = _command(params.get("command", [os.environ.get("ORESLANG_BIN", "oreslang-core"), "--analyze"]), "analysis")
+    files = params.get("files")
+    if files is None:
+        files = []
+        for directory, dirs, names in os.walk(root, followlinks=False):
+            dirs[:] = sorted(name for name in dirs
+                             if not name.startswith(".") and name not in {"target", "node_modules"}
+                             and not (Path(directory) / name).is_symlink())
+            files.extend(str((Path(directory) / name).relative_to(root)) for name in sorted(names)
+                         if not name.startswith(".") and name.endswith(".ores"))
+    if not isinstance(files, list) or not files or not all(isinstance(name, str) for name in files):
+        raise UsageError("no analysis source files; configure [analysis].files or add .ores files")
+    # Validate the entire selection before invoking a compiler.
+    paths = [_relative(root, name) for name in files]
+    if any(not path.is_file() or path.suffix != ".ores" for path in paths):
+        raise UsageError("analysis files must be existing project-relative .ores files")
+    failed = False
+    for name, path in zip(files, paths):
+        result = _run([*command, str(path)], root, timeout)
+        if result is None:
+            print(f"ANALYSIS TIMEOUT {name}")
+            failed = True
+            continue
+        print(_decode(result.stdout), end="")
+        print(_decode(result.stderr), end="", file=sys.stderr)
+        if result.returncode:
+            print(f"ANALYSIS FAIL {name}: exit={result.returncode}")
+            failed = True
+    return 1 if failed else 0
+
+
 def _failure(result):
     if result is None:
         return "timeout"
@@ -261,6 +296,7 @@ def _show_races(report):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="oreslang test")
     parser.add_argument("--root", default=".")
+    parser.add_argument("--analyze", action="store_true", help="static compiler checks; runs before --fuzz/--race when combined")
     parser.add_argument("--fuzz", action="store_true")
     parser.add_argument("--race", action="store_true")
     parser.add_argument("--logical", action="store_true")
@@ -287,6 +323,10 @@ def main(argv=None):
                 config = tomllib.load(fh)
         else:
             config = {}
+        if args.analyze:
+            status = analyze(root, config, args.timeout)
+            if status or not (args.fuzz or args.race):
+                return status
         if args.fuzz:
             return fuzz(root, config, args.seed, args.cases, args.timeout)
         if args.race:
