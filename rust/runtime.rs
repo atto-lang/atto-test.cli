@@ -791,6 +791,13 @@ enum Failure {
     Sanitizer(&'static str),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateOutcome {
+    Clean,
+    Failure(Failure),
+    Inconclusive(i32),
+}
+
 fn sanitizer_finding(stderr: &str) -> Option<&'static str> {
     // Exact emitted prefixes minimize false positives while accepting
     // recoverable UBSan output and sanitizer-triggered abnormal termination.
@@ -837,11 +844,18 @@ fn candidate(
     timeout: Duration,
     bytes: &[u8],
     project: &ProjectRoot,
-) -> Result<Option<Failure>, String> {
+    inconclusive_exits: &BTreeSet<i32>,
+) -> Result<CandidateOutcome, String> {
     project.verify_path(root)?;
     let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), true)?;
     project.verify_path(root)?;
-    classify(&result)
+    match classify(&result)? {
+        Some(Failure::Exit(code)) if inconclusive_exits.contains(&code) => {
+            Ok(CandidateOutcome::Inconclusive(code))
+        }
+        Some(failure) => Ok(CandidateOutcome::Failure(failure)),
+        None => Ok(CandidateOutcome::Clean),
+    }
 }
 
 fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<PathBuf, String> {
@@ -900,9 +914,35 @@ fn retain_sample(samples: &mut Vec<Vec<u8>>, retained_bytes: &mut usize, case: V
     return true;
 }
 
+// This opt-in list is for native fuzz adapters that reserve exit statuses
+// for infrastructure failures (e.g., LLVM adapter exit 2 on input overflow).
+// Never suppress ASan/UBSan/TSan: classify() processes sanitizer output FIRST.
+fn fuzz_inconclusive_exits(params: &toml::Table) -> Result<BTreeSet<i32>, String> {
+    let Some(raw) = params.get("inconclusive_exits") else {
+        return Ok(BTreeSet::new());
+    };
+    let entries = raw
+        .as_array()
+        .ok_or("fuzz.inconclusive_exits must be an integer array")?;
+    if entries.is_empty() || entries.len() > 16 {
+        return Err("fuzz.inconclusive_exits requires 1..16 codes".into());
+    }
+    let mut codes = BTreeSet::new();
+    for entry in entries {
+        let code = entry
+            .as_integer()
+            .ok_or("fuzz.inconclusive_exits requires integer status codes")?;
+        if !(1..=255).contains(&code) || !codes.insert(code as i32) {
+            return Err("fuzz.inconclusive_exits requires unique codes 1..255".into());
+        }
+    }
+    Ok(codes)
+}
+
 fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, String> {
     let params = section(config, "fuzz")?.ok_or("missing [fuzz] section")?;
     let cmd = commands(params, "command")?;
+    let inconclusive_exits = fuzz_inconclusive_exits(params)?;
     let max_bytes = match params.get("max_bytes") {
         Some(v) => v.as_integer().ok_or("invalid fuzz.max_bytes")?,
         None => 256,
@@ -967,61 +1007,103 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             }
             bytes
         };
-        if let Some(code) = candidate(&cmd, root, settings.timeout, &case, &project)? {
-            for _ in 0..2 {
-                if candidate(&cmd, root, settings.timeout, &case, &project)? != Some(code) {
-                    eprintln!(
-                        "FUZZ FLAKY seed={} iteration={i}: no stable reproduction",
-                        settings.seed
-                    );
-                    return Ok(2);
-                }
+        let code = match candidate(
+            &cmd,
+            root,
+            settings.timeout,
+            &case,
+            &project,
+            &inconclusive_exits,
+        )? {
+            CandidateOutcome::Clean => {
+                retain_sample(&mut samples, &mut retained_bytes, case);
+                continue;
             }
-            let mut shrunk = case.clone();
-            let mut budget = 200usize;
-            let mut granularity = 2usize;
-            while !shrunk.is_empty() && budget > 0 {
-                let chunk = shrunk.len().div_ceil(granularity);
-                let mut shorter = false;
-                for start in (0..shrunk.len()).step_by(chunk.max(1)) {
-                    if budget == 0 {
-                        break;
-                    }
-                    budget -= 1;
-                    let mut reduced = shrunk[..start].to_vec();
-                    reduced.extend_from_slice(&shrunk[(start + chunk).min(shrunk.len())..]);
-                    if candidate(&cmd, root, settings.timeout, &reduced, &project)? == Some(code) {
-                        shrunk = reduced;
-                        granularity = 2;
-                        shorter = true;
-                        break;
-                    }
-                }
-                if !shorter {
-                    if granularity >= shrunk.len() {
-                        break;
-                    }
-                    granularity = (granularity * 2).min(shrunk.len());
-                }
+            CandidateOutcome::Inconclusive(status) => {
+                eprintln!(
+                    "FUZZ INCONCLUSIVE seed={} iteration={i}: target exit {status} is inconclusive",
+                    settings.seed
+                );
+                return Ok(2);
             }
-            for _ in 0..2 {
-                if candidate(&cmd, root, settings.timeout, &shrunk, &project)? != Some(code) {
-                    eprintln!("FUZZ FLAKY after minimization; preserving original failure");
-                    shrunk = case.clone();
+            CandidateOutcome::Failure(failure) => failure,
+        };
+        for _ in 0..2 {
+            if candidate(
+                &cmd,
+                root,
+                settings.timeout,
+                &case,
+                &project,
+                &inconclusive_exits,
+            )? != CandidateOutcome::Failure(code)
+            {
+                eprintln!(
+                    "FUZZ FLAKY seed={} iteration={i}: no stable reproduction",
+                    settings.seed
+                );
+                return Ok(2);
+            }
+        }
+        let mut shrunk = case.clone();
+        let mut budget = 200usize;
+        let mut granularity = 2usize;
+        while !shrunk.is_empty() && budget > 0 {
+            let chunk = shrunk.len().div_ceil(granularity);
+            let mut shorter = false;
+            for start in (0..shrunk.len()).step_by(chunk.max(1)) {
+                if budget == 0 {
+                    break;
+                }
+                budget -= 1;
+                let mut reduced = shrunk[..start].to_vec();
+                reduced.extend_from_slice(&shrunk[(start + chunk).min(shrunk.len())..]);
+                if candidate(
+                    &cmd,
+                    root,
+                    settings.timeout,
+                    &reduced,
+                    &project,
+                    &inconclusive_exits,
+                )? == CandidateOutcome::Failure(code)
+                {
+                    shrunk = reduced;
+                    granularity = 2;
+                    shorter = true;
                     break;
                 }
             }
-            let saved = write_failure(root, &shrunk, &project)?;
-            println!(
-                "FUZZ FAILURE seed={} iteration={i} finding={code:?} initial={} minimized={} path={}",
-                settings.seed,
-                case.len(),
-                shrunk.len(),
-                saved.display()
-            );
-            return Ok(1);
+            if !shorter {
+                if granularity >= shrunk.len() {
+                    break;
+                }
+                granularity = (granularity * 2).min(shrunk.len());
+            }
         }
-        retain_sample(&mut samples, &mut retained_bytes, case);
+        for _ in 0..2 {
+            if candidate(
+                &cmd,
+                root,
+                settings.timeout,
+                &shrunk,
+                &project,
+                &inconclusive_exits,
+            )? != CandidateOutcome::Failure(code)
+            {
+                eprintln!("FUZZ FLAKY after minimization; preserving original failure");
+                shrunk = case.clone();
+                break;
+            }
+        }
+        let saved = write_failure(root, &shrunk, &project)?;
+        println!(
+            "FUZZ FAILURE seed={} iteration={i} finding={code:?} initial={} minimized={} path={}",
+            settings.seed,
+            case.len(),
+            shrunk.len(),
+            saved.display()
+        );
+        return Ok(1);
     }
     println!(
         "FUZZ PASS cases={} seed={} (observed inputs only)",

@@ -168,3 +168,156 @@ exit 66
         .unwrap();
     assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
+
+
+#[cfg(unix)]
+#[test]
+fn llvm_native_adapter_inconclusive_exit_never_becomes_a_fuzz_defect() {
+    let root = tempfile::tempdir().unwrap();
+    let target = guest(
+        root.path(),
+        "native-adapter",
+        "#!/bin/sh\nprintf 'ATTO_LLVM_FUZZ_INCONCLUSIVE input budget exceeded\\n' >&2\nexit 2\n",
+    );
+    fs::write(
+        root.path().join("atto-test.toml"),
+        format!(
+            "[fuzz]\ncommand=['{}']\nmax_bytes=16\ninconclusive_exits=[2]\n",
+            target.display()
+        ),
+    )
+    .unwrap();
+    let report = Command::new(env!("CARGO_BIN_EXE_atto-test"))
+        .arg("--root")
+        .arg(root.path())
+        .args(["--fuzz", "--seed", "1729", "--cases", "4"])
+        .output()
+        .unwrap();
+    assert_eq!(report.status.code(), Some(2), "{report:?}");
+    assert!(
+        String::from_utf8_lossy(&report.stderr).contains("exit 2 is inconclusive"),
+        "{report:?}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&report.stdout).contains("FUZZ FAILURE"),
+        "{report:?}"
+    );
+    assert!(!root.path().join(".oreslang-test/failures").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn llvm_native_adapter_real_defect_and_sanitizer_override_inconclusive_policy() {
+    let root = tempfile::tempdir().unwrap();
+    let target = guest(root.path(), "native-adapter", "#!/bin/sh\nexit 77\n");
+    let manifest = root.path().join("atto-test.toml");
+    let config = || {
+        format!(
+            "[fuzz]\ncommand=['{}']\nmax_bytes=16\ninconclusive_exits=[2]\n",
+            target.display()
+        )
+    };
+    fs::write(&manifest, config()).unwrap();
+    let cli = |root: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_atto-test"))
+            .arg("--root")
+            .arg(root)
+            .args(["--fuzz", "--cases", "1", "--seed", "1729"])
+            .output()
+            .unwrap()
+    };
+    let bug = cli(root.path());
+    assert_eq!(bug.status.code(), Some(1), "{bug:?}");
+    assert!(
+        String::from_utf8_lossy(&bug.stdout).contains("FUZZ FAILURE"),
+        "{bug:?}"
+    );
+    // A sanitizer finding is a concrete observed defect even if its program
+    // exits with a configured infrastructure status.
+    fs::write(
+        &target,
+        "#!/bin/sh\nprintf 'ERROR: AddressSanitizer: heap-use-after-free\\n' >&2\nexit 2\n",
+    )
+    .unwrap();
+    let sanitizer = cli(root.path());
+    assert_eq!(sanitizer.status.code(), Some(1), "{sanitizer:?}");
+    assert!(
+        String::from_utf8_lossy(&sanitizer.stdout).contains("Sanitizer(\"ASan\")"),
+        "{sanitizer:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_shrinking_does_not_erase_a_confirmed_defect_when_reduced_input_is_inconclusive() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("tests/corpus")).unwrap();
+    fs::write(root.path().join("tests/corpus/seed.bin"), b"x").unwrap();
+    let target = guest(
+        root.path(),
+        "native-adapter",
+        // The default first case is empty. Admit that one as clean, then
+        // make all subsequent empty reductions inconclusive. The second
+        // seed (one NUL byte) is a stable real defect and must be saved.
+        "#!/bin/sh\nbytes=$(wc -c | tr -d ' ')\nif [ \"$bytes\" -eq 0 ]; then\n  if [ ! -f .empty-seen ]; then : > .empty-seen; exit 0; fi\n  exit 2\nfi\nexit 77\n",
+    );
+    fs::write(
+        root.path().join("atto-test.toml"),
+        format!(
+            "[fuzz]\ncommand=['{}']\ncorpus='tests/corpus'\nmax_bytes=16\ninconclusive_exits=[2]\n",
+            target.display()
+        ),
+    )
+    .unwrap();
+
+    let report = Command::new(env!("CARGO_BIN_EXE_atto-test"))
+        .arg("--root")
+        .arg(root.path())
+        .args(["--fuzz", "--seed", "1729", "--cases", "2"])
+        .output()
+        .unwrap();
+
+    assert_eq!(report.status.code(), Some(1), "{report:?}");
+    let stdout = String::from_utf8_lossy(&report.stdout);
+    assert!(stdout.contains("FUZZ FAILURE"), "{report:?}");
+    assert!(stdout.contains("finding=Exit(77)"), "{report:?}");
+    let failures = root.path().join(".oreslang-test/failures");
+    assert!(failures.is_dir(), "confirmed defect must retain a reproducer");
+    let saved: Vec<_> = fs::read_dir(&failures)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(saved.len(), 1, "unexpected reproducer cardinality");
+    assert_eq!(fs::read(&saved[0]).unwrap(), b"\0");
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_inconclusive_policy_rejects_ambiguous_codes_before_execution() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("executed");
+    let target = guest(
+        root.path(),
+        "candidate",
+        &format!("#!/bin/sh\nprintf yes > '{}'\nexit 0\n", marker.display()),
+    );
+    let config_path = root.path().join("atto-test.toml");
+    for input in ["[]", "[0]", "[256]", "[2, 2]", "['2']", "2", "[1, -1]"] {
+        fs::write(
+            &config_path,
+            format!(
+                "[fuzz]\ncommand=['{}']\nmax_bytes=8\ninconclusive_exits={input}\n",
+                target.display()
+            ),
+        )
+        .unwrap();
+        let verdict = Command::new(env!("CARGO_BIN_EXE_atto-test"))
+            .arg("--root")
+            .arg(root.path())
+            .args(["--fuzz", "--cases", "1"])
+            .output()
+            .unwrap();
+        assert_eq!(verdict.status.code(), Some(2), "{input} {verdict:?}");
+        assert!(!marker.exists(), "invalid policy executed target: {input}");
+    }
+}
