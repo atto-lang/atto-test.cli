@@ -286,19 +286,26 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     Ok(c)
 }
 
-fn stop(child: &mut Child) {
-    #[cfg(unix)]
-    {
-        unsafe extern "C" {
-            fn kill(pid: i32, signal: i32) -> i32;
-        }
-        if let Ok(pid) = i32::try_from(child.id()) {
-            // Negative pid identifies the private process group established at spawn.
-            unsafe {
-                kill(-pid, 9);
-            }
+// A Unix guest runs in a process group distinct from the Rust launcher.
+// Reap the group not only on timeout: an otherwise successful compiler
+// command may leave background helpers writing into stale test captures.
+#[cfg(unix)]
+fn kill_guest_group(leader: u32) {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    if let Ok(pid) = i32::try_from(leader) {
+        // Negative pid identifies the process group established at spawn.
+        // This cannot contain descendants which deliberately call setsid().
+        unsafe {
+            kill(-pid, 9);
         }
     }
+}
+
+fn stop(child: &mut Child) {
+    #[cfg(unix)]
+    kill_guest_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -320,7 +327,7 @@ fn read_small(mut file: File) -> Result<String, String> {
     if bytes.len() as u64 > MAX_OUTPUT {
         return Err("test subprocess output limit exceeded".into());
     }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    String::from_utf8(bytes).map_err(|_| "test subprocess capture is not valid UTF-8".into())
 }
 
 fn invoke(
@@ -397,6 +404,12 @@ fn invoke(
             }
         }
     };
+    // The parent process exiting does not mean its process-group descendants
+    // exited. Always terminate remaining group members before final reporting.
+    // This is best-effort containment, not an OS sandbox or complete setsid
+    // descendant tracking. On Windows this path needs a Job Object adapter.
+    #[cfg(unix)]
+    kill_guest_group(child.id());
     drop(stdin_file);
     Ok(ProcessResult {
         code,
@@ -422,6 +435,14 @@ struct Counts {
 }
 
 fn test_receipt(output: &str) -> Result<Counts, String> {
+    // Reject truncated and mixed-version machine records rather than
+    // silently treating them as unrelated guest log output.
+    if output
+        .lines()
+        .any(|line| line.starts_with("ORES_TEST") && !line.starts_with("ORES_TEST|"))
+    {
+        return Err("malformed or mixed-version ORES_TEST record".into());
+    }
     let mut summaries = output
         .lines()
         .filter(|l| l.starts_with("ORES_TEST|SUMMARY|"));
@@ -469,9 +490,16 @@ fn test_receipt(output: &str) -> Result<Counts, String> {
     }
     let mut observed = [0usize; 3];
     let mut case_ids = BTreeSet::new();
+    let mut saw_summary = false;
     for line in output.lines().filter(|l| l.starts_with("ORES_TEST|")) {
         if line == summary {
+            saw_summary = true;
             continue;
+        }
+        // A terminal summary cannot precede case completions. Otherwise a
+        // suite can pass even while a later callback writes case results.
+        if saw_summary {
+            return Err("ORES_TEST case emitted after terminal SUMMARY".into());
         }
         let (index, rest) = if let Some(rest) = line.strip_prefix("ORES_TEST|PASS|") {
             (0, rest)
@@ -515,6 +543,14 @@ fn is_native_test_path(path: &Path) -> bool {
 
 fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, String> {
     let params = section(config, "native")?;
+    let lifecycle_v2 = match params.and_then(|p| p.get("receipt")) {
+        None => false,
+        Some(value) => match value.as_str() {
+            Some("v1") => false,
+            Some("lifecycle-v2") => true,
+            _ => return Err("[native].receipt must be v1 or lifecycle-v2".into()),
+        },
+    };
     let mut files = Vec::new();
     if let Some(value) = params.and_then(|p| p.get("files")) {
         let arr = value
@@ -560,7 +596,18 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
             );
             continue;
         }
-        match test_receipt(&result.output) {
+        let receipt = if lifecycle_v2 {
+            super::lifecycle::verify(&result.output).map(|c| Counts {
+                total: c.total,
+                passed: c.passed,
+                failed: c.failed,
+                skipped: c.skipped,
+                filtered: c.filtered,
+            })
+        } else {
+            test_receipt(&result.output)
+        };
+        match receipt {
             Ok(counts) if counts.failed == 0 => println!(
                 "PASS {name}: {} passed, {} skipped",
                 counts.passed, counts.skipped
@@ -1090,6 +1137,26 @@ mod tests {
         for id in ["", " ", "\t"] {
             let output = format!("ORES_TEST|PASS|{id}|message\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n");
             assert!(test_receipt(&output).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_receipts_reject_late_case_events_and_truncated_marker_lines() {
+        let summary = "ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n";
+        let pass = "ORES_TEST|PASS|suite/sync\n";
+        assert!(test_receipt(&format!("{pass}{summary}")).is_ok());
+        for malformed in [
+            format!("{summary}{pass}"),
+            format!("{pass}{summary}ORES_TEST\n"),
+            format!("{pass}{summary}ORES_TEST_V2\n"),
+            format!("{pass}{summary}ORES_TEST_V2|RUN_BEGIN|2\n"),
+            format!("ORES_TEST|PASS|suite/other\n{pass}{summary}"),
+            format!("{pass}{summary}ORES_TEST|FAIL|late\n"),
+        ] {
+            assert!(
+                test_receipt(&malformed).is_err(),
+                "accepted malformed v1 receipt: {malformed}"
+            );
         }
     }
 
