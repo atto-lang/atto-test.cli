@@ -1029,81 +1029,81 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             CandidateOutcome::Failure(failure) => failure,
         };
         for _ in 0..2 {
+            if candidate(
+                &cmd,
+                root,
+                settings.timeout,
+                &case,
+                &project,
+                &inconclusive_exits,
+            )? != CandidateOutcome::Failure(code)
+            {
+                eprintln!(
+                    "FUZZ FLAKY seed={} iteration={i}: no stable reproduction",
+                    settings.seed
+                );
+                return Ok(2);
+            }
+        }
+        let mut shrunk = case.clone();
+        let mut budget = 200usize;
+        let mut granularity = 2usize;
+        while !shrunk.is_empty() && budget > 0 {
+            let chunk = shrunk.len().div_ceil(granularity);
+            let mut shorter = false;
+            for start in (0..shrunk.len()).step_by(chunk.max(1)) {
+                if budget == 0 {
+                    break;
+                }
+                budget -= 1;
+                let mut reduced = shrunk[..start].to_vec();
+                reduced.extend_from_slice(&shrunk[(start + chunk).min(shrunk.len())..]);
                 if candidate(
                     &cmd,
                     root,
                     settings.timeout,
-                    &case,
+                    &reduced,
                     &project,
                     &inconclusive_exits,
-                )? != CandidateOutcome::Failure(code)
+                )? == CandidateOutcome::Failure(code)
                 {
-                    eprintln!(
-                        "FUZZ FLAKY seed={} iteration={i}: no stable reproduction",
-                        settings.seed
-                    );
-                    return Ok(2);
-                }
-            }
-            let mut shrunk = case.clone();
-            let mut budget = 200usize;
-            let mut granularity = 2usize;
-            while !shrunk.is_empty() && budget > 0 {
-                let chunk = shrunk.len().div_ceil(granularity);
-                let mut shorter = false;
-                for start in (0..shrunk.len()).step_by(chunk.max(1)) {
-                    if budget == 0 {
-                        break;
-                    }
-                    budget -= 1;
-                    let mut reduced = shrunk[..start].to_vec();
-                    reduced.extend_from_slice(&shrunk[(start + chunk).min(shrunk.len())..]);
-                    if candidate(
-                        &cmd,
-                        root,
-                        settings.timeout,
-                        &reduced,
-                        &project,
-                        &inconclusive_exits,
-                    )? == CandidateOutcome::Failure(code)
-                    {
-                        shrunk = reduced;
-                        granularity = 2;
-                        shorter = true;
-                        break;
-                    }
-                }
-                if !shorter {
-                    if granularity >= shrunk.len() {
-                        break;
-                    }
-                    granularity = (granularity * 2).min(shrunk.len());
-                }
-            }
-            for _ in 0..2 {
-                if candidate(
-                    &cmd,
-                    root,
-                    settings.timeout,
-                    &shrunk,
-                    &project,
-                    &inconclusive_exits,
-                )? != CandidateOutcome::Failure(code)
-                {
-                    eprintln!("FUZZ FLAKY after minimization; preserving original failure");
-                    shrunk = case.clone();
+                    shrunk = reduced;
+                    granularity = 2;
+                    shorter = true;
                     break;
                 }
             }
-            let saved = write_failure(root, &shrunk, &project)?;
-            println!(
-                "FUZZ FAILURE seed={} iteration={i} finding={code:?} initial={} minimized={} path={}",
-                settings.seed,
-                case.len(),
-                shrunk.len(),
-                saved.display()
-            );
-            return Ok(1);
+            if !shorter {
+                if granularity >= shrunk.len() {
+                    break;
+                }
+                granularity = (granularity * 2).min(shrunk.len());
+            }
+        }
+        for _ in 0..2 {
+            if candidate(
+                &cmd,
+                root,
+                settings.timeout,
+                &shrunk,
+                &project,
+                &inconclusive_exits,
+            )? != CandidateOutcome::Failure(code)
+            {
+                eprintln!("FUZZ FLAKY after minimization; preserving original failure");
+                shrunk = case.clone();
+                break;
+            }
+        }
+        let saved = write_failure(root, &shrunk, &project)?;
+        println!(
+            "FUZZ FAILURE seed={} iteration={i} finding={code:?} initial={} minimized={} path={}",
+            settings.seed,
+            case.len(),
+            shrunk.len(),
+            saved.display()
+        );
+        return Ok(1);
     }
     println!(
         "FUZZ PASS cases={} seed={} (observed inputs only)",
