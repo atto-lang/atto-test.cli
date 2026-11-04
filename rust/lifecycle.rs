@@ -40,7 +40,12 @@ fn summary(parts: &[&str]) -> Result<Counts, String> {
             return Err("invalid lifecycle count".into());
         }
         if fields
-            .insert(key, value.parse::<usize>().map_err(|_| "lifecycle count overflow")?)
+            .insert(
+                key,
+                value
+                    .parse::<usize>()
+                    .map_err(|_| "lifecycle count overflow")?,
+            )
             .is_some()
         {
             return Err("duplicate lifecycle count".into());
@@ -126,7 +131,9 @@ pub(super) fn verify(output: &str) -> Result<Counts, String> {
                 }
                 let case = cases.get_mut(*id).ok_or("CLOSE for unknown case")?;
                 if case.ended.is_some()
-                    || !case.pending.remove(&((*kind).to_owned(), (*handle).to_owned()))
+                    || !case
+                        .pending
+                        .remove(&((*kind).to_owned(), (*handle).to_owned()))
                 {
                     return Err("duplicate or unmatched lifecycle CLOSE".into());
                 }
@@ -170,8 +177,12 @@ pub(super) fn verify(output: &str) -> Result<Counts, String> {
     if observed[0] == 0 && observed[1] == 0 {
         return Err("lifecycle suite executed zero test bodies".into());
     }
-    if result.total > 10_000 || result.filtered > 10_000
-        || result.total.checked_add(result.filtered).is_none_or(|sum| sum > 10_000)
+    if result.total > 10_000
+        || result.filtered > 10_000
+        || result
+            .total
+            .checked_add(result.filtered)
+            .is_none_or(|sum| sum > 10_000)
     {
         return Err("lifecycle discovery count exceeds budget".into());
     }
@@ -193,34 +204,56 @@ mod tests {
     fn scoped_callbacks_tasks_actors_and_awaits_complete() {
         assert_eq!(
             verify(GOOD),
-            Ok(Counts { total: 1, passed: 1, failed: 0, skipped: 0, filtered: 0 })
+            Ok(Counts {
+                total: 1,
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                filtered: 0
+            })
         );
     }
 
     #[test]
     fn incomplete_or_mismatched_async_receipts_are_rejected() {
         let mut bad = Vec::new();
-        for kind in [
-            "callback|cb", "task|t1", "actor|a1", "await|aw1",
-        ] {
+        for kind in ["callback|cb", "task|t1", "actor|a1", "await|aw1"] {
             let line = format!("ORES_TEST_V2|CLOSE|suite/async|{kind}|ok\n");
             bad.push(GOOD.replace(&line, ""));
         }
         bad.push(GOOD.replace("ORES_TEST_V2|RUN_BEGIN|2\n", ""));
         bad.push(GOOD.replace("ORES_TEST_V2|CASE_END|suite/async|PASS\n", ""));
-        bad.push(GOOD.replace("ORES_TEST_V2|RUN_END|total=1|passed=1|failed=0|skipped=0|filtered=0\n", ""));
+        bad.push(GOOD.replace(
+            "ORES_TEST_V2|RUN_END|total=1|passed=1|failed=0|skipped=0|filtered=0\n",
+            "",
+        ));
         bad.push(format!("{GOOD}ORES_TEST_V2|CASE_BEGIN|late\n"));
         bad.push(GOOD.replace("|actor|a1|ok", "|actor|a1|cancel"));
         bad.push(GOOD.replace("|callback|cb|ok", "|callback|cb|error"));
         bad.push(GOOD.replace("|CASE_END|suite/async|PASS", "|CASE_END|suite/async|SKIP"));
         bad.push(GOOD.replace("|RUN_END|total=1", "|RUN_END|total=2"));
         bad.push(GOOD.replace("|OPEN|suite/async|task|t1\n", ""));
-        bad.push(GOOD.replace("|OPEN|suite/async|task|t1", "|OPEN|suite/async|task|t1\nORES_TEST_V2|OPEN|suite/async|task|t1"));
-        bad.push(GOOD.replace("|CLOSE|suite/async|actor|a1|ok", "|CLOSE|suite/async|actor|a1|ok\nORES_TEST_V2|CLOSE|suite/async|actor|a1|ok"));
-        bad.push(GOOD.replace("|CASE_BEGIN|suite/async", "|CASE_BEGIN|suite/async\nORES_TEST_V2|CASE_BEGIN|suite/async"));
-        bad.push(GOOD.replace("|CASE_BEGIN|suite/async", "|CASE_BEGIN|suite/async\nORES_TEST|PASS|suite/async"));
+        bad.push(GOOD.replace(
+            "|OPEN|suite/async|task|t1",
+            "|OPEN|suite/async|task|t1\nORES_TEST_V2|OPEN|suite/async|task|t1",
+        ));
+        bad.push(GOOD.replace(
+            "|CLOSE|suite/async|actor|a1|ok",
+            "|CLOSE|suite/async|actor|a1|ok\nORES_TEST_V2|CLOSE|suite/async|actor|a1|ok",
+        ));
+        bad.push(GOOD.replace(
+            "|CASE_BEGIN|suite/async",
+            "|CASE_BEGIN|suite/async\nORES_TEST_V2|CASE_BEGIN|suite/async",
+        ));
+        bad.push(GOOD.replace(
+            "|CASE_BEGIN|suite/async",
+            "|CASE_BEGIN|suite/async\nORES_TEST|PASS|suite/async",
+        ));
         for output in bad {
-            assert!(verify(&output).is_err(), "accepted invalid receipt: {output}");
+            assert!(
+                verify(&output).is_err(),
+                "accepted invalid receipt: {output}"
+            );
         }
     }
 
@@ -231,7 +264,10 @@ mod tests {
         for text in [
             all_skipped.to_owned(),
             unfinished_case.to_owned(),
-            GOOD.replace("|CASE_BEGIN|suite/async", "|CASE_BEGIN|suite/async with spaces"),
+            GOOD.replace(
+                "|CASE_BEGIN|suite/async",
+                "|CASE_BEGIN|suite/async with spaces",
+            ),
             GOOD.replace("|OPEN|suite/async|actor|a1", "|OPEN|suite/async|thread|a1"),
             GOOD.replace("|OPEN|suite/async|actor|a1", "|OPEN|suite/other|actor|a1"),
             GOOD.replace("|CLOSE|suite/async|actor|a1", "|CLOSE|suite/wrong|actor|a1"),
@@ -242,7 +278,10 @@ mod tests {
             GOOD.replace("|CASE_END|suite/async|PASS", "|CASE_END|suite/async|TODO"),
             GOOD.replace("|RUN_BEGIN|2", "|RUN_BEGIN|3"),
         ] {
-            assert!(verify(&text).is_err(), "accepted invalid lifecycle stream: {text}");
+            assert!(
+                verify(&text).is_err(),
+                "accepted invalid lifecycle stream: {text}"
+            );
         }
     }
 
@@ -280,10 +319,8 @@ mod tests {
                             closings[a], closings[b], closings[c], closings[d]
                         );
                         assert!(verify(&valid).is_ok(), "rejected valid completion ordering");
-                        let incomplete = format!(
-                            "{start}{}{}{}{end}",
-                            closings[a], closings[b], closings[c]
-                        );
+                        let incomplete =
+                            format!("{start}{}{}{}{end}", closings[a], closings[b], closings[c]);
                         assert!(verify(&incomplete).is_err(), "accepted incomplete ordering");
                     }
                 }
@@ -359,7 +396,10 @@ mod tests {
         for (from, to) in mutations {
             let altered = GOOD.replacen(from, to, 1);
             assert_ne!(GOOD, altered, "mutation fixture must change baseline");
-            assert!(verify(&altered).is_err(), "accepted invalid mutation: {altered}");
+            assert!(
+                verify(&altered).is_err(),
+                "accepted invalid mutation: {altered}"
+            );
         }
     }
 
@@ -375,9 +415,17 @@ mod tests {
 
     #[test]
     fn truncated_machine_prefixes_are_never_ignored() {
-        for invalid in ["ORES_TEST", "ORES_TEST_V2", "ORES_TEST_V2_BAD", "ORES_TEST|PASS|legacy"] {
+        for invalid in [
+            "ORES_TEST",
+            "ORES_TEST_V2",
+            "ORES_TEST_V2_BAD",
+            "ORES_TEST|PASS|legacy",
+        ] {
             let output = format!("{GOOD}{invalid}\n");
-            assert!(verify(&output).is_err(), "accepted reserved prefix: {invalid}");
+            assert!(
+                verify(&output).is_err(),
+                "accepted reserved prefix: {invalid}"
+            );
         }
     }
 
@@ -398,7 +446,8 @@ mod tests {
 
     #[test]
     fn failed_case_must_drain_its_children_before_end() {
-        let failed = GOOD.replace("|CASE_END|suite/async|PASS", "|CASE_END|suite/async|FAIL")
+        let failed = GOOD
+            .replace("|CASE_END|suite/async|PASS", "|CASE_END|suite/async|FAIL")
             .replace("|passed=1|failed=0", "|passed=0|failed=1");
         assert_eq!(verify(&failed).unwrap().failed, 1);
         for (kind, handle) in [
@@ -408,7 +457,10 @@ mod tests {
             ("await", "aw1"),
         ] {
             let closed = format!("ORES_TEST_V2|CLOSE|suite/async|{kind}|{handle}|ok\n");
-            assert!(verify(&failed.replace(&closed, "")).is_err(), "undrained {kind}");
+            assert!(
+                verify(&failed.replace(&closed, "")).is_err(),
+                "undrained {kind}"
+            );
         }
     }
 
@@ -429,7 +481,8 @@ mod tests {
         assert_eq!(verify(valid).unwrap().passed, 2);
         let cross_scope = valid.replacen(
             "ORES_TEST_V2|CLOSE|b|task|child|ok\n",
-            "ORES_TEST_V2|CLOSE|a|task|child|ok\n", 1
+            "ORES_TEST_V2|CLOSE|a|task|child|ok\n",
+            1,
         );
         assert!(verify(&cross_scope).is_err());
     }
@@ -462,7 +515,11 @@ mod tests {
         assert!(verify(&GOOD.replace("suite/async", &rejected)).is_err());
         assert!(verify(&GOOD.replace("|callback|cb", &format!("|callback|{rejected}"))).is_err());
         for bad in ["callback/other", "actor ", "TASK", "", "actor|bad"] {
-            assert!(verify(&GOOD.replace("|OPEN|suite/async|actor|a1", &format!("|OPEN|suite/async|{bad}|a1"))).is_err());
+            assert!(verify(&GOOD.replace(
+                "|OPEN|suite/async|actor|a1",
+                &format!("|OPEN|suite/async|{bad}|a1")
+            ))
+            .is_err());
         }
     }
 

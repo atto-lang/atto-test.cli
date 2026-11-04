@@ -25,8 +25,16 @@ const SUCCESS: &str = concat!(
 
 fn run_script(root: &Path, script: &str, args: &[&str]) -> Output {
     fs::create_dir_all(root.join("tests")).unwrap();
-    fs::write(root.join("tests/test_async.ores"), "/* intentionally synthetic */").unwrap();
-    fs::write(root.join("oreslang-test.toml"), "[native]\nreceipt='lifecycle-v2'\n").unwrap();
+    fs::write(
+        root.join("tests/test_async.ores"),
+        "/* intentionally synthetic */",
+    )
+    .unwrap();
+    fs::write(
+        root.join("oreslang-test.toml"),
+        "[native]\nreceipt='lifecycle-v2'\n",
+    )
+    .unwrap();
     let script_path = root.join("synthetic-oreslang-compiler");
     fs::write(&script_path, script).unwrap();
     let mut permissions = fs::metadata(&script_path).unwrap().permissions();
@@ -86,9 +94,7 @@ fn trailing_incomplete_machine_prefix_is_fail_closed() {
 #[test]
 fn invalid_utf8_capture_never_produces_a_valid_machine_receipt() {
     let root = tempfile::tempdir().unwrap();
-    let script = format!(
-        "#!/bin/sh\ncat <<'RECEIPT'\n{SUCCESS}RECEIPT\nprintf '\\377'\n"
-    );
+    let script = format!("#!/bin/sh\ncat <<'RECEIPT'\n{SUCCESS}RECEIPT\nprintf '\\377'\n");
     let result = run_script(root.path(), &script, &[]);
     assert_eq!(result.status.code(), Some(2), "{result:?}");
     assert!(String::from_utf8_lossy(&result.stderr).contains("not valid UTF-8"));
@@ -97,7 +103,9 @@ fn invalid_utf8_capture_never_produces_a_valid_machine_receipt() {
 #[test]
 fn ordinary_logging_does_not_break_a_complete_receipt() {
     let root = tempfile::tempdir().unwrap();
-    let source = print_receipt(&format!("ordinary guest log\n{SUCCESS}more diagnostic lines\n"));
+    let source = print_receipt(&format!(
+        "ordinary guest log\n{SUCCESS}more diagnostic lines\n"
+    ));
     let run = run_script(root.path(), &source, &[]);
     assert_eq!(run.status.code(), Some(0), "{run:?}");
 }
@@ -122,7 +130,10 @@ fn a_cleanly_exiting_parent_cannot_leave_a_late_descendant_writer() {
     let run = run_script(root.path(), &source, &[]);
     assert_eq!(run.status.code(), Some(0), "{run:?}");
     thread::sleep(Duration::from_millis(1200));
-    assert!(!root.path().join("late_writer").exists(), "unreaped guest descendant wrote after PASS");
+    assert!(
+        !root.path().join("late_writer").exists(),
+        "unreaped guest descendant wrote after PASS"
+    );
 }
 
 #[test]
@@ -132,5 +143,8 @@ fn timeout_cannot_leave_a_late_descendant_writer() {
     let run = run_script(root.path(), source, &["--timeout", "0.02"]);
     assert_eq!(run.status.code(), Some(1), "{run:?}");
     thread::sleep(Duration::from_millis(1200));
-    assert!(!root.path().join("late_timeout_writer").exists(), "timeout did not kill guest descendants");
+    assert!(
+        !root.path().join("late_timeout_writer").exists(),
+        "timeout did not kill guest descendants"
+    );
 }

@@ -7,14 +7,23 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 const V2: &str = "ORES_TEST_V2|RUN_BEGIN|2\nORES_TEST_V2|CASE_BEGIN|suite/async\nORES_TEST_V2|OPEN|suite/async|callback|cb\nORES_TEST_V2|OPEN|suite/async|task|task\nORES_TEST_V2|OPEN|suite/async|actor|actor\nORES_TEST_V2|OPEN|suite/async|await|aw\nORES_TEST_V2|CLOSE|suite/async|await|aw|ok\nORES_TEST_V2|CLOSE|suite/async|callback|cb|ok\nORES_TEST_V2|CLOSE|suite/async|task|task|ok\nORES_TEST_V2|CLOSE|suite/async|actor|actor|ok\nORES_TEST_V2|CASE_END|suite/async|PASS\nORES_TEST_V2|RUN_END|total=1|passed=1|failed=0|skipped=0|filtered=0\n";
-const V1: &str = "ORES_TEST|PASS|suite/sync\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n";
+const V1: &str =
+    "ORES_TEST|PASS|suite/sync\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n";
 
 fn invoke(root: &Path, receipt: &str, config: &str) -> Output {
     fs::create_dir_all(root.join("tests")).unwrap();
-    fs::write(root.join("tests/test_async.ores"), "/* synthetic fixture */").unwrap();
+    fs::write(
+        root.join("tests/test_async.ores"),
+        "/* synthetic fixture */",
+    )
+    .unwrap();
     fs::write(root.join("oreslang-test.toml"), config).unwrap();
     let guest = root.join("synthetic-guest");
-    fs::write(&guest, format!("#!/bin/sh\ncat <<'RECEIPT'\n{receipt}RECEIPT\n")).unwrap();
+    fs::write(
+        &guest,
+        format!("#!/bin/sh\ncat <<'RECEIPT'\n{receipt}RECEIPT\n"),
+    )
+    .unwrap();
     let mut permissions = fs::metadata(&guest).unwrap().permissions();
     permissions.set_mode(0o700);
     fs::set_permissions(&guest, permissions).unwrap();
@@ -56,7 +65,10 @@ fn legacy_remains_default_and_cannot_claim_v2() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(invoke(dir.path(), V1, "").status.code(), Some(0));
     assert_eq!(invoke(dir.path(), V2, "").status.code(), Some(1));
-    assert_eq!(invoke(dir.path(), &format!("{V1}{V2}"), "").status.code(), Some(1));
+    assert_eq!(
+        invoke(dir.path(), &format!("{V1}{V2}"), "").status.code(),
+        Some(1)
+    );
 }
 
 #[test]

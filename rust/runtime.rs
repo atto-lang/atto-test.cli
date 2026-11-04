@@ -442,9 +442,10 @@ struct Counts {
 fn test_receipt(output: &str) -> Result<Counts, String> {
     // Reject truncated and mixed-version machine records rather than
     // silently treating them as unrelated guest log output.
-    if output.lines().any(|line| {
-        line.starts_with("ORES_TEST") && !line.starts_with("ORES_TEST|")
-    }) {
+    if output
+        .lines()
+        .any(|line| line.starts_with("ORES_TEST") && !line.starts_with("ORES_TEST|"))
+    {
         return Err("malformed or mixed-version ORES_TEST record".into());
     }
     let mut summaries = output
@@ -1090,7 +1091,10 @@ mod tests {
             format!("ORES_TEST|PASS|suite/other\n{pass}{summary}"),
             format!("{pass}{summary}ORES_TEST|FAIL|late\n"),
         ] {
-            assert!(test_receipt(&malformed).is_err(), "accepted malformed v1 receipt: {malformed}");
+            assert!(
+                test_receipt(&malformed).is_err(),
+                "accepted malformed v1 receipt: {malformed}"
+            );
         }
     }
 
