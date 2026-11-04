@@ -155,18 +155,11 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
 }
 
 fn manifest(root: &Path) -> Result<toml::Table, String> {
-    let path = root.join("oreslang-test.toml");
-    match fs::symlink_metadata(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
-        Err(e) => Err(e.to_string()),
-        Ok(meta) => {
-            if !meta.is_file() || meta.file_type().is_symlink() {
-                return Err("unsafe test manifest file".into());
-            }
-            super::read_bounded_project(root, Path::new("oreslang-test.toml"))?
-                .parse::<toml::Table>()
-                .map_err(|e| format!("invalid test manifest: {e}"))
-        }
+    match super::test_manifest_name(root)? {
+        None => Ok(toml::Table::new()),
+        Some(name) => super::read_bounded_project(root, Path::new(name))?
+            .parse::<toml::Table>()
+            .map_err(|e| format!("invalid test manifest {name}: {e}")),
     }
 }
 
@@ -254,6 +247,8 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
         wrapper,
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang"),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang-test"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/atto"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/atto-test"),
     ];
     if candidate
         .as_ref()
@@ -512,8 +507,8 @@ fn is_native_test_path(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or("");
     return path.starts_with("tests")
-        && path.extension().is_some_and(|ext| ext == "ores")
-        && (base.starts_with("test_") || base.ends_with("_test.ores"));
+        && matches!(path.extension().and_then(|ext| ext.to_str()), Some("atto" | "ores"))
+        && (base.starts_with("test_") || base.ends_with("_test.atto") || base.ends_with("_test.ores"));
 }
 
 fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, String> {
@@ -547,7 +542,9 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
         let path = super::source_path(root, &name)?;
         let args = vec![core.clone(), path.to_string_lossy().into_owned()];
         let result = invoke(sanitize_command(&args, root)?, timeout, None, true)?;
-        if result.timed_out || result.code != Some(0) {
+        if result.timed_out || result.code != Some(0) || sanitizer_finding(&result.stderr)
+            || result.stderr.contains("FATAL: ThreadSanitizer:")
+        {
             failures += 1;
             eprintln!(
                 "FAIL {name}: timed_out={} exit={:?} {}",
@@ -735,11 +732,31 @@ fn corpus(
     Ok(cases)
 }
 
+fn sanitizer_finding(stderr: &str) -> bool {
+    stderr.lines().any(|line| {
+        line.contains("ERROR: AddressSanitizer:")
+            || line.contains("WARNING: ThreadSanitizer:")
+            || line.contains("SUMMARY: ThreadSanitizer:")
+            || line.contains("SUMMARY: UndefinedBehaviorSanitizer:")
+            || line.contains("LeakSanitizer: detected memory leaks")
+            || line.contains("runtime error:")
+    })
+}
+
 fn classify(result: &ProcessResult) -> Result<Option<i32>, String> {
     if result.timed_out || result.code.is_none() {
         return Err(
             "guest timed out or terminated abnormally; cannot classify fuzz failure".into(),
         );
+    }
+    if result.stderr.contains("FATAL: ThreadSanitizer:")
+        || result.stderr.contains("ThreadSanitizer: unexpected memory mapping")
+    {
+        return Err("ThreadSanitizer failed to initialize; no race result is available".into());
+    }
+    // Recoverable UBSan diagnostics can coexist with exit status zero.
+    if sanitizer_finding(&result.stderr) {
+        return Ok(Some(result.code.filter(|code| *code != 0).unwrap_or(86)));
     }
     if result.code == Some(0) {
         Ok(None)
@@ -756,7 +773,7 @@ fn candidate(
     project: &ProjectRoot,
 ) -> Result<Option<i32>, String> {
     project.verify_path(root)?;
-    let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), false)?;
+    let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), true)?;
     project.verify_path(root)?;
     classify(&result)
 }
@@ -993,7 +1010,7 @@ pub fn run(args: &[OsString]) -> i32 {
     match result {
         Ok(code) => code,
         Err(message) => {
-            eprintln!("oreslang test: {message}");
+            eprintln!("atto test: {message}");
             2
         }
     }

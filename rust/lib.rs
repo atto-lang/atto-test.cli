@@ -74,8 +74,10 @@ fn source_path(root: &Path, name: &str) -> Result<PathBuf, String> {
             return Err(format!("source symlink refused: {name}"));
         }
     }
-    if current.extension().is_none_or(|ext| ext != "ores") || !current.is_file() {
-        return Err(format!("expected regular .ores source file: {name}"));
+    if !matches!(current.extension().and_then(|ext| ext.to_str()), Some("atto" | "ores"))
+        || !current.is_file()
+    {
+        return Err(format!("expected regular .atto or legacy .ores source file: {name}"));
     }
     return Ok(current);
 }
@@ -123,7 +125,7 @@ fn discover(root: &Path) -> Result<Vec<String>, String> {
             }
             if kind.is_dir() {
                 pending.push((entry.path(), depth + 1));
-            } else if entry.path().extension().is_some_and(|ext| ext == "ores") {
+            } else if matches!(entry.path().extension().and_then(|ext| ext.to_str()), Some("atto" | "ores")) {
                 paths.push(
                     entry
                         .path()
@@ -143,6 +145,23 @@ fn discover(root: &Path) -> Result<Vec<String>, String> {
     }
     paths.sort();
     return Ok(paths);
+}
+
+fn test_manifest_name(root: &Path) -> Result<Option<&'static str>, String> {
+    fn present(root: &Path, name: &str) -> Result<bool, String> {
+        match fs::symlink_metadata(root.join(name)) {
+            Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => Ok(true),
+            Ok(_) => Err(format!("unsafe test manifest file: {name}")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("{name}: {e}")),
+        }
+    }
+    match (present(root, "atto-test.toml")?, present(root, "oreslang-test.toml")?) {
+        (true, true) => Err("ambiguous test manifests: remove one of atto-test.toml or oreslang-test.toml".into()),
+        (true, false) => Ok(Some("atto-test.toml")),
+        (false, true) => Ok(Some("oreslang-test.toml")),
+        (false, false) => Ok(None),
+    }
 }
 
 #[derive(Default)]
@@ -206,20 +225,11 @@ fn scan(args: &[OsString]) -> Result<(String, i32), String> {
     }
     // Parse configuration even with explicit files; malformed configuration
     // must not be laundered into a clean result by an unrelated CLI option.
-    let manifest = root.join("oreslang-test.toml");
-    let config = match fs::symlink_metadata(&manifest) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() {
-                return Err("source configuration symlink refused".into());
-            }
-            Some(
-                read_bounded_project(&root, Path::new("oreslang-test.toml"))?
-                    .parse::<toml::Table>()
-                    .map_err(|e| format!("invalid TOML: {e}"))?,
-            )
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.to_string()),
+    let config = match test_manifest_name(&root)? {
+        Some(name) => Some(read_bounded_project(&root, Path::new(name))?
+            .parse::<toml::Table>()
+            .map_err(|e| format!("invalid TOML in {name}: {e}"))?),
+        None => None,
     };
     if options.files.is_empty() {
         if let Some(value) = config.as_ref().and_then(|c| c.get("effects")) {
@@ -298,7 +308,7 @@ fn status(mut command: Command) -> i32 {
     match command.status() {
         Ok(status) => return status.code().unwrap_or(2),
         Err(error) => {
-            eprintln!("oreslang test: cannot launch legacy/core runner: {error}");
+            eprintln!("atto test: cannot launch legacy/core runner: {error}");
             return 2;
         }
     }
@@ -341,14 +351,14 @@ pub fn run(mut args: Vec<OsString>, core_launcher: bool) -> i32 {
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            r#"usage: oreslang test [--root DIR] [--effects [--effects-strict] [--file SOURCE]...]
-       oreslang test --audit [--audit-file SOURCE] [--fail-on SEVERITY] [--audit-format text|json]
-       oreslang test --security | --anti-patterns
-       oreslang test --fuzz [--fuzz-profile basic|security] [--seed N] [--cases N] [--timeout SECONDS]
-       oreslang test --race --trace OFFLINE.jsonl
-       oreslang test --race --logical --model MODEL.json [--max-schedules N]
-       oreslang test --deadlock --trace OFFLINE.jsonl
-       oreslang test --race --deadlock --trace OFFLINE.jsonl
+            r#"usage: atto test [--root DIR] [--effects [--effects-strict] [--file SOURCE]...]
+       atto test --audit [--audit-file SOURCE] [--fail-on SEVERITY] [--audit-format text|json]
+       atto test --security | --anti-patterns
+       atto test --fuzz [--fuzz-profile basic|security] [--seed N] [--cases N] [--timeout SECONDS]
+       atto test --race --trace OFFLINE.jsonl
+       atto test --race --logical --model MODEL.json [--max-schedules N]
+       atto test --deadlock --trace OFFLINE.jsonl
+       atto test --race --deadlock --trace OFFLINE.jsonl
 
 All current CLI engines are Rust-only; no Python fallback.
 Uninstrumented runtime --race/--deadlock are inconclusive (exit 2).
@@ -369,7 +379,7 @@ Exit 0: scoped observed pass; 1: finding/failure; 2: invalid/inconclusive."#
                 return code;
             }
             Err(error) => {
-                eprintln!("oreslang test: {error}");
+                eprintln!("atto test: {error}");
                 return 2;
             }
         }

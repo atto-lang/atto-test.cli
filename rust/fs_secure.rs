@@ -389,7 +389,7 @@ pub fn discover_sources(
             if kind.is_dir() {
                 let child = step_dir(&directory, &name, false)?;
                 pending.push((child, child_relative, depth + 1));
-            } else if kind.is_file() && child_relative.extension().is_some_and(|ext| ext == "ores")
+            } else if kind.is_file() && matches!(child_relative.extension().and_then(|ext| ext.to_str()), Some("atto" | "ores"))
             {
                 let fd = opened(unsafe {
                     openat(
