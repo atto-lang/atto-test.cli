@@ -68,10 +68,13 @@ distinct entries) cannot become a reported fuzz defect or a saved
 reproducer. This is explicit per-project policy; normal nonzero exits
 remain defects by default. Sanitizer findings retain priority over
 configured exit codes, so an ASan/UBSan/TSan error is still a failure
-even when the child exits 2. Invalid or duplicate policy codes fail
-before executing the target. The LLVM native stdin adapter reserves
-exit 2 for input budget/IO failure and exit 77 for a reproduced
-guest-versus-oracle mismatch.
+even when the child exits 2. An inconclusive status observed for the initial
+case or mandatory replay makes the fuzz run inconclusive (exit 2). During
+minimization, however, an inconclusive reduced input simply does not reproduce
+the already-confirmed defect; it cannot erase that defect or turn it green.
+Invalid or duplicate policy codes fail before executing the target. The LLVM
+native stdin adapter reserves exit 2 for input budget/IO failure and exit 77
+for a reproduced guest-versus-oracle mismatch.
 
 
 Guest processes receive a minimal environment; unrelated CI secrets are not
