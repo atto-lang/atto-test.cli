@@ -791,6 +791,13 @@ enum Failure {
     Sanitizer(&'static str),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateOutcome {
+    Clean,
+    Failure(Failure),
+    Inconclusive(i32),
+}
+
 fn sanitizer_finding(stderr: &str) -> Option<&'static str> {
     // Exact emitted prefixes minimize false positives while accepting
     // recoverable UBSan output and sanitizer-triggered abnormal termination.
@@ -838,19 +845,17 @@ fn candidate(
     bytes: &[u8],
     project: &ProjectRoot,
     inconclusive_exits: &BTreeSet<i32>,
-) -> Result<Option<Failure>, String> {
+) -> Result<CandidateOutcome, String> {
     project.verify_path(root)?;
     let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), true)?;
     project.verify_path(root)?;
-    let verdict = classify(&result)?;
-    if let Some(Failure::Exit(code)) = verdict {
-        if inconclusive_exits.contains(&code) {
-            return Err(format!(
-                "configured fuzz target exit {code} is inconclusive; no reproducible guest defect was established"
-            ));
+    match classify(&result)? {
+        Some(Failure::Exit(code)) if inconclusive_exits.contains(&code) => {
+            Ok(CandidateOutcome::Inconclusive(code))
         }
+        Some(failure) => Ok(CandidateOutcome::Failure(failure)),
+        None => Ok(CandidateOutcome::Clean),
     }
-    Ok(verdict)
 }
 
 fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<PathBuf, String> {
@@ -1002,7 +1007,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             }
             bytes
         };
-        if let Some(code) = candidate(
+        let code = match candidate(
             &cmd,
             root,
             settings.timeout,
@@ -1010,6 +1015,20 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             &project,
             &inconclusive_exits,
         )? {
+            CandidateOutcome::Clean => {
+                retain_sample(&mut samples, &mut retained_bytes, case);
+                continue;
+            }
+            CandidateOutcome::Inconclusive(status) => {
+                eprintln!(
+                    "FUZZ INCONCLUSIVE seed={} iteration={i}: configured target exit {status}",
+                    settings.seed
+                );
+                return Ok(2);
+            }
+            CandidateOutcome::Failure(failure) => failure,
+        };
+        {
             for _ in 0..2 {
                 if candidate(
                     &cmd,
@@ -1018,7 +1037,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                     &case,
                     &project,
                     &inconclusive_exits,
-                )? != Some(code)
+                )? != CandidateOutcome::Failure(code)
                 {
                     eprintln!(
                         "FUZZ FLAKY seed={} iteration={i}: no stable reproduction",
@@ -1047,7 +1066,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                         &reduced,
                         &project,
                         &inconclusive_exits,
-                    )? == Some(code)
+                    )? == CandidateOutcome::Failure(code)
                     {
                         shrunk = reduced;
                         granularity = 2;
@@ -1070,7 +1089,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                     &shrunk,
                     &project,
                     &inconclusive_exits,
-                )? != Some(code)
+                )? != CandidateOutcome::Failure(code)
                 {
                     eprintln!("FUZZ FLAKY after minimization; preserving original failure");
                     shrunk = case.clone();
