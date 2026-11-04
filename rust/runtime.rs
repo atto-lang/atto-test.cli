@@ -837,11 +837,20 @@ fn candidate(
     timeout: Duration,
     bytes: &[u8],
     project: &ProjectRoot,
+    inconclusive_exits: &BTreeSet<i32>,
 ) -> Result<Option<Failure>, String> {
     project.verify_path(root)?;
     let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), true)?;
     project.verify_path(root)?;
-    classify(&result)
+    let verdict = classify(&result)?;
+    if let Some(Failure::Exit(code)) = verdict {
+        if inconclusive_exits.contains(&code) {
+            return Err(format!(
+                "configured fuzz target exit {code} is inconclusive; no reproducible guest defect was established"
+            ));
+        }
+    }
+    Ok(verdict)
 }
 
 fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<PathBuf, String> {
@@ -900,9 +909,33 @@ fn retain_sample(samples: &mut Vec<Vec<u8>>, retained_bytes: &mut usize, case: V
     return true;
 }
 
+// This opt-in list is for native fuzz adapters that reserve exit statuses
+// for infrastructure failures (e.g., LLVM adapter exit 2 on input overflow).
+// Never suppress ASan/UBSan/TSan: classify() processes sanitizer output FIRST.
+fn fuzz_inconclusive_exits(params: &toml::Table) -> Result<BTreeSet<i32>, String> {
+    let Some(raw) = params.get("inconclusive_exits") else {
+        return Ok(BTreeSet::new());
+    };
+    let entries = raw.as_array().ok_or("fuzz.inconclusive_exits must be an integer array")?;
+    if entries.is_empty() || entries.len() > 16 {
+        return Err("fuzz.inconclusive_exits requires 1..16 codes".into());
+    }
+    let mut codes = BTreeSet::new();
+    for entry in entries {
+        let code = entry
+            .as_integer()
+            .ok_or("fuzz.inconclusive_exits requires integer status codes")?;
+        if !(1..=255).contains(&code) || !codes.insert(code as i32) {
+            return Err("fuzz.inconclusive_exits requires unique codes 1..255".into());
+        }
+    }
+    Ok(codes)
+}
+
 fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, String> {
     let params = section(config, "fuzz")?.ok_or("missing [fuzz] section")?;
     let cmd = commands(params, "command")?;
+    let inconclusive_exits = fuzz_inconclusive_exits(params)?;
     let max_bytes = match params.get("max_bytes") {
         Some(v) => v.as_integer().ok_or("invalid fuzz.max_bytes")?,
         None => 256,
@@ -967,9 +1000,9 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             }
             bytes
         };
-        if let Some(code) = candidate(&cmd, root, settings.timeout, &case, &project)? {
+        if let Some(code) = candidate(&cmd, root, settings.timeout, &case, &project, &inconclusive_exits)? {
             for _ in 0..2 {
-                if candidate(&cmd, root, settings.timeout, &case, &project)? != Some(code) {
+                if candidate(&cmd, root, settings.timeout, &case, &project, &inconclusive_exits)? != Some(code) {
                     eprintln!(
                         "FUZZ FLAKY seed={} iteration={i}: no stable reproduction",
                         settings.seed
@@ -990,7 +1023,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                     budget -= 1;
                     let mut reduced = shrunk[..start].to_vec();
                     reduced.extend_from_slice(&shrunk[(start + chunk).min(shrunk.len())..]);
-                    if candidate(&cmd, root, settings.timeout, &reduced, &project)? == Some(code) {
+                    if candidate(&cmd, root, settings.timeout, &reduced, &project, &inconclusive_exits)? == Some(code) {
                         shrunk = reduced;
                         granularity = 2;
                         shorter = true;
@@ -1005,7 +1038,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                 }
             }
             for _ in 0..2 {
-                if candidate(&cmd, root, settings.timeout, &shrunk, &project)? != Some(code) {
+                if candidate(&cmd, root, settings.timeout, &shrunk, &project, &inconclusive_exits)? != Some(code) {
                     eprintln!("FUZZ FLAKY after minimization; preserving original failure");
                     shrunk = case.clone();
                     break;
