@@ -31,9 +31,22 @@ pub struct Report {
     pub resumed: usize,
     pub retired: usize,
 }
-enum Phase { Running, Waiting(String), Completed, Cancelled, Retired }
-struct Task { actor: String, phase: Phase }
-struct Wake { task: String, ready: bool, used: bool }
+enum Phase {
+    Running,
+    Waiting(String),
+    Completed,
+    Cancelled,
+    Retired,
+}
+struct Task {
+    actor: String,
+    phase: Phase,
+}
+struct Wake {
+    task: String,
+    ready: bool,
+    used: bool,
+}
 fn check_id(id: &str) -> Result<(), String> {
     if id.trim().is_empty() || id.len() > 128 || id.chars().any(char::is_control) {
         return Err("empty, oversized or control-character identity".into());
@@ -41,7 +54,11 @@ fn check_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 fn budget(n: usize) -> Result<(), String> {
-    if n >= MAX_OBJECTS { Err("identity budget exceeded".into()) } else { Ok(()) }
+    if n >= MAX_OBJECTS {
+        Err("identity budget exceeded".into())
+    } else {
+        Ok(())
+    }
 }
 /// Requires a complete, leak-free trace and at least one observable operation.
 /// Identity strings must include the actor incarnation/generation. Tokens are one-use.
@@ -53,8 +70,15 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
     let mut tasks = BTreeMap::<String, Task>::new();
     let mut callbacks = BTreeMap::<String, (String, bool)>::new();
     let mut wakes = BTreeMap::<String, Wake>::new();
-    let mut out = Report { actors: 0, tasks: 0, callbacks: 0,
-        fired: 0, suspended: 0, resumed: 0, retired: 0 };
+    let mut out = Report {
+        actors: 0,
+        tasks: 0,
+        callbacks: 0,
+        fired: 0,
+        suspended: 0,
+        resumed: 0,
+        retired: 0,
+    };
     for (i, event) in events.iter().enumerate() {
         let result: Result<(), String> = (|| {
             match event {
@@ -70,10 +94,16 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
                     if actors.get(id) != Some(&true) {
                         return Err("stop of absent/stopped actor".into());
                     }
-                    if tasks.values().any(|t| t.actor == *id && !matches!(&t.phase, Phase::Retired)) {
+                    if tasks
+                        .values()
+                        .any(|t| t.actor == *id && !matches!(&t.phase, Phase::Retired))
+                    {
                         return Err("actor stopped before physical task retirement".into());
                     }
-                    if callbacks.values().any(|(owner, active)| owner == id && *active) {
+                    if callbacks
+                        .values()
+                        .any(|(owner, active)| owner == id && *active)
+                    {
                         return Err("actor stopped with live callback".into());
                     }
                     actors.insert(id.clone(), false);
@@ -84,7 +114,16 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
                         return Err("task owner absent".into());
                     }
                     budget(tasks.len())?;
-                    if tasks.insert(task.clone(), Task { actor: actor.clone(), phase: Phase::Running }).is_some() {
+                    if tasks
+                        .insert(
+                            task.clone(),
+                            Task {
+                                actor: actor.clone(),
+                                phase: Phase::Running,
+                            },
+                        )
+                        .is_some()
+                    {
                         return Err("task ID reused".into());
                     }
                     out.tasks += 1;
@@ -121,7 +160,10 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
                         return Err("callback owner absent".into());
                     }
                     budget(callbacks.len())?;
-                    if callbacks.insert(callback.clone(), (actor.clone(), true)).is_some() {
+                    if callbacks
+                        .insert(callback.clone(), (actor.clone(), true))
+                        .is_some()
+                    {
                         return Err("callback ID reused".into());
                     }
                     out.callbacks += 1;
@@ -135,7 +177,9 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
                 }
                 Event::UnregisterCallback(id) => {
                     let (_, live) = callbacks.get_mut(id).ok_or("unregistered callback")?;
-                    if !*live { return Err("duplicate callback cleanup".into()); }
+                    if !*live {
+                        return Err("duplicate callback cleanup".into());
+                    }
                     *live = false;
                 }
                 Event::Suspend { task, wake } => {
@@ -145,7 +189,17 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
                         return Err("double await or await after terminal".into());
                     }
                     budget(wakes.len())?;
-                    if wakes.insert(wake.clone(), Wake { task: task.clone(), ready: false, used: false }).is_some() {
+                    if wakes
+                        .insert(
+                            wake.clone(),
+                            Wake {
+                                task: task.clone(),
+                                ready: false,
+                                used: false,
+                            },
+                        )
+                        .is_some()
+                    {
                         return Err("reused wake token/ABA".into());
                     }
                     t.phase = Phase::Waiting(wake.clone());
@@ -153,7 +207,9 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
                 }
                 Event::Ready(id) => {
                     let wake = wakes.get_mut(id).ok_or("unregistered wake")?;
-                    if wake.ready { return Err("duplicate wake readiness".into()); }
+                    if wake.ready {
+                        return Err("duplicate wake readiness".into());
+                    }
                     // A late completion after cancellation is permitted;
                     // a resumed cancelled task is never permitted.
                     wake.ready = true;
@@ -181,7 +237,8 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
     }
     if actors.values().any(|live| *live)
         || callbacks.values().any(|(_, live)| *live)
-        || tasks.values().any(|t| !matches!(&t.phase, Phase::Retired)) {
+        || tasks.values().any(|t| !matches!(&t.phase, Phase::Retired))
+    {
         return Err("incomplete lifecycle: actor, task or callback remains live".into());
     }
     Ok(out)
@@ -190,62 +247,132 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn a(id: &str) -> Event { Event::SpawnActor(id.into()) }
-    fn z(id: &str) -> Event { Event::StopActor(id.into()) }
+    fn a(id: &str) -> Event {
+        Event::SpawnActor(id.into())
+    }
+    fn z(id: &str) -> Event {
+        Event::StopActor(id.into())
+    }
     fn t(actor: &str, task: &str) -> Event {
-        Event::SpawnTask { actor: actor.into(), task: task.into() }
+        Event::SpawnTask {
+            actor: actor.into(),
+            task: task.into(),
+        }
     }
     fn s(task: &str, wake: &str) -> Event {
-        Event::Suspend { task: task.into(), wake: wake.into() }
+        Event::Suspend {
+            task: task.into(),
+            wake: wake.into(),
+        }
     }
     fn r(task: &str, wake: &str) -> Event {
-        Event::Resume { task: task.into(), wake: wake.into() }
+        Event::Resume {
+            task: task.into(),
+            wake: wake.into(),
+        }
     }
     #[test]
     fn two_actors_callback_and_await_interleave_without_carrier_parking() {
-        let trace = [a("actor-a#1"), a("actor-b#1"), t("actor-a#1", "task-1"),
+        let trace = [
+            a("actor-a#1"),
+            a("actor-b#1"),
+            t("actor-a#1", "task-1"),
             s("task-1", "wake-1"),
-            Event::RegisterCallback { actor: "actor-b#1".into(), callback: "cb".into() },
-            Event::FireCallback("cb".into()), Event::UnregisterCallback("cb".into()),
-            z("actor-b#1"), Event::Ready("wake-1".into()), r("task-1", "wake-1"),
-            Event::FinishTask("task-1".into()), Event::RetireTask("task-1".into()),
-            z("actor-a#1")];
+            Event::RegisterCallback {
+                actor: "actor-b#1".into(),
+                callback: "cb".into(),
+            },
+            Event::FireCallback("cb".into()),
+            Event::UnregisterCallback("cb".into()),
+            z("actor-b#1"),
+            Event::Ready("wake-1".into()),
+            r("task-1", "wake-1"),
+            Event::FinishTask("task-1".into()),
+            Event::RetireTask("task-1".into()),
+            z("actor-a#1"),
+        ];
         assert_eq!(analyze(&trace).unwrap().retired, 1);
     }
     #[test]
     fn cancellation_is_not_physical_task_retirement() {
-        let pending = [a("a"), t("a", "t"), s("t", "w"),
-            Event::CancelTask("t".into()), z("a")];
+        let pending = [
+            a("a"),
+            t("a", "t"),
+            s("t", "w"),
+            Event::CancelTask("t".into()),
+            z("a"),
+        ];
         assert!(analyze(&pending).is_err());
-        let complete = [a("a"), t("a", "t"), s("t", "w"),
-            Event::CancelTask("t".into()), Event::Ready("w".into()),
-            Event::RetireTask("t".into()), z("a")];
+        let complete = [
+            a("a"),
+            t("a", "t"),
+            s("t", "w"),
+            Event::CancelTask("t".into()),
+            Event::Ready("w".into()),
+            Event::RetireTask("t".into()),
+            z("a"),
+        ];
         assert!(analyze(&complete).is_ok());
-        let stale = [a("a"), t("a", "t"), s("t", "w"),
-            Event::CancelTask("t".into()), Event::Ready("w".into()),
-            r("t", "w"), Event::RetireTask("t".into()), z("a")];
+        let stale = [
+            a("a"),
+            t("a", "t"),
+            s("t", "w"),
+            Event::CancelTask("t".into()),
+            Event::Ready("w".into()),
+            r("t", "w"),
+            Event::RetireTask("t".into()),
+            z("a"),
+        ];
         assert!(analyze(&stale).is_err());
     }
     #[test]
     fn callback_lifetime_failures_are_not_green() {
         assert!(analyze(&[a("a"), Event::FireCallback("cb".into()), z("a")]).is_err());
-        assert!(analyze(&[a("a"), Event::RegisterCallback {
-            actor: "a".into(), callback: "cb".into()
-        }, z("a")]).is_err());
-        assert!(analyze(&[a("a"), Event::RegisterCallback {
-            actor: "a".into(), callback: "cb".into()
-        }, Event::UnregisterCallback("cb".into()),
-        Event::FireCallback("cb".into()), z("a")]).is_err());
+        assert!(analyze(&[
+            a("a"),
+            Event::RegisterCallback {
+                actor: "a".into(),
+                callback: "cb".into()
+            },
+            z("a")
+        ])
+        .is_err());
+        assert!(analyze(&[
+            a("a"),
+            Event::RegisterCallback {
+                actor: "a".into(),
+                callback: "cb".into()
+            },
+            Event::UnregisterCallback("cb".into()),
+            Event::FireCallback("cb".into()),
+            z("a")
+        ])
+        .is_err());
     }
     #[test]
     fn early_duplicate_and_replayed_wake_are_rejected() {
-        assert!(analyze(&[a("a"), t("a", "t"), s("t", "w"),
-            r("t", "w"), Event::FinishTask("t".into()),
-            Event::RetireTask("t".into()), z("a")]).is_err());
-        assert!(analyze(&[a("a"), t("a", "t"), s("t", "w"),
-            Event::Ready("w".into()), Event::Ready("w".into()),
-            r("t", "w"), Event::FinishTask("t".into()),
-            Event::RetireTask("t".into()), z("a")]).is_err());
+        assert!(analyze(&[
+            a("a"),
+            t("a", "t"),
+            s("t", "w"),
+            r("t", "w"),
+            Event::FinishTask("t".into()),
+            Event::RetireTask("t".into()),
+            z("a")
+        ])
+        .is_err());
+        assert!(analyze(&[
+            a("a"),
+            t("a", "t"),
+            s("t", "w"),
+            Event::Ready("w".into()),
+            Event::Ready("w".into()),
+            r("t", "w"),
+            Event::FinishTask("t".into()),
+            Event::RetireTask("t".into()),
+            z("a")
+        ])
+        .is_err());
     }
     #[test]
     fn empty_partial_and_reused_actor_id_fail_closed() {

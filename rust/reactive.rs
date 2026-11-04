@@ -182,7 +182,6 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
     })
 }
 
-
 /// Strict completion gate for a captured observable run.
 ///
 /// `analyze` intentionally permits partial traces for interactive inspection.
@@ -343,18 +342,18 @@ mod tests {
     #[test]
     fn complete_trace_gate_rejects_empty_and_unfinished_observers() {
         assert!(analyze_complete(&[]).is_err());
-        assert_eq!(analyze(&[s("x", "src", SourceMode::Cold)]).unwrap().active, 1);
+        assert_eq!(
+            analyze(&[s("x", "src", SourceMode::Cold)]).unwrap().active,
+            1
+        );
         assert!(analyze_complete(&[s("x", "src", SourceMode::Cold)]).is_err());
-        assert!(analyze_complete(&[
-            s("x", "src", SourceMode::Cold),
-            req("x", 1),
-            next("x")
-        ]).is_err());
-        assert!(analyze_complete(&[
-            s("x", "src", SourceMode::Cold),
-            complete("x"),
-            dispose("x")
-        ]).is_ok());
+        assert!(
+            analyze_complete(&[s("x", "src", SourceMode::Cold), req("x", 1), next("x")]).is_err()
+        );
+        assert!(
+            analyze_complete(&[s("x", "src", SourceMode::Cold), complete("x"), dispose("x")])
+                .is_ok()
+        );
     }
 
     #[test]
@@ -362,7 +361,10 @@ mod tests {
         let partial = [
             s("a", "cold", SourceMode::Cold),
             s("b", "cold", SourceMode::Cold),
-            req("a", 1), next("a"), complete("a"), dispose("a"),
+            req("a", 1),
+            next("a"),
+            complete("a"),
+            dispose("a"),
         ];
         assert_eq!(analyze(&partial).unwrap().active, 1);
         assert!(analyze_complete(&partial).is_err());
@@ -370,5 +372,4 @@ mod tests {
         finished.extend([complete("b"), dispose("b")]);
         assert_eq!(analyze_complete(&finished).unwrap().active, 0);
     }
-
 }
