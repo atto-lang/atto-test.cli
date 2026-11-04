@@ -256,7 +256,10 @@ fn fuzz_shrinking_does_not_erase_a_confirmed_defect_when_reduced_input_is_inconc
     let target = guest(
         root.path(),
         "native-adapter",
-        "#!/bin/sh\nbytes=$(wc -c | tr -d ' ')\nif [ \"$bytes\" -eq 0 ]; then exit 2; fi\nexit 77\n",
+        // The default first case is empty. Admit that one as clean, then
+        // make all subsequent empty reductions inconclusive. The second
+        // seed (one NUL byte) is a stable real defect and must be saved.
+        "#!/bin/sh\nbytes=$(wc -c | tr -d ' ')\nif [ \"$bytes\" -eq 0 ]; then\n  if [ ! -f .empty-seen ]; then : > .empty-seen; exit 0; fi\n  exit 2\nfi\nexit 77\n",
     );
     fs::write(
         root.path().join("atto-test.toml"),
@@ -270,7 +273,7 @@ fn fuzz_shrinking_does_not_erase_a_confirmed_defect_when_reduced_input_is_inconc
     let report = Command::new(env!("CARGO_BIN_EXE_atto-test"))
         .arg("--root")
         .arg(root.path())
-        .args(["--fuzz", "--seed", "1729", "--cases", "1"])
+        .args(["--fuzz", "--seed", "1729", "--cases", "2"])
         .output()
         .unwrap();
 
@@ -280,6 +283,12 @@ fn fuzz_shrinking_does_not_erase_a_confirmed_defect_when_reduced_input_is_inconc
     assert!(stdout.contains("finding=Exit(77)"), "{report:?}");
     let failures = root.path().join(".oreslang-test/failures");
     assert!(failures.is_dir(), "confirmed defect must retain a reproducer");
+    let saved: Vec<_> = fs::read_dir(&failures)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(saved.len(), 1, "unexpected reproducer cardinality");
+    assert_eq!(fs::read(&saved[0]).unwrap(), b"\0");
 }
 
 #[cfg(unix)]
