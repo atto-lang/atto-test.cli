@@ -508,7 +508,9 @@ fn is_native_test_path(path: &Path) -> bool {
         .unwrap_or("");
     return path.starts_with("tests")
         && matches!(path.extension().and_then(|ext| ext.to_str()), Some("atto" | "ores"))
-        && (base.starts_with("test_") || base.ends_with("_test.atto") || base.ends_with("_test.ores"));
+        && (base.starts_with("test_")
+            || base.ends_with("_test.atto")
+            || base.ends_with("_test.ores"));
 }
 
 fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, String> {
@@ -545,7 +547,10 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
         if result.stderr.contains("FATAL: ThreadSanitizer:") {
             return Err("ThreadSanitizer initialization failed; native run inconclusive".into());
         }
-        if result.timed_out || result.code != Some(0) || sanitizer_finding(&result.stderr).is_some() {
+        if result.timed_out
+            || result.code != Some(0)
+            || sanitizer_finding(&result.stderr).is_some()
+        {
             failures += 1;
             eprintln!(
                 "FAIL {name}: timed_out={} exit={:?} {}",
