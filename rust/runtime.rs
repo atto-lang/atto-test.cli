@@ -155,18 +155,11 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
 }
 
 fn manifest(root: &Path) -> Result<toml::Table, String> {
-    let path = root.join("oreslang-test.toml");
-    match fs::symlink_metadata(&path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
-        Err(e) => Err(e.to_string()),
-        Ok(meta) => {
-            if !meta.is_file() || meta.file_type().is_symlink() {
-                return Err("unsafe test manifest file".into());
-            }
-            super::read_bounded_project(root, Path::new("oreslang-test.toml"))?
-                .parse::<toml::Table>()
-                .map_err(|e| format!("invalid test manifest: {e}"))
-        }
+    match super::test_manifest_name(root)? {
+        None => Ok(toml::Table::new()),
+        Some(name) => super::read_bounded_project(root, Path::new(name))?
+            .parse::<toml::Table>()
+            .map_err(|e| format!("invalid test manifest {name}: {e}")),
     }
 }
 
@@ -254,6 +247,8 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
         wrapper,
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang"),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang-test"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/atto"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/atto-test"),
     ];
     if candidate
         .as_ref()
@@ -512,8 +507,10 @@ fn is_native_test_path(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or("");
     return path.starts_with("tests")
-        && path.extension().is_some_and(|ext| ext == "ores")
-        && (base.starts_with("test_") || base.ends_with("_test.ores"));
+        && matches!(path.extension().and_then(|ext| ext.to_str()), Some("atto" | "ores"))
+        && (base.starts_with("test_")
+            || base.ends_with("_test.atto")
+            || base.ends_with("_test.ores"));
 }
 
 fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, String> {
@@ -547,7 +544,13 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
         let path = super::source_path(root, &name)?;
         let args = vec![core.clone(), path.to_string_lossy().into_owned()];
         let result = invoke(sanitize_command(&args, root)?, timeout, None, true)?;
-        if result.timed_out || result.code != Some(0) {
+        if result.stderr.contains("FATAL: ThreadSanitizer:") {
+            return Err("ThreadSanitizer initialization failed; native run inconclusive".into());
+        }
+        if result.timed_out
+            || result.code != Some(0)
+            || sanitizer_finding(&result.stderr).is_some()
+        {
             failures += 1;
             eprintln!(
                 "FAIL {name}: timed_out={} exit={:?} {}",
@@ -735,16 +738,49 @@ fn corpus(
     Ok(cases)
 }
 
-fn classify(result: &ProcessResult) -> Result<Option<i32>, String> {
-    if result.timed_out || result.code.is_none() {
-        return Err(
-            "guest timed out or terminated abnormally; cannot classify fuzz failure".into(),
-        );
-    }
-    if result.code == Some(0) {
-        Ok(None)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failure {
+    Exit(i32),
+    Sanitizer(&'static str),
+}
+
+fn sanitizer_finding(stderr: &str) -> Option<&'static str> {
+    // Exact emitted prefixes minimize false positives while accepting
+    // recoverable UBSan output and sanitizer-triggered abnormal termination.
+    if stderr.contains("ERROR: AddressSanitizer:") {
+        Some("ASan")
+    } else if stderr.contains("LeakSanitizer: detected memory leaks") {
+        Some("LSan")
+    } else if stderr.contains("WARNING: ThreadSanitizer:")
+        || stderr.contains("SUMMARY: ThreadSanitizer:")
+    {
+        Some("TSan")
+    } else if stderr.contains("SUMMARY: UndefinedBehaviorSanitizer:")
+        || stderr.contains("runtime error:")
+    {
+        Some("UBSan")
     } else {
-        Ok(result.code)
+        None
+    }
+}
+
+fn classify(result: &ProcessResult) -> Result<Option<Failure>, String> {
+    if result.timed_out {
+        return Err("guest timed out; cannot classify fuzz failure".into());
+    }
+    if result.stderr.contains("FATAL: ThreadSanitizer:")
+        || result.stderr.contains("ThreadSanitizer: unexpected memory mapping")
+    {
+        return Err("ThreadSanitizer failed to initialize; no race result is available".into());
+    }
+    // A sanitizer can abort via signal, leaving no numeric exit code.
+    if let Some(kind) = sanitizer_finding(&result.stderr) {
+        return Ok(Some(Failure::Sanitizer(kind)));
+    }
+    match result.code {
+        Some(0) => Ok(None),
+        Some(code) => Ok(Some(Failure::Exit(code))),
+        None => Err("guest terminated abnormally without a sanitizer diagnostic".into()),
     }
 }
 
@@ -754,9 +790,9 @@ fn candidate(
     timeout: Duration,
     bytes: &[u8],
     project: &ProjectRoot,
-) -> Result<Option<i32>, String> {
+) -> Result<Option<Failure>, String> {
     project.verify_path(root)?;
-    let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), false)?;
+    let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), true)?;
     project.verify_path(root)?;
     classify(&result)
 }
@@ -930,7 +966,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             }
             let saved = write_failure(root, &shrunk, &project)?;
             println!(
-                "FUZZ FAILURE seed={} iteration={i} exit={code} initial={} minimized={} path={}",
+                "FUZZ FAILURE seed={} iteration={i} finding={code:?} initial={} minimized={} path={}",
                 settings.seed,
                 case.len(),
                 shrunk.len(),
@@ -993,7 +1029,7 @@ pub fn run(args: &[OsString]) -> i32 {
     match result {
         Ok(code) => code,
         Err(message) => {
-            eprintln!("oreslang test: {message}");
+            eprintln!("atto test: {message}");
             2
         }
     }
@@ -1002,6 +1038,32 @@ pub fn run(args: &[OsString]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitizer_verdicts_survive_signal_abort_and_reduction_cannot_change_failure_kind() {
+        let output = ProcessResult {
+            code: None,
+            timed_out: false,
+            output: String::new(),
+            stderr: "ERROR: AddressSanitizer: heap-use-after-free".into(),
+        };
+        assert_eq!(classify(&output), Ok(Some(Failure::Sanitizer("ASan"))));
+        let exit = ProcessResult {
+            code: Some(86),
+            timed_out: false,
+            output: String::new(),
+            stderr: String::new(),
+        };
+        assert_eq!(classify(&exit), Ok(Some(Failure::Exit(86))));
+        assert_ne!(classify(&output), classify(&exit));
+        let init = ProcessResult {
+            code: Some(66),
+            timed_out: false,
+            output: String::new(),
+            stderr: "FATAL: ThreadSanitizer: unexpected memory mapping".into(),
+        };
+        assert!(classify(&init).is_err());
+    }
 
     #[test]
     fn machine_receipts_require_executed_cases() {

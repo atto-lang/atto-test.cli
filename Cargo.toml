@@ -18,6 +18,14 @@ path = "rust/bin/oreslang.rs"
 name = "oreslang-test"
 path = "rust/bin/oreslang-test.rs"
 
+[[bin]]
+name = "atto"
+path = "rust/bin/atto.rs"
+
+[[bin]]
+name = "atto-test"
+path = "rust/bin/atto-test.rs"
+
 [lib]
 path = "rust/lib.rs"
 

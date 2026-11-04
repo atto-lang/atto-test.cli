@@ -1,8 +1,8 @@
-# Oreslang Test CLI (Rust)
+# AttoLang Test CLI (Rust)
 
-All public Oreslang test CLI entrypoints and their implemented engines are
+All public AttoLang test CLI entrypoints and their implemented engines are
 native Rust 1.85+. There is **no Python launcher or Python subprocess**.
-Use the two Cargo binaries:
+Use `atto` / `atto-test` (canonical) or the preserved `oreslang` / `oreslang-test` aliases:
 
 - oreslang: delegates non-test commands to the real Oreslang executable
   (ORESLANG_BIN), routes oreslang test to this Rust implementation.
@@ -16,13 +16,13 @@ cargo install --path . --locked.
 
 ## Supported commands
 
-    oreslang test
-    oreslang test --fuzz --seed 42 --cases 2000 --timeout 5
-    oreslang test --race --trace tests/traces/ordered.jsonl
-    oreslang test --audit --fail-on high --audit-format json
-    oreslang test --security --audit-file src/server.ores
-    oreslang test --anti-patterns --fail-on low
-    oreslang test --effects --effects-strict --file src/server.ores
+    atto test
+    atto test --fuzz --seed 42 --cases 2000 --timeout 5
+    atto test --race --trace tests/traces/ordered.jsonl
+    atto test --audit --fail-on high --audit-format json
+    atto test --security --audit-file src/server.ores
+    atto test --anti-patterns --fail-on low
+    atto test --effects --effects-strict --file src/server.ores
 
 **Native Oreslang tests:** discovers tests/**/test_*.ores and
 tests/**/*_test.ores, or [native].files in oreslang-test.toml.
@@ -115,9 +115,9 @@ See docs/exception-effects.md.
 
 ## Rust logical schedule models
 
-    oreslang test --race --logical --model tests/models/atomic-update.json
-    oreslang test --race --logical --model tests/models/lost-update.json
-    oreslang test --race --logical --model tests/models/atomic-update.json --max-schedules 1
+    atto test --race --logical --model tests/models/atomic-update.json
+    atto test --race --logical --model tests/models/lost-update.json
+    atto test --race --logical --model tests/models/atomic-update.json --max-schedules 1
 
 This evaluates a **host-provided finite actor-turn model**, not compiled
 Oreslang source. Model JSON declares `initial` and `expected` signed 64-bit
@@ -192,3 +192,20 @@ executed steps provide no compiler or regression-test evidence.
 
 No new Oreslang test CLI implementation should be written in Python.
 
+
+## AttoLang migration and native sanitizers
+
+Use `atto test --fuzz` for bounded black-box input mutation and `atto test --race
+--trace path.jsonl` for explicitly offline race analysis. The live `atto test
+--race` mode still returns inconclusive (2) without authenticated runtime
+instrumentation. Canonical source files are `.atto` and the project manifest
+is `atto-test.toml`; legacy `.ores` and `oreslang-test.toml` are accepted.
+Two manifests in the same project root are rejected, not silently mixed.
+
+Fuzz now retains bounded child stderr/stdout and treats observed ASan,
+LeakSanitizer, UBSan and TSan diagnostic text as a reproducible failure, even
+when a recoverable sanitizer exits 0. An unsupported TSan runtime is
+inconclusive (2). These reports are **observations**, not evidence that the
+guest executable was compiled with sanitizers, that all code was instrumented,
+or that AttoLang actors are data-race free. Exact-head sanitizer builds and
+native executed steps remain required.
