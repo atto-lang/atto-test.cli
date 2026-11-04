@@ -182,6 +182,22 @@ pub fn analyze(events: &[Event]) -> Result<Report, String> {
     })
 }
 
+/// Strict completion gate for a captured observable run.
+///
+/// `analyze` intentionally permits partial traces for interactive inspection.
+/// A test verdict must instead require at least one subscription and every
+/// subscriber to terminate and dispose, otherwise a truncated trace looks green.
+pub fn analyze_complete(events: &[Event]) -> Result<Report, String> {
+    let report = analyze(events)?;
+    if report.subscriptions == 0 {
+        return Err("reactive test executed no subscriptions".into());
+    }
+    if report.active != 0 || report.terminals != report.subscriptions {
+        return Err("reactive test trace ended with live subscriptions".into());
+    }
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +337,39 @@ mod tests {
     #[test]
     fn excessive_work_does_not_certify_empty_results() {
         assert!(analyze(&vec![s("x", "src", SourceMode::Cold); MAX_EVENTS + 1]).is_err());
+    }
+
+    #[test]
+    fn complete_trace_gate_rejects_empty_and_unfinished_observers() {
+        assert!(analyze_complete(&[]).is_err());
+        assert_eq!(
+            analyze(&[s("x", "src", SourceMode::Cold)]).unwrap().active,
+            1
+        );
+        assert!(analyze_complete(&[s("x", "src", SourceMode::Cold)]).is_err());
+        assert!(
+            analyze_complete(&[s("x", "src", SourceMode::Cold), req("x", 1), next("x")]).is_err()
+        );
+        assert!(
+            analyze_complete(&[s("x", "src", SourceMode::Cold), complete("x"), dispose("x")])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn complete_trace_gate_handles_independent_cold_observers() {
+        let partial = [
+            s("a", "cold", SourceMode::Cold),
+            s("b", "cold", SourceMode::Cold),
+            req("a", 1),
+            next("a"),
+            complete("a"),
+            dispose("a"),
+        ];
+        assert_eq!(analyze(&partial).unwrap().active, 1);
+        assert!(analyze_complete(&partial).is_err());
+        let mut finished = partial.to_vec();
+        finished.extend([complete("b"), dispose("b")]);
+        assert_eq!(analyze_complete(&finished).unwrap().active, 0);
     }
 }
