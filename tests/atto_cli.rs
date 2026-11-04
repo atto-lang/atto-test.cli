@@ -249,6 +249,41 @@ fn llvm_native_adapter_real_defect_and_sanitizer_override_inconclusive_policy() 
 
 #[cfg(unix)]
 #[test]
+fn fuzz_shrinking_does_not_erase_a_confirmed_defect_when_reduced_input_is_inconclusive() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("tests/corpus")).unwrap();
+    fs::write(root.path().join("tests/corpus/seed.bin"), b"x").unwrap();
+    let target = guest(
+        root.path(),
+        "native-adapter",
+        "#!/bin/sh\nbytes=$(wc -c | tr -d ' ')\nif [ \"$bytes\" -eq 0 ]; then exit 2; fi\nexit 77\n",
+    );
+    fs::write(
+        root.path().join("atto-test.toml"),
+        format!(
+            "[fuzz]\ncommand=['{}']\ncorpus='tests/corpus'\nmax_bytes=16\ninconclusive_exits=[2]\n",
+            target.display()
+        ),
+    )
+    .unwrap();
+
+    let report = Command::new(env!("CARGO_BIN_EXE_atto-test"))
+        .arg("--root")
+        .arg(root.path())
+        .args(["--fuzz", "--seed", "1729", "--cases", "1"])
+        .output()
+        .unwrap();
+
+    assert_eq!(report.status.code(), Some(1), "{report:?}");
+    let stdout = String::from_utf8_lossy(&report.stdout);
+    assert!(stdout.contains("FUZZ FAILURE"), "{report:?}");
+    assert!(stdout.contains("finding=Exit(77)"), "{report:?}");
+    let failures = root.path().join(".oreslang-test/failures");
+    assert!(failures.is_dir(), "confirmed defect must retain a reproducer");
+}
+
+#[cfg(unix)]
+#[test]
 fn fuzz_inconclusive_policy_rejects_ambiguous_codes_before_execution() {
     let root = tempfile::tempdir().unwrap();
     let marker = root.path().join("executed");
