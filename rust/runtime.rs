@@ -916,7 +916,9 @@ fn fuzz_inconclusive_exits(params: &toml::Table) -> Result<BTreeSet<i32>, String
     let Some(raw) = params.get("inconclusive_exits") else {
         return Ok(BTreeSet::new());
     };
-    let entries = raw.as_array().ok_or("fuzz.inconclusive_exits must be an integer array")?;
+    let entries = raw
+        .as_array()
+        .ok_or("fuzz.inconclusive_exits must be an integer array")?;
     if entries.is_empty() || entries.len() > 16 {
         return Err("fuzz.inconclusive_exits requires 1..16 codes".into());
     }
@@ -1000,9 +1002,24 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             }
             bytes
         };
-        if let Some(code) = candidate(&cmd, root, settings.timeout, &case, &project, &inconclusive_exits)? {
+        if let Some(code) = candidate(
+            &cmd,
+            root,
+            settings.timeout,
+            &case,
+            &project,
+            &inconclusive_exits,
+        )? {
             for _ in 0..2 {
-                if candidate(&cmd, root, settings.timeout, &case, &project, &inconclusive_exits)? != Some(code) {
+                if candidate(
+                    &cmd,
+                    root,
+                    settings.timeout,
+                    &case,
+                    &project,
+                    &inconclusive_exits,
+                )? != Some(code)
+                {
                     eprintln!(
                         "FUZZ FLAKY seed={} iteration={i}: no stable reproduction",
                         settings.seed
@@ -1023,7 +1040,15 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                     budget -= 1;
                     let mut reduced = shrunk[..start].to_vec();
                     reduced.extend_from_slice(&shrunk[(start + chunk).min(shrunk.len())..]);
-                    if candidate(&cmd, root, settings.timeout, &reduced, &project, &inconclusive_exits)? == Some(code) {
+                    if candidate(
+                        &cmd,
+                        root,
+                        settings.timeout,
+                        &reduced,
+                        &project,
+                        &inconclusive_exits,
+                    )? == Some(code)
+                    {
                         shrunk = reduced;
                         granularity = 2;
                         shorter = true;
@@ -1038,7 +1063,15 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                 }
             }
             for _ in 0..2 {
-                if candidate(&cmd, root, settings.timeout, &shrunk, &project, &inconclusive_exits)? != Some(code) {
+                if candidate(
+                    &cmd,
+                    root,
+                    settings.timeout,
+                    &shrunk,
+                    &project,
+                    &inconclusive_exits,
+                )? != Some(code)
+                {
                     eprintln!("FUZZ FLAKY after minimization; preserving original failure");
                     shrunk = case.clone();
                     break;
