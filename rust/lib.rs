@@ -125,7 +125,10 @@ fn discover(root: &Path) -> Result<Vec<String>, String> {
             }
             if kind.is_dir() {
                 pending.push((entry.path(), depth + 1));
-            } else if matches!(entry.path().extension().and_then(|ext| ext.to_str()), Some("atto" | "ores")) {
+            } else if matches!(
+                entry.path().extension().and_then(|ext| ext.to_str()),
+                Some("atto" | "ores")
+            ) {
                 paths.push(
                     entry
                         .path()
@@ -157,7 +160,9 @@ fn test_manifest_name(root: &Path) -> Result<Option<&'static str>, String> {
         }
     }
     match (present(root, "atto-test.toml")?, present(root, "oreslang-test.toml")?) {
-        (true, true) => Err("ambiguous test manifests: remove one of atto-test.toml or oreslang-test.toml".into()),
+        (true, true) => Err(
+            "ambiguous test manifests: remove one of atto-test.toml or oreslang-test.toml".into(),
+        ),
         (true, false) => Ok(Some("atto-test.toml")),
         (false, true) => Ok(Some("oreslang-test.toml")),
         (false, false) => Ok(None),
@@ -226,9 +231,11 @@ fn scan(args: &[OsString]) -> Result<(String, i32), String> {
     // Parse configuration even with explicit files; malformed configuration
     // must not be laundered into a clean result by an unrelated CLI option.
     let config = match test_manifest_name(&root)? {
-        Some(name) => Some(read_bounded_project(&root, Path::new(name))?
-            .parse::<toml::Table>()
-            .map_err(|e| format!("invalid TOML in {name}: {e}"))?),
+        Some(name) => Some(
+            read_bounded_project(&root, Path::new(name))?
+                .parse::<toml::Table>()
+                .map_err(|e| format!("invalid TOML in {name}: {e}"))?,
+        ),
         None => None,
     };
     if options.files.is_empty() {
@@ -255,7 +262,7 @@ fn scan(args: &[OsString]) -> Result<(String, i32), String> {
         }
     }
     if options.files.is_empty() || options.files.len() > MAX_FILES {
-        return Err("--effects needs one or more --file paths, [effects].files, or discoverable .ores files (max 512)".into());
+        return Err("--effects needs one or more --file paths, [effects].files, or discoverable .atto/.ores files (max 512)".into());
     }
     let mut output = String::new();
     let mut warnings = 0;
