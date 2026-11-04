@@ -1021,7 +1021,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             }
             CandidateOutcome::Inconclusive(status) => {
                 eprintln!(
-                    "FUZZ INCONCLUSIVE seed={} iteration={i}: configured target exit {status}",
+                    "FUZZ INCONCLUSIVE seed={} iteration={i}: target exit {status} is inconclusive",
                     settings.seed
                 );
                 return Ok(2);
