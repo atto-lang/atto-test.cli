@@ -1028,8 +1028,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             }
             CandidateOutcome::Failure(failure) => failure,
         };
-        {
-            for _ in 0..2 {
+        for _ in 0..2 {
                 if candidate(
                     &cmd,
                     root,
@@ -1105,8 +1104,6 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                 saved.display()
             );
             return Ok(1);
-        }
-        retain_sample(&mut samples, &mut retained_bytes, case);
     }
     println!(
         "FUZZ PASS cases={} seed={} (observed inputs only)",
