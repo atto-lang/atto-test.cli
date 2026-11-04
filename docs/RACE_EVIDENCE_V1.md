@@ -1,7 +1,7 @@
-# Oreslang trusted race-evidence v1 — admission contract (proposed)
+# AttoLang trusted race-evidence v1 — admission contract (proposed)
 
 Status: **not implemented end-to-end**. This is a cross-backend design gate,
-not a claim that `oreslang test --race` currently certifies race freedom.
+not a claim that `atto test --race` currently certifies race freedom.
 The Rust CLI must use exit 2 (inconclusive) until every relevant requirement
 below is verified by a trusted host implementation.
 
@@ -89,4 +89,49 @@ analysis**, not a trusted-run PASS.
    Test runner jobs must execute on exact-head authorized source and
    produce inspectable compiler, test and sanitizer logs.
 
-No Python component should be introduced in the new Oreslang test CLI.
+No Python component should be introduced in the AttoLang test CLI.
+
+## Sanitizer observation admission (ASan, UBSan, TSan)
+
+The new `atto test --fuzz` runner may classify bounded stderr containing
+ASan, LeakSanitizer, UBSan or TSan diagnostics as **observed failures**.
+Sanitizer text is guest-controlled and is not a provenance certificate:
+a malicious or synthetic guest can print the same strings. It may cause
+a conservative failure, never authorize a clean runtime race result.
+
+A native sanitizer CI lane must establish all of the following separately:
+
+1. Exact compiler source head and Git tree, including compiler version,
+   instrumentation flags at compile **and** link, target triple and runtime
+   dependency identity; record zero dropped/omitted steps in hosted logs.
+2. A source-free *negative detector control* deliberately causing a native
+   out-of-bounds access (ASan), signed overflow (UBSan), or multithreaded data
+   race (TSan), with expected diagnostic, nonzero exit, and no TSan startup
+   failure. A mutation build without sanitizer instrumentation must **fail
+   detector admission**, not pass silently.
+3. A separately instrumented **real native actor/runtime workload** proving
+   that the tested source files and linked symbols are part of the executable.
+   ASan+UBSan and TSan must run in separate executables; an ASan pass cannot
+   stand in for a race detector. Retain repeated runs under bounded timeouts.
+4. A clean optimized non-instrumented execution lane; sanitizer-only
+   successes do not establish production behavior.
+
+A TSan `FATAL` loader/startup failure, unsupported target, missing
+instrumentation, missing expected control finding, truncated report,
+unknown guest exit/signal, absent runnable compiler, or zero-step workflow
+must classify as **inconclusive**, not as absence of data races.
+
+TSan only covers memory operations it can observe; it does not certify
+actor mailbox ordering, scheduler logical races, cancellation, message
+linearizability, deadlock freedom, or ownership boundaries. A compiler-backed
+`.atto` guest and source-free host negative control remain distinct.
+
+Backend scoping: LLVM and native Cranelift/Rust components can potentially
+run native sanitizer builds. JVM/Graal managed heaps, CLR managed code,
+and Wasm linear memory are **not** automatically instrumented by these
+native host compiler flags. Their runtime/FFI/native ABI components may
+be checked separately; guest coverage requires backend-specific evidence.
+
+`atto test --race` without a trusted admitted runtime event channel
+continues to return exit 2. Offline `--race --trace` is never promoted to a
+live-runtime race certificate merely because TSan did not report a problem.
