@@ -63,11 +63,7 @@ fn canonical_atto_explicit_aliases_are_deduplicated_before_effect_admission() {
     let output = Command::new(env!("CARGO_BIN_EXE_atto-test"))
         .arg("--root")
         .arg(root.path())
-        .args([
-            "--effects",
-            "--file=sample.atto",
-            "--file=./sample.atto",
-        ])
+        .args(["--effects", "--file=sample.atto", "--file=./sample.atto"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(0), "{output:?}");
