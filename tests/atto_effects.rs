@@ -57,6 +57,22 @@ fn canonical_manifest_admits_atto_files_but_two_manifest_names_fail_closed() {
 }
 
 #[test]
+fn canonical_atto_explicit_aliases_are_deduplicated_before_effect_admission() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("sample.atto"), "fnc f() {}").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_atto-test"))
+        .arg("--root")
+        .arg(root.path())
+        .args(["--effects", "--file=sample.atto", "--file=./sample.atto"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("inspected=1"), "{text}");
+    assert!(text.contains("no call-graph/catch/actor-runtime proof"), "{text}");
+}
+
+#[test]
 fn atto_effects_malformed_and_missing_source_are_not_passes() {
     let root = tempfile::tempdir().unwrap();
     for name in ["../escape.atto", "not-present.atto", "sample.txt"] {
