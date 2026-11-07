@@ -16,14 +16,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 
-const O_RDONLY: i32 = 0;
-const O_WRONLY: i32 = 1;
-const O_CREAT: i32 = 0o100;
-const O_EXCL: i32 = 0o200;
-const O_NONBLOCK: i32 = 0o4000;
-const O_DIRECTORY: i32 = 0o200000;
-const O_NOFOLLOW: i32 = 0o400000;
-const O_CLOEXEC: i32 = 0o2000000;
+// open(2) flag values are architecture-specific. The previous hard-coded
+// x86-64 values meant O_DIRECT | O_LARGEFILE on aarch64: the project root
+// open failed with EINVAL (every --fuzz / --race --trace exited 2), and
+// any open that succeeded carried no O_NOFOLLOW protection at all.
+use libc::{O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_WRONLY};
 
 unsafe extern "C" {
     fn openat(dirfd: i32, path: *const std::ffi::c_char, flags: i32, mode: u32) -> i32;
