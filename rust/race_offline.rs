@@ -209,6 +209,9 @@ impl<'a> Parser<'a> {
         Ok(Event { fields })
     }
 }
+/// Full vector-clock comparison. Retained as the test oracle for the epoch
+/// check used by `analyze`.
+#[cfg(test)]
 fn ordered(earlier: &Clock, later: &Clock) -> bool {
     earlier
         .iter()
@@ -222,10 +225,22 @@ fn merge(target: &mut Clock, source: &Clock) {
             .or_insert(*v);
     }
 }
+/// Last access per task, stored as an epoch: that task's own clock component
+/// at the access. Every event increments its task's component, so access e
+/// by task p happens-before a later event f iff `V_e[p] <= V_f[p]` (the
+/// FastTrack epoch property). Comparing full clocks gave identical verdicts
+/// but cost O(tasks) per prior access: a 5.5 MB in-budget trace (256 tasks,
+/// ~99k unsynchronized writes) took 54 s of CPU.
 #[derive(Default)]
 struct MemoryHistory {
-    reads: BTreeMap<String, Clock>,
-    writes: BTreeMap<String, Clock>,
+    reads: BTreeMap<String, u64>,
+    writes: BTreeMap<String, u64>,
+    #[cfg(test)]
+    full: BTreeMap<(bool, String), Clock>,
+}
+
+fn happens_before(prior_task: &str, epoch: u64, current: &Clock) -> bool {
+    return epoch <= current.get(prior_task).copied().unwrap_or(0);
 }
 #[derive(Debug, PartialEq, Eq)]
 pub struct Report {
@@ -296,11 +311,13 @@ pub fn analyze(text: &str) -> Result<Report, String> {
         if finished.contains(&task) {
             return Err("event after task completion".into());
         }
-        let mut clock = clocks.get(&task).ok_or("event from unknown task")?.clone();
+        // Take the clock out instead of cloning it on every event; it is
+        // reinserted below. Checks against `clocks` must account for it.
+        let mut clock = clocks.remove(&task).ok_or("event from unknown task")?;
         match op.as_str() {
             "fork" => {
                 let child = e.text("child")?.to_owned();
-                if clocks.len() >= MAX_TASKS || clocks.contains_key(&child) {
+                if clocks.len() + 1 >= MAX_TASKS || child == task || clocks.contains_key(&child) {
                     return Err("duplicate/over-budget fork child".into());
                 }
                 let mut child_clock = clock.clone();
@@ -397,8 +414,22 @@ pub fn analyze(text: &str) -> Result<Report, String> {
                 }
                 accesses += 1;
                 let past = history.entry(location.clone()).or_default();
+                #[cfg(test)]
+                for ((was_write, prior_task), prior) in &past.full {
+                    let epoch = if *was_write {
+                        past.writes[prior_task]
+                    } else {
+                        past.reads[prior_task]
+                    };
+                    assert_eq!(
+                        happens_before(prior_task, epoch, &clock),
+                        ordered(prior, &clock),
+                        "epoch verdict diverged from vector clock at event {}",
+                        index + 2
+                    );
+                }
                 for (prior_task, prior) in &past.writes {
-                    if prior_task != &task && !ordered(prior, &clock) {
+                    if prior_task != &task && !happens_before(prior_task, *prior, &clock) {
                         conflicts = conflicts.checked_add(1).ok_or("race counter overflow")?;
                         if examples.len() < MAX_REPORTED {
                             examples.push(format!("location={location} first={prior_task} second={task} first=W second={mode} event={}", index+2));
@@ -407,16 +438,21 @@ pub fn analyze(text: &str) -> Result<Report, String> {
                 }
                 if mode == "W" {
                     for (prior_task, prior) in &past.reads {
-                        if prior_task != &task && !ordered(prior, &clock) {
+                        if prior_task != &task && !happens_before(prior_task, *prior, &clock) {
                             conflicts = conflicts.checked_add(1).ok_or("race counter overflow")?;
                             if examples.len() < MAX_REPORTED {
                                 examples.push(format!("location={location} first={prior_task} second={task} first=R second=W event={}", index+2));
                             }
                         }
                     }
-                    past.writes.insert(task.clone(), clock.clone());
+                }
+                let epoch = clock.get(&task).copied().unwrap_or(0);
+                #[cfg(test)]
+                past.full.insert((mode == "W", task.clone()), clock.clone());
+                if mode == "W" {
+                    past.writes.insert(task.clone(), epoch);
                 } else {
-                    past.reads.insert(task.clone(), clock.clone());
+                    past.reads.insert(task.clone(), epoch);
                 }
             }
             _ => unreachable!(),
@@ -577,6 +613,103 @@ mod tests {
         );
         assert!(analyze(detached_child).is_err());
     }
+    #[test]
+    fn fork_to_self_is_rejected() {
+        let s = concat!(
+            "{\"op\":\"begin\",\"version\":1,\"run_id\":\"r\",\"backend\":\"llvm\"}\n",
+            "{\"op\":\"task\",\"task\":\"a\"}\n",
+            "{\"op\":\"fork\",\"task\":\"a\",\"child\":\"a\"}\n",
+            "{\"op\":\"access\",\"task\":\"a\",\"location\":\"x\",\"mode\":\"W\"}\n",
+            "{\"op\":\"end\",\"run_id\":\"r\",\"events\":3}\n",
+        );
+        assert!(analyze(s).is_err());
+    }
+
+    /// Random well-formed traces. `analyze` asserts (under cfg(test)) that
+    /// every epoch verdict equals the full vector-clock comparison.
+    #[test]
+    fn epoch_happens_before_matches_full_vector_clocks_on_random_traces() {
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        let mut total_conflicts = 0;
+        for trace in 0..300 {
+            let roots = 2 + next(3);
+            let mut ev: Vec<String> = (0..roots)
+                .map(|t| format!("{{\"op\":\"task\",\"task\":\"t{t}\"}}"))
+                .collect();
+            let mut live: Vec<String> = (0..roots).map(|t| format!("t{t}")).collect();
+            let mut children: Vec<(String, String)> = Vec::new();
+            let mut pending: Vec<String> = Vec::new();
+            let (mut msg, mut kid) = (0, 0);
+            for _ in 0..(10 + next(60)) {
+                let t = live[next(live.len() as u64) as usize].clone();
+                match next(6) {
+                    0 | 1 => ev.push(format!(
+                        "{{\"op\":\"access\",\"task\":\"{t}\",\"location\":\"l{}\",\"mode\":\"{}\"}}",
+                        next(3),
+                        if next(2) == 0 { "R" } else { "W" }
+                    )),
+                    2 => {
+                        msg += 1;
+                        ev.push(format!("{{\"op\":\"send\",\"task\":\"{t}\",\"message\":\"m{msg}\"}}"));
+                        pending.push(format!("m{msg}"));
+                    }
+                    3 if !pending.is_empty() => {
+                        let m = pending.remove(next(pending.len() as u64) as usize);
+                        ev.push(format!("{{\"op\":\"recv\",\"task\":\"{t}\",\"message\":\"{m}\"}}"));
+                    }
+                    4 => {
+                        ev.push(format!("{{\"op\":\"lock\",\"task\":\"{t}\",\"name\":\"mu\"}}"));
+                        ev.push(format!(
+                            "{{\"op\":\"access\",\"task\":\"{t}\",\"location\":\"l{}\",\"mode\":\"W\"}}",
+                            next(3)
+                        ));
+                        ev.push(format!("{{\"op\":\"unlock\",\"task\":\"{t}\",\"name\":\"mu\"}}"));
+                    }
+                    5 if live.len() < 8 => {
+                        kid += 1;
+                        let c = format!("c{kid}");
+                        ev.push(format!("{{\"op\":\"fork\",\"task\":\"{t}\",\"child\":\"{c}\"}}"));
+                        live.push(c.clone());
+                        children.push((t, c));
+                    }
+                    _ => {}
+                }
+            }
+            ev.push(format!(
+                "{{\"op\":\"access\",\"task\":\"{}\",\"location\":\"l0\",\"mode\":\"R\"}}",
+                live[0]
+            ));
+            for m in pending.drain(..) {
+                ev.push(format!(
+                    "{{\"op\":\"recv\",\"task\":\"{}\",\"message\":\"{m}\"}}",
+                    live[0]
+                ));
+            }
+            // Finish and join children innermost-first so parents are live.
+            for (parent, child) in children.iter().rev() {
+                ev.push(format!("{{\"op\":\"finish\",\"task\":\"{child}\"}}"));
+                ev.push(format!(
+                    "{{\"op\":\"join\",\"task\":\"{parent}\",\"child\":\"{child}\"}}"
+                ));
+            }
+            let text = format!(
+                "{{\"op\":\"begin\",\"version\":1,\"run_id\":\"r\",\"backend\":\"x\"}}\n{}\n{{\"op\":\"end\",\"run_id\":\"r\",\"events\":{}}}\n",
+                ev.join("\n"),
+                ev.len()
+            );
+            let report = analyze(&text).unwrap_or_else(|e| panic!("trace {trace}: {e}\n{text}"));
+            total_conflicts += report.conflicts;
+        }
+        // Both racy and ordered comparisons must actually be exercised.
+        assert!(total_conflicts > 0);
+    }
+
     #[test]
     fn cross_task_history_is_not_erased() {
         let s = "{\"op\":\"begin\",\"version\":1,\"run_id\":\"id\",\"backend\":\"llvm\"}\n{\"op\":\"task\",\"task\":\"a\"}\n{\"op\":\"task\",\"task\":\"b\"}\n{\"op\":\"task\",\"task\":\"c\"}\n{\"op\":\"access\",\"task\":\"a\",\"location\":\"x\",\"mode\":\"W\"}\n{\"op\":\"access\",\"task\":\"b\",\"location\":\"x\",\"mode\":\"W\"}\n{\"op\":\"access\",\"task\":\"c\",\"location\":\"x\",\"mode\":\"R\"}\n{\"op\":\"end\",\"run_id\":\"id\",\"events\":6}\n";
