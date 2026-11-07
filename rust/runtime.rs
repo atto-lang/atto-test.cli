@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 #[cfg(not(target_os = "linux"))]
 use std::fs::OpenOptions;
-use std::fs::{self, File};
+#[cfg(any(test, not(target_os = "linux")))]
+use std::fs;
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -68,11 +70,16 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
         timeout: Duration::from_secs(5),
     };
     let mut i = 0;
+    let mut seen = BTreeSet::new();
     while i < args.len() {
         let word = args[i].to_str().ok_or("non-UTF-8 CLI argument")?;
         let (key, inline) = word
             .split_once('=')
             .map_or((word, None), |(k, v)| (k, Some(v)));
+        // Last-wins silently discarded e.g. `--trace a.jsonl --trace b.jsonl`.
+        if key.starts_with("--") && !seen.insert(key.to_owned()) {
+            return Err(format!("duplicate test option: {key}"));
+        }
         match key {
             "--fuzz" if inline.is_none() => out.fuzz = true,
             "--race" if inline.is_none() => out.race = true,
@@ -310,24 +317,61 @@ fn stop(child: &mut Child) {
     let _ = child.wait();
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ProcessResult {
     code: Option<i32>,
+    /// Terminating signal on Unix when the child did not exit normally.
+    signal: Option<i32>,
     timed_out: bool,
+    /// A capture exceeded MAX_OUTPUT; the guest was stopped and the
+    /// captured text is truncated. Never a classifiable verdict.
+    output_exceeded: bool,
     output: String,
+    /// False when stdout was not UTF-8. `output` is then lossy and must not
+    /// be trusted as a machine receipt. stderr is always lossily decoded:
+    /// fuzz targets routinely echo arbitrary bytes, and treating those as an
+    /// infrastructure error aborted whole fuzz runs.
+    output_utf8: bool,
     stderr: String,
 }
 
-fn read_small(mut file: File) -> Result<String, String> {
+struct Capture {
+    text: String,
+    utf8: bool,
+    exceeded: bool,
+}
+
+fn read_small(mut file: File) -> Result<Capture, String> {
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     file.take(MAX_OUTPUT + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_OUTPUT {
-        return Err("test subprocess output limit exceeded".into());
-    }
-    String::from_utf8(bytes).map_err(|_| "test subprocess capture is not valid UTF-8".into())
+    let exceeded = bytes.len() as u64 > MAX_OUTPUT;
+    bytes.truncate(MAX_OUTPUT as usize);
+    return Ok(match String::from_utf8(bytes) {
+        Ok(text) => Capture {
+            text,
+            utf8: true,
+            exceeded,
+        },
+        Err(e) => Capture {
+            text: String::from_utf8_lossy(e.as_bytes()).into_owned(),
+            utf8: false,
+            exceeded,
+        },
+    });
+}
+
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    return status.signal();
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    return None;
 }
 
 fn invoke(
@@ -371,15 +415,18 @@ fn invoke(
         .spawn()
         .map_err(|e| format!("cannot spawn test command: {e}"))?;
     let start = Instant::now();
-    let (code, timed_out) = loop {
+    let mut output_exceeded = false;
+    let (code, signal, timed_out) = loop {
         if capture {
             // A missing/unreadable capture must not silently disable the
             // output budget while the child continues executing.
             for output in [stdout.as_ref(), stderr.as_ref()].into_iter().flatten() {
                 match output.metadata() {
                     Ok(meta) if meta.len() > MAX_OUTPUT => {
-                        stop(&mut child);
-                        return Err("test subprocess output limit exceeded".into());
+                        // Input-dependent runaway output is reported to the
+                        // caller, which decides whether that is an error
+                        // (native receipts) or unclassifiable (fuzz).
+                        output_exceeded = true;
                     }
                     Err(e) => {
                         stop(&mut child);
@@ -388,12 +435,16 @@ fn invoke(
                     Ok(_) => {}
                 }
             }
+            if output_exceeded {
+                stop(&mut child);
+                break (None, None, false);
+            }
         }
         match child.try_wait() {
-            Ok(Some(status)) => break (status.code(), false),
+            Ok(Some(status)) => break (status.code(), exit_signal(&status), false),
             Ok(None) if start.elapsed() >= timeout => {
                 stop(&mut child);
-                break (None, true);
+                break (None, None, true);
             }
             Ok(None) => thread::sleep(Duration::from_millis(5)),
             Err(e) => {
@@ -411,18 +462,26 @@ fn invoke(
     #[cfg(unix)]
     kill_guest_group(child.id());
     drop(stdin_file);
-    Ok(ProcessResult {
+    let mut result = ProcessResult {
         code,
+        signal,
         timed_out,
-        output: match stdout.take() {
-            Some(f) => read_small(f)?,
-            None => String::new(),
-        },
-        stderr: match stderr.take() {
-            Some(f) => read_small(f)?,
-            None => String::new(),
-        },
-    })
+        output_exceeded,
+        output_utf8: true,
+        ..ProcessResult::default()
+    };
+    if let Some(f) = stdout.take() {
+        let c = read_small(f)?;
+        result.output = c.text;
+        result.output_utf8 = c.utf8;
+        result.output_exceeded |= c.exceeded;
+    }
+    if let Some(f) = stderr.take() {
+        let c = read_small(f)?;
+        result.stderr = c.text;
+        result.output_exceeded |= c.exceeded;
+    }
+    return Ok(result);
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -580,12 +639,16 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
         let path = super::source_path(root, &name)?;
         let args = vec![core.clone(), path.to_string_lossy().into_owned()];
         let result = invoke(sanitize_command(&args, root)?, timeout, None, true)?;
+        if result.output_exceeded {
+            return Err("test subprocess output limit exceeded".into());
+        }
+        if !result.output_utf8 {
+            return Err("test subprocess capture is not valid UTF-8".into());
+        }
         if result.stderr.contains("FATAL: ThreadSanitizer:") {
             return Err("ThreadSanitizer initialization failed; native run inconclusive".into());
         }
-        if result.timed_out
-            || result.code != Some(0)
-            || sanitizer_finding(&result.stderr).is_some()
+        if result.timed_out || result.code != Some(0) || sanitizer_finding(&result.stderr).is_some()
         {
             failures += 1;
             eprintln!(
@@ -788,14 +851,61 @@ fn corpus(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Failure {
     Exit(i32),
+    /// Unix crash signal (SIGSEGV, SIGABRT, ...) with no sanitizer report.
+    Signal(i32),
     Sanitizer(&'static str),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CandidateOutcome {
     Clean,
     Failure(Failure),
+    /// Configured `[fuzz].inconclusive_exits` status.
     Inconclusive(i32),
+    /// Timeout, output budget, non-crash signal or sanitizer runtime
+    /// failure. Input-dependent, so it is never a defect, and during
+    /// minimization it simply does not reproduce the confirmed one.
+    Unclassifiable(String),
+}
+
+// Signals that mean the guest itself faulted or aborted. SIGKILL/SIGTERM/
+// SIGXCPU and friends come from the OOM killer, CI cancellation or resource
+// limits; those stay inconclusive rather than becoming saved reproducers.
+#[cfg(unix)]
+fn crash_signal(signal: i32) -> bool {
+    const SIGBUS: i32 = if cfg!(any(target_os = "linux", target_os = "android")) {
+        7
+    } else {
+        10
+    };
+    // SIGILL, SIGTRAP, SIGABRT, SIGFPE, SIGSEGV share numbers on Linux/BSD/macOS.
+    return matches!(signal, 4 | 5 | 6 | 8 | 11) || signal == SIGBUS;
+}
+
+#[cfg(not(unix))]
+fn crash_signal(_signal: i32) -> bool {
+    return false;
+}
+
+// UBSan prints `path:line:col: runtime error: ...` or `<unknown>: runtime
+// error: ...`. A bare substring also matched Go panics ("panic: runtime
+// error: index out of range") and ordinary guest error text.
+fn ubsan_runtime_error(stderr: &str) -> bool {
+    return stderr.lines().any(|line| {
+        let Some(at) = line.find(": runtime error: ") else {
+            return false;
+        };
+        let location = &line[..at];
+        if location.ends_with("<unknown>") {
+            return true;
+        }
+        let mut parts = location.rsplitn(3, ':');
+        let column = parts.next().unwrap_or("");
+        let row = parts.next().unwrap_or("");
+        let path = parts.next().unwrap_or("");
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        !path.is_empty() && digits(row) && digits(column)
+    });
 }
 
 fn sanitizer_finding(stderr: &str) -> Option<&'static str> {
@@ -809,8 +919,7 @@ fn sanitizer_finding(stderr: &str) -> Option<&'static str> {
         || stderr.contains("SUMMARY: ThreadSanitizer:")
     {
         Some("TSan")
-    } else if stderr.contains("SUMMARY: UndefinedBehaviorSanitizer:")
-        || stderr.contains("runtime error:")
+    } else if stderr.contains("SUMMARY: UndefinedBehaviorSanitizer:") || ubsan_runtime_error(stderr)
     {
         Some("UBSan")
     } else {
@@ -822,8 +931,13 @@ fn classify(result: &ProcessResult) -> Result<Option<Failure>, String> {
     if result.timed_out {
         return Err("guest timed out; cannot classify fuzz failure".into());
     }
+    if result.output_exceeded {
+        return Err("guest exceeded the 4 MB output capture budget".into());
+    }
     if result.stderr.contains("FATAL: ThreadSanitizer:")
-        || result.stderr.contains("ThreadSanitizer: unexpected memory mapping")
+        || result
+            .stderr
+            .contains("ThreadSanitizer: unexpected memory mapping")
     {
         return Err("ThreadSanitizer failed to initialize; no race result is available".into());
     }
@@ -831,10 +945,14 @@ fn classify(result: &ProcessResult) -> Result<Option<Failure>, String> {
     if let Some(kind) = sanitizer_finding(&result.stderr) {
         return Ok(Some(Failure::Sanitizer(kind)));
     }
-    match result.code {
-        Some(0) => Ok(None),
-        Some(code) => Ok(Some(Failure::Exit(code))),
-        None => Err("guest terminated abnormally without a sanitizer diagnostic".into()),
+    match (result.code, result.signal) {
+        (Some(0), _) => Ok(None),
+        (Some(code), _) => Ok(Some(Failure::Exit(code))),
+        (None, Some(signal)) if crash_signal(signal) => Ok(Some(Failure::Signal(signal))),
+        (None, Some(signal)) => Err(format!(
+            "guest killed by non-crash signal {signal} (resource limit, OOM killer or external cancellation)"
+        )),
+        (None, None) => Err("guest terminated abnormally without a sanitizer diagnostic".into()),
     }
 }
 
@@ -849,12 +967,13 @@ fn candidate(
     project.verify_path(root)?;
     let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), true)?;
     project.verify_path(root)?;
-    match classify(&result)? {
-        Some(Failure::Exit(code)) if inconclusive_exits.contains(&code) => {
+    match classify(&result) {
+        Err(reason) => Ok(CandidateOutcome::Unclassifiable(reason)),
+        Ok(Some(Failure::Exit(code))) if inconclusive_exits.contains(&code) => {
             Ok(CandidateOutcome::Inconclusive(code))
         }
-        Some(failure) => Ok(CandidateOutcome::Failure(failure)),
-        None => Ok(CandidateOutcome::Clean),
+        Ok(Some(failure)) => Ok(CandidateOutcome::Failure(failure)),
+        Ok(None) => Ok(CandidateOutcome::Clean),
     }
 }
 
@@ -987,8 +1106,13 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         return Err("initial fuzz pool exceeds retention budgets".into());
     }
     let mut rng = Rng::new(settings.seed);
+    // Freeze the seed count. Comparing against samples.len() let every clean
+    // seed re-enter the pool, so the loop replayed the seeds forever and no
+    // mutated input was ever executed.
+    let seeds = samples.len();
+    let mut mutated = 0usize;
     for i in 0..settings.cases {
-        let case = if i < samples.len() {
+        let case = if i < seeds {
             samples[i].clone()
         } else {
             let base = &samples[rng.range(samples.len())];
@@ -1016,13 +1140,24 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             &inconclusive_exits,
         )? {
             CandidateOutcome::Clean => {
-                retain_sample(&mut samples, &mut retained_bytes, case);
+                if i >= seeds {
+                    mutated += 1;
+                    retain_sample(&mut samples, &mut retained_bytes, case);
+                }
                 continue;
             }
             CandidateOutcome::Inconclusive(status) => {
                 eprintln!(
                     "FUZZ INCONCLUSIVE seed={} iteration={i}: target exit {status} is inconclusive",
                     settings.seed
+                );
+                return Ok(2);
+            }
+            CandidateOutcome::Unclassifiable(reason) => {
+                eprintln!(
+                    "FUZZ INCONCLUSIVE seed={} iteration={i} bytes={}: {reason}",
+                    settings.seed,
+                    case.len()
                 );
                 return Ok(2);
             }
@@ -1106,8 +1241,10 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         return Ok(1);
     }
     println!(
-        "FUZZ PASS cases={} seed={} (observed inputs only)",
-        settings.cases, settings.seed
+        "FUZZ PASS cases={} seeds={} mutated={mutated} seed={} (observed inputs only)",
+        settings.cases,
+        seeds.min(settings.cases),
+        settings.seed
     );
     Ok(0)
 }
@@ -1171,27 +1308,86 @@ mod tests {
     #[test]
     fn sanitizer_verdicts_survive_signal_abort_and_reduction_cannot_change_failure_kind() {
         let output = ProcessResult {
-            code: None,
-            timed_out: false,
-            output: String::new(),
             stderr: "ERROR: AddressSanitizer: heap-use-after-free".into(),
+            ..ProcessResult::default()
         };
         assert_eq!(classify(&output), Ok(Some(Failure::Sanitizer("ASan"))));
         let exit = ProcessResult {
             code: Some(86),
-            timed_out: false,
-            output: String::new(),
-            stderr: String::new(),
+            ..ProcessResult::default()
         };
         assert_eq!(classify(&exit), Ok(Some(Failure::Exit(86))));
         assert_ne!(classify(&output), classify(&exit));
         let init = ProcessResult {
             code: Some(66),
-            timed_out: false,
-            output: String::new(),
             stderr: "FATAL: ThreadSanitizer: unexpected memory mapping".into(),
+            ..ProcessResult::default()
         };
         assert!(classify(&init).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crash_signals_are_defects_but_kill_and_output_budget_are_unclassifiable() {
+        for signal in [4, 6, 8, 11] {
+            let crashed = ProcessResult {
+                signal: Some(signal),
+                ..ProcessResult::default()
+            };
+            assert_eq!(classify(&crashed), Ok(Some(Failure::Signal(signal))));
+        }
+        // SIGKILL (OOM killer, CI cancellation) and SIGTERM stay inconclusive.
+        for signal in [9, 15] {
+            let killed = ProcessResult {
+                signal: Some(signal),
+                ..ProcessResult::default()
+            };
+            assert!(classify(&killed).is_err());
+        }
+        let noisy = ProcessResult {
+            output_exceeded: true,
+            ..ProcessResult::default()
+        };
+        assert!(classify(&noisy).is_err());
+        // A sanitizer report still outranks the signal that ended the run.
+        let asan_abort = ProcessResult {
+            signal: Some(6),
+            stderr: "==1==ERROR: AddressSanitizer: heap-buffer-overflow".into(),
+            ..ProcessResult::default()
+        };
+        assert_eq!(classify(&asan_abort), Ok(Some(Failure::Sanitizer("ASan"))));
+    }
+
+    #[test]
+    fn ubsan_detection_requires_sanitizer_location_shape() {
+        for real in [
+            "src/a.c:10:5: runtime error: signed integer overflow",
+            "/abs/path/x.cpp:1:1: runtime error: load of misaligned address",
+            "<unknown>: runtime error: call through invalid function pointer",
+            "noise\nlib.c:7:3: runtime error: shift exponent 40 is too large\n",
+        ] {
+            assert_eq!(sanitizer_finding(real), Some("UBSan"), "{real}");
+        }
+        for benign in [
+            "panic: runtime error: index out of range [5] with length 3",
+            "runtime error: index 5 out of bounds",
+            "error: runtime error: nested",
+            "file.c:x:5: runtime error: not a line number",
+        ] {
+            assert_eq!(sanitizer_finding(benign), None, "{benign}");
+        }
+    }
+
+    #[test]
+    fn duplicate_options_are_rejected_instead_of_last_wins() {
+        for args in [
+            &["--race", "--trace", "a.jsonl", "--trace", "b.jsonl"][..],
+            &["--fuzz", "--seed", "1", "--seed=2"][..],
+            &["--fuzz", "--fuzz"][..],
+        ] {
+            let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+            assert!(parse(&args).unwrap_err().contains("duplicate"), "{args:?}");
+        }
     }
 
     #[test]

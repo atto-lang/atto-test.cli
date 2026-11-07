@@ -396,3 +396,108 @@ fn native_runner_refuses_skipped_duplicate_and_empty_case_receipts() {
         .unwrap();
     assert_eq!(result.status.code(), Some(0), "{result:?}");
 }
+
+#[cfg(unix)]
+fn fuzz_project(root: &Path, script: &str, extra: &str) {
+    let target = guest(root, "target", script);
+    // macOS assesses each newly written executable on first exec (~0.2 s
+    // idle, seconds under parallel test load), and on Linux a sibling test
+    // thread's fork can briefly hold our write descriptor (ETXTBSY). Warm
+    // the target until one exec succeeds so the short fuzz timeouts below
+    // measure the target, not the platform.
+    for attempt in 0.. {
+        match Command::new(&target)
+            .current_dir(root)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 100 => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("cannot warm fuzz target: {e}"),
+        }
+    }
+    fs::write(
+        root.join("atto-test.toml"),
+        format!(
+            "[fuzz]\ncommand = ['{}']\nmax_bytes = 16\n{extra}",
+            target.display()
+        ),
+    )
+    .unwrap();
+}
+
+// Regression: clean seeds were re-appended to the pool and the loop index
+// never caught up, so only [], [0] and [255] were ever executed.
+#[cfg(unix)]
+#[test]
+fn fuzz_executes_mutated_inputs_beyond_the_seed_pool() {
+    let root = tempfile::tempdir().unwrap();
+    // Every built-in seed is at most one byte; only a mutation can fail.
+    fuzz_project(
+        root.path(),
+        "#!/bin/sh\n[ \"$(wc -c | tr -d ' ')\" -ge 2 ] && exit 9\nexit 0\n",
+        "",
+    );
+    let result = cli(root.path(), &["--fuzz", "--seed", "42", "--cases", "64"]);
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    assert!(String::from_utf8_lossy(&result.stdout).contains("finding=Exit(9)"));
+
+    let clean = tempfile::tempdir().unwrap();
+    fuzz_project(clean.path(), "#!/bin/sh\ncat > /dev/null\nexit 0\n", "");
+    let pass = cli(clean.path(), &["--fuzz", "--seed", "42", "--cases", "20"]);
+    assert_eq!(pass.status.code(), Some(0), "{pass:?}");
+    assert!(String::from_utf8_lossy(&pass.stdout).contains("seeds=3 mutated=17"));
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_targets_echoing_binary_input_are_not_infrastructure_errors() {
+    for script in ["#!/bin/sh\ncat\n", "#!/bin/sh\ncat >&2\n"] {
+        let root = tempfile::tempdir().unwrap();
+        fuzz_project(root.path(), script, "");
+        let result = cli(root.path(), &["--fuzz", "--seed", "3", "--cases", "40"]);
+        assert_eq!(result.status.code(), Some(0), "{script}: {result:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_crash_signal_is_a_minimized_reproducible_defect() {
+    let root = tempfile::tempdir().unwrap();
+    fuzz_project(
+        root.path(),
+        "#!/bin/sh\n[ -s /dev/stdin ] && kill -SEGV $$\nexit 0\n",
+        "",
+    );
+    let result = cli(root.path(), &["--fuzz", "--seed", "1", "--cases", "4"]);
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    let out = String::from_utf8_lossy(&result.stdout);
+    assert!(out.contains("finding=Signal(11)"), "{out}");
+    assert!(out.contains("minimized=1"), "{out}");
+}
+
+// A reduced input that hangs must not erase an already-confirmed defect.
+#[cfg(unix)]
+#[test]
+fn fuzz_minimization_survives_hanging_reduced_inputs() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("tests/corpus")).unwrap();
+    fs::write(root.path().join("tests/corpus/seed.bin"), b"AAAAAAAA").unwrap();
+    fuzz_project(
+        root.path(),
+        "#!/bin/sh\nn=$(wc -c | tr -d ' ')\n[ \"$n\" -ge 4 ] && exit 3\n[ \"$n\" -ge 2 ] && sleep 5\nexit 0\n",
+        "",
+    );
+    let result = cli(
+        root.path(),
+        &["--fuzz", "--seed", "1", "--cases", "4", "--timeout", "1"],
+    );
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    let out = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        out.contains("finding=Exit(3) initial=8 minimized=4"),
+        "{out}"
+    );
+}

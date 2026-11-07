@@ -58,8 +58,15 @@ argv. Corpus default tests/corpus; max_bytes defaults to 256 (range 1..65536).
 The Rust engine uses deterministic SplitMix64 byte mutation and deduplicated
 seed cases. It replays a failing case twice before minimization, then applies
 a bounded reduction while preserving the exit code. Reproduced failures are
-stored under .oreslang-test/failures. A timeout, crash without a numeric
-exit code or incomplete run is inconclusive rather than a clean pass.
+stored under .oreslang-test/failures. On Unix a crash signal (SIGSEGV,
+SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP) is a reproducible defect and is
+minimized like a nonzero exit. A timeout, runaway output beyond the 4 MB
+capture budget, a non-crash signal (SIGKILL/SIGTERM from an OOM killer or CI
+cancellation) or an incomplete run is inconclusive (exit 2) rather than a
+clean pass. During minimization such an outcome simply does not reproduce
+the confirmed defect; it cannot erase it. Targets may echo arbitrary bytes
+to stdout or stderr: captures are decoded lossily for fuzzing. A passing run
+reports `seeds=N mutated=M` so a run that executed no mutations is visible.
 This is black-box mutation fuzzing, not coverage-guided source fuzzing.
 For native fuzz adapters that reserve nonzero process exits for
 **inconclusive infrastructure conditions**, optionally declare
@@ -108,7 +115,11 @@ Example project manifest:
 project-relative ORES_RACE_V1 JSONL file in Rust. It validates the JSONL
 structure, strict event fields, task lifecycle, fork/finish/join ordering,
 mutex ownership, single-use message IDs, and memory-access happens-before
-relations using vector clocks. It reports observed conflicts and rejects
+relations using vector clocks. Prior accesses are compared by epoch
+(the accessing task's own clock component), which gives the same verdicts as
+full vector-clock comparison in O(1) per prior access, so a worst-case
+in-budget trace (256 tasks, 100k events) is analyzed in about a second
+rather than nearly a minute. It reports observed conflicts and rejects
 incomplete/ambiguous traces. A clean observed trace is **never** a
 runtime race-freedom certificate.
 
@@ -233,7 +244,9 @@ Two manifests in the same project root are rejected, not silently mixed.
 
 Fuzz now retains bounded child stderr/stdout and treats observed ASan,
 LeakSanitizer, UBSan and TSan diagnostic text as a reproducible failure, even
-when a recoverable sanitizer exits 0. An unsupported TSan runtime is
+when a recoverable sanitizer exits 0. UBSan lines must have the sanitizer's
+`file:line:col: runtime error:` (or `<unknown>: runtime error:`) shape; a bare
+`runtime error:` such as a Go panic is not attributed to UBSan. An unsupported TSan runtime is
 inconclusive (2). These reports are **observations**, not evidence that the
 guest executable was compiled with sanitizers, that all code was instrumented,
 or that AttoLang actors are data-race free. Exact-head sanitizer builds and
