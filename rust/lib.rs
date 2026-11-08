@@ -1,7 +1,7 @@
 mod audit;
 mod deadlock;
 pub mod effects;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod fs_secure;
 mod lifecycle;
 mod logical;
@@ -13,9 +13,9 @@ mod runtime;
 
 use std::ffi::OsString;
 use std::fs;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 use std::fs::File;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -23,7 +23,7 @@ use std::process::Command;
 const MAX_FILES: usize = 512;
 const MAX_ENTRIES: usize = 20_000;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn read_bounded(path: &Path) -> Result<String, String> {
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
@@ -46,13 +46,13 @@ fn read_bounded(path: &Path) -> Result<String, String> {
 }
 
 fn read_bounded_project(root: &Path, relative: &Path) -> Result<String, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         let bytes = fs_secure::read_project_file(root, relative, effects::MAX_SOURCE)?;
         return String::from_utf8(bytes)
             .map_err(|_| format!("invalid UTF-8 project input: {}", relative.display()));
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         return read_bounded(&root.join(relative));
     }
@@ -88,7 +88,7 @@ fn source_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     return Ok(current);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn discover(root: &Path) -> Result<Vec<String>, String> {
     fs_secure::discover_sources(
         root,
@@ -99,7 +99,7 @@ fn discover(root: &Path) -> Result<Vec<String>, String> {
     )
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn discover(root: &Path) -> Result<Vec<String>, String> {
     let mut pending = vec![(root.to_path_buf(), 0)];
     let mut paths = Vec::new();

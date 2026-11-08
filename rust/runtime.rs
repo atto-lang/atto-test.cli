@@ -2,10 +2,10 @@
 //! No Python runner, subprocess shell, or guest-authored success receipt.
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(any(test, not(unix)))]
 use std::fs;
 use std::fs::File;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -13,11 +13,11 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use super::fs_secure::ProjectRoot;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 struct ProjectRoot;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 impl ProjectRoot {
     fn new(_root: &Path) -> Result<Self, String> {
         Ok(Self)
@@ -240,10 +240,10 @@ fn is_executable_file(path: &Path) -> bool {
 
 fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     let first = cmd.first().ok_or("empty command")?;
-    let wrapper = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+    // Best effort: on Linux current_exe() reads /proc/self/exe, which may be
+    // absent in minimal containers. The ATTO_TEST_GUEST marker is the
+    // authoritative recursion guard, so an unknown own path is not fatal.
+    let wrapper = std::env::current_exe().and_then(|p| p.canonicalize()).ok();
     let program = if Path::new(first).components().count() > 1 {
         // Explicit relative executables stay inside the project root.
         if Path::new(first).is_absolute() {
@@ -268,7 +268,7 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
         Some(program.clone())
     };
     let forbidden = [
-        wrapper,
+        wrapper.unwrap_or_default(),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang"),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang-test"),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/atto"),
@@ -783,7 +783,7 @@ impl Rng {
 /// Reject path escapes and symlinked ancestors before accessing project-owned
 /// input/output. This is a preflight boundary check, not an atomic openat2
 /// guarantee against a concurrently malicious local filesystem writer.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     let relative = Path::new(name);
     if relative.as_os_str().is_empty()
@@ -817,7 +817,7 @@ fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
 
 // Bound bytes read from the opened stream as well as preflight file sizes.
 // This limits allocation if a regular corpus file grows during ingestion.
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(any(test, not(unix)))]
 fn read_corpus_case(input: impl Read, max_bytes: usize) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     input
@@ -833,13 +833,13 @@ fn read_corpus_case(input: impl Read, max_bytes: usize) -> Result<Vec<u8>, Strin
 /// Bound reads using the *opened file descriptor*. Linux also denies a final
 /// symlink and avoids FIFO blocking, even if a path changes after listing.
 /// Ancestor components still require descriptor-relative openat/openat2.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn read_case_bounded(root: &Path, relative: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         return super::fs_secure::read_project_file(root, relative, max_bytes);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let path = root.join(relative);
         let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -862,10 +862,10 @@ fn corpus(
         .map(|v| v.as_str().ok_or("fuzz.corpus must be a relative path"))
         .transpose()?
         .unwrap_or("tests/corpus");
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let path = checked_project_path(_root, name)?;
     let mut cases = vec![vec![], vec![0], vec![255]];
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cases),
         Err(e) => return Err(e.to_string()),
@@ -874,7 +874,7 @@ fn corpus(
         }
         _ => {}
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         // Reuse the same project-_root descriptor as the future failure
         // artifact write. Absent optional corpora remain empty without a
@@ -886,7 +886,7 @@ fn corpus(
             MAX_CORPUS_BYTES,
         )?);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let mut files = Vec::new();
         for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
@@ -1058,42 +1058,73 @@ fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<Pa
     let hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
     });
-    let relative =
-        Path::new(".oreslang-test/failures").join(format!("fuzz-{hash:016x}-{}.bin", bytes.len()));
-    #[cfg(target_os = "linux")]
-    {
-        _project.verify_path(root)?;
-        _project.reproducer(&relative, bytes)?;
-        // Do not return a path that might now refer to a replaced root,
-        // even though the write itself was anchored safely to our FD.
-        _project.verify_path(root)?;
-        return Ok(root.join(relative));
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let folder = checked_project_path(root, ".oreslang-test/failures")?;
-        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-        checked_project_path(root, ".oreslang-test/failures")?;
-        let path = root.join(&relative);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(bytes).map_err(|e| e.to_string())?;
-                Ok(path)
+    // A name already holding different bytes (an FNV collision, or a file
+    // left by an older CLI) gets a numbered sibling instead of failing.
+    for attempt in 0..16 {
+        let suffix = if attempt == 0 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
+        let relative = Path::new(".oreslang-test/failures")
+            .join(format!("fuzz-{hash:016x}-{}{suffix}.bin", bytes.len()));
+        #[cfg(unix)]
+        {
+            _project.verify_path(root)?;
+            let stored = _project.reproducer(&relative, bytes)?;
+            // Do not return a path that might now refer to a replaced root,
+            // even though the write itself was anchored safely to our FD.
+            _project.verify_path(root)?;
+            if stored {
+                return Ok(root.join(relative));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-                if !meta.is_file()
-                    || meta.file_type().is_symlink()
-                    || read_case_bounded(root, &relative, bytes.len())? != bytes
-                {
-                    return Err("unsafe or colliding failure artifact".into());
-                }
-                Ok(path)
+        }
+        #[cfg(not(unix))]
+        {
+            if write_failure_by_path(root, &relative, bytes)? {
+                return Ok(root.join(relative));
             }
-            Err(e) => Err(e.to_string()),
         }
     }
+    Err("every reproducer name is taken by different bytes".into())
 }
+
+/// Path-based fallback (no openat): publish via a temporary file and a
+/// non-replacing hard link so the final name is never partially written.
+#[cfg(not(unix))]
+fn write_failure_by_path(root: &Path, relative: &Path, bytes: &[u8]) -> Result<bool, String> {
+    let folder = checked_project_path(root, ".oreslang-test/failures")?;
+    fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    checked_project_path(root, ".oreslang-test/failures")?;
+    let path = root.join(relative);
+    let existing = |path: &Path| -> Result<bool, String> {
+        let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            return Err("unsafe existing failure artifact".into());
+        }
+        Ok(meta.len() == bytes.len() as u64
+            && read_case_bounded(root, relative, bytes.len())? == bytes)
+    };
+    if path.exists() {
+        return existing(&path);
+    }
+    let temp = folder.join(format!(".tmp-{}-{}", std::process::id(), bytes.len()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|e| e.to_string())?;
+    let written = file.write_all(bytes).and_then(|_| file.sync_all());
+    drop(file);
+    let linked = written.and_then(|_| fs::hard_link(&temp, &path));
+    let _ = fs::remove_file(&temp);
+    match linked {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => existing(&path),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 // Retention is optional mutation feedback, not execution coverage. Once either
 // budget is full, keep executing cases without growing the retained pool.
 // A generated fuzz case must differ from its seed. Random XOR bytes can be
@@ -1145,6 +1176,20 @@ fn fuzz_inconclusive_exits(params: &toml::Table) -> Result<BTreeSet<i32>, String
         }
     }
     Ok(codes)
+}
+
+/// Lowercase hex of an unsaved reproducer, capped so a 64 KiB input cannot
+/// flood the log. A truncated preview says so; the seed still replays it.
+fn hex_preview(bytes: &[u8]) -> String {
+    const CAP: usize = 4096;
+    let mut out: String = bytes.iter().take(CAP).map(|b| format!("{b:02x}")).collect();
+    if bytes.len() > CAP {
+        out.push_str(&format!("...(truncated; {} bytes total)", bytes.len()));
+    }
+    if out.is_empty() {
+        out.push_str("<empty>");
+    }
+    out
 }
 
 /// One deterministic mutation of `base`, never longer than `max_bytes`.
@@ -1359,13 +1404,22 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                 break;
             }
         }
-        let saved = write_failure(root, &shrunk, &project)?;
+        // The defect is confirmed. Failing to persist it (read-only checkout,
+        // full disk, hostile artifact directory) must not turn the run into
+        // an inconclusive exit 2 that hides the finding: report it with the
+        // minimized input inline instead.
+        let location = match write_failure(root, &shrunk, &project) {
+            Ok(saved) => format!("path={}", saved.display()),
+            Err(reason) => {
+                eprintln!("FUZZ REPRODUCER NOT SAVED: {reason}");
+                format!("path=<unsaved> input_hex={}", hex_preview(&shrunk))
+            }
+        };
         println!(
-            "FUZZ FAILURE seed={} iteration={i} finding={code:?} initial={} minimized={} path={}",
+            "FUZZ FAILURE seed={} iteration={i} finding={code:?} initial={} minimized={} {location}",
             settings.seed,
             case.len(),
             shrunk.len(),
-            saved.display()
         );
         return Ok(1);
     }
@@ -1748,7 +1802,7 @@ mod tests {
         }
         let mut params = toml::Table::new();
         params.insert("corpus".into(), toml::Value::String("seeds".into()));
-        let expected = if cfg!(target_os = "linux") {
+        let expected = if cfg!(unix) {
             "corpus aggregate budget exhausted"
         } else {
             "corpus byte budget exceeded"
@@ -1822,7 +1876,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn opened_corpus_descriptor_denies_symlinks_and_oversize() {
         use std::os::unix::fs::symlink;
@@ -1839,7 +1893,7 @@ mod tests {
         symlink(&source, &alias).unwrap();
         assert!(crate::fs_secure::read_project_file(dir.path(), Path::new("alias"), 3).is_err());
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn fuzz_failure_artifact_collision_denies_symlink_alias() {
         use std::os::unix::fs::symlink;

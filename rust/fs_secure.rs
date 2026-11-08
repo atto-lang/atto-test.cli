@@ -1,4 +1,4 @@
-//! Linux project-root anchored file operations.
+//! Unix project-root anchored file operations.
 //!
 //! Every existing ancestor is opened with O_DIRECTORY | O_NOFOLLOW, and
 //! the final file with O_NOFOLLOW | O_NONBLOCK. This prevents symlink
@@ -6,9 +6,9 @@
 //! and fuzz reproducer creation. It does NOT constrain a test subprocess,
 //! protect a root directory renamed by a hostile concurrent process,
 //! or substitute for an OS sandbox.
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
-use std::ffi::{CString, OsStr};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -22,10 +22,11 @@ use std::path::{Component, Path, PathBuf};
 // any open that succeeded carried no O_NOFOLLOW protection at all.
 use libc::{O_CLOEXEC, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_NONBLOCK, O_RDONLY, O_WRONLY};
 
-unsafe extern "C" {
-    fn openat(dirfd: i32, path: *const std::ffi::c_char, flags: i32, mode: u32) -> i32;
-    fn mkdirat(dirfd: i32, path: *const std::ffi::c_char, mode: u32) -> i32;
-}
+// openat(2) is variadic. A hand-written fixed-arity declaration passes the
+// mode in a register, but Apple arm64 reads variadic arguments from the
+// stack, so newly created files got arbitrary permissions there. libc's
+// declarations carry the real C signatures.
+use libc::{mkdirat, openat};
 
 fn components(path: &Path) -> Result<Vec<&OsStr>, String> {
     let mut parts = Vec::new();
@@ -44,6 +45,123 @@ fn components(path: &Path) -> Result<Vec<&OsStr>, String> {
 
 fn c_name(name: &OsStr) -> Result<CString, String> {
     CString::new(name.as_bytes()).map_err(|_| "NUL in project path".into())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+struct EntryStat {
+    kind: Kind,
+    dev: u64,
+    ino: u64,
+}
+
+/// lstat relative to an opened directory: never follows a final symlink and
+/// never re-resolves a pathname. Does not trust readdir's d_type.
+fn stat_at(directory: &File, name: &OsStr) -> Result<EntryStat, String> {
+    let c = c_name(name)?;
+    // SAFETY: zeroed stat is a valid out-parameter for fstatat.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            c.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc != 0 {
+        return Err(format!(
+            "cannot stat project entry: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let kind = match st.st_mode & libc::S_IFMT {
+        libc::S_IFREG => Kind::File,
+        libc::S_IFDIR => Kind::Dir,
+        libc::S_IFLNK => Kind::Symlink,
+        _ => Kind::Other,
+    };
+    // Same widening as std's MetadataExt::{dev, ino}, so values compare.
+    #[allow(clippy::unnecessary_cast)]
+    return Ok(EntryStat {
+        kind,
+        dev: st.st_dev as u64,
+        ino: st.st_ino as u64,
+    });
+}
+
+fn clear_errno() {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    unsafe {
+        *libc::__error() = 0;
+    }
+}
+
+/// Entry names of an already-opened directory, at most `limit` of them.
+/// A fresh descriptor for "." keeps the caller's descriptor offset intact.
+/// This replaces read_dir("/proc/self/fd/N"), which needed procfs, existed
+/// only on Linux, and confined the anchored checks to that one platform.
+fn read_dir_names(directory: &File, limit: usize) -> Result<Vec<OsString>, String> {
+    let fd = unsafe {
+        openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "cannot enumerate project directory: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: fd is a fresh directory descriptor; fdopendir takes ownership.
+    let dir = unsafe { libc::fdopendir(fd) };
+    if dir.is_null() {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(format!("cannot enumerate project directory: {error}"));
+    }
+    struct Guard(*mut libc::DIR);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            unsafe { libc::closedir(self.0) };
+        }
+    }
+    let guard = Guard(dir);
+    let mut names = Vec::new();
+    loop {
+        clear_errno();
+        // SAFETY: guard.0 is a live DIR*; the entry is copied before the next call.
+        let entry = unsafe { libc::readdir(guard.0) };
+        if entry.is_null() {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error().unwrap_or(0) != 0 {
+                return Err(format!("project directory enumeration failed: {error}"));
+            }
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        if names.len() >= limit {
+            return Err("project directory entry budget exhausted".into());
+        }
+        names.push(OsStr::from_bytes(name).to_os_string());
+    }
+    Ok(names)
 }
 
 fn opened(fd: i32) -> Result<File, String> {
@@ -150,7 +268,7 @@ impl ProjectRoot {
         read_corpus_fd(&self.fd, relative, max_files, per_file, total)
     }
 
-    pub fn reproducer(&self, relative: &Path, bytes: &[u8]) -> Result<(), String> {
+    pub fn reproducer(&self, relative: &Path, bytes: &[u8]) -> Result<bool, String> {
         create_or_match_fd(&self.fd, relative, bytes)
     }
 }
@@ -189,10 +307,7 @@ pub fn read_project_file(
 }
 
 /// List only regular corpus files using an anchored, already-opened
-/// directory descriptor. /proc/self/fd is a Linux-only handle to that open
-/// directory; it does not re-resolve the original untrusted project path.
-/// If procfs is unavailable, fail closed rather than falling back to read_dir
-/// by pathname (which would reintroduce ancestor substitution).
+/// directory descriptor; the original untrusted path is never re-resolved.
 #[cfg(test)]
 pub fn list_project_files(
     root: &Path,
@@ -208,14 +323,12 @@ pub fn list_project_files(
             0,
         )
     })?;
-    let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
     let mut found = Vec::new();
-    for entry in fs::read_dir(&fd_path).map_err(|e| format!("secure corpus listing denied: {e}"))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
+    for name in read_dir_names(&directory, max_files.saturating_add(1))? {
+        if stat_at(&directory, &name)?.kind != Kind::File {
             return Err("corpus directory contains a symlink or nonregular entry".into());
         }
-        found.push(relative.join(entry.file_name()));
+        found.push(relative.join(name));
         if found.len() > max_files {
             return Err("corpus file count exceeds admission budget".into());
         }
@@ -240,21 +353,16 @@ fn read_corpus_directory(
     total: usize,
 ) -> Result<Vec<Vec<u8>>, String> {
     use std::os::unix::fs::MetadataExt;
-    let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
     let mut records = Vec::new();
     let mut aggregate = 0usize;
-    for entry in
-        fs::read_dir(&fd_path).map_err(|e| format!("secure corpus enumeration denied: {e}"))?
-    {
-        let entry = entry.map_err(|e| e.to_string())?;
-        if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
+    for name in read_dir_names(directory, max_files.saturating_add(1))? {
+        let listed = stat_at(directory, &name)?;
+        if listed.kind != Kind::File {
             return Err("corpus contains a symlink or nonregular entry".into());
         }
         if records.len() >= max_files {
             return Err("corpus count exceeds admission budget".into());
         }
-        let listed = entry.metadata().map_err(|e| e.to_string())?;
-        let name = entry.file_name();
         let c = c_name(&name)?;
         let input = opened(unsafe {
             openat(
@@ -265,7 +373,7 @@ fn read_corpus_directory(
             )
         })?;
         let actual = input.metadata().map_err(|e| e.to_string())?;
-        if !actual.is_file() || actual.dev() != listed.dev() || actual.ino() != listed.ino() {
+        if !actual.is_file() || actual.dev() != listed.dev || actual.ino() != listed.ino {
             return Err("corpus entry changed identity during enumeration".into());
         }
         if actual.len() > per_file as u64 {
@@ -362,31 +470,29 @@ pub fn discover_sources(
         if depth > max_depth {
             return Err("source discovery depth budget exhausted".into());
         }
-        let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
-        for entry in fs::read_dir(fd_path)
-            .map_err(|e| format!("secure source discovery unavailable: {e}"))?
-        {
-            let entry = entry.map_err(|e| e.to_string())?;
+        let remaining = max_entries
+            .saturating_sub(visited_entries)
+            .saturating_add(1);
+        for name in read_dir_names(&directory, remaining)? {
             visited_entries = visited_entries
                 .checked_add(1)
                 .ok_or("source discovery counter overflow")?;
             if visited_entries > max_entries {
                 return Err("source discovery entry budget exhausted".into());
             }
-            let name = entry.file_name();
             let name_text = name.to_str().ok_or("non-UTF-8 source path")?;
             if name_text.starts_with('.') || skipped.contains(&name_text) {
                 continue;
             }
-            let kind = entry.file_type().map_err(|e| e.to_string())?;
-            if kind.is_symlink() {
+            let kind = stat_at(&directory, &name)?.kind;
+            if kind == Kind::Symlink {
                 return Err("source discovery encountered a symlink".into());
             }
             let child_relative = relative.join(&name);
-            if kind.is_dir() {
+            if kind == Kind::Dir {
                 let child = step_dir(&directory, &name, false)?;
                 pending.push((child, child_relative, depth + 1));
-            } else if kind.is_file()
+            } else if kind == Kind::File
                 && matches!(
                     child_relative.extension().and_then(|ext| ext.to_str()),
                     Some("atto" | "ores")
@@ -422,55 +528,97 @@ pub fn discover_sources(
 /// Create an immutable fuzz reproducer only if absent, or compare an existing
 /// bounded regular file at the securely opened parent. No path-based
 /// read-after-check, symlink following, or truncation.
-fn create_or_match_fd(root: &File, relative: &Path, expected: &[u8]) -> Result<(), String> {
+///
+/// Bytes go to a unique temporary file that is fsynced and then hard-linked
+/// into place: linkat never replaces, so the final name holds either the
+/// complete reproducer or nothing. A run killed mid-write previously left a
+/// truncated file that turned every later identical finding into exit 2.
+///
+/// Ok(true): saved, or an identical reproducer already exists.
+/// Ok(false): the name is taken by different bytes (caller picks another).
+fn create_or_match_fd(root: &File, relative: &Path, expected: &[u8]) -> Result<bool, String> {
     let (parent, name) = parent_and_name_fd(root, relative, true)?;
+    if let Some(same) = matches_existing(&parent, &name, expected)? {
+        return Ok(same);
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp = CString::new(format!(".tmp-{}-{stamp}", std::process::id()))
+        .map_err(|_| "invalid temporary reproducer name")?;
     let fd = unsafe {
         openat(
             parent.as_raw_fd(),
-            name.as_ptr(),
+            temp.as_ptr(),
             O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-            0o600,
+            0o600 as libc::c_uint,
         )
     };
-    if fd >= 0 {
-        let mut file = opened(fd)?;
-        file.write_all(expected)
-            .map_err(|e| format!("cannot write reproducer: {e}"))?;
-        file.sync_all()
-            .map_err(|e| format!("cannot sync reproducer: {e}"))?;
-        return Ok(());
+    let mut file = opened(fd).map_err(|e| format!("cannot create reproducer: {e}"))?;
+    let unlink_temp = || unsafe { libc::unlinkat(parent.as_raw_fd(), temp.as_ptr(), 0) };
+    if let Err(e) = file.write_all(expected).and_then(|_| file.sync_all()) {
+        unlink_temp();
+        return Err(format!("cannot write reproducer: {e}"));
     }
-    if std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists {
-        return Err(format!(
-            "cannot create reproducer: {}",
-            std::io::Error::last_os_error()
-        ));
+    drop(file);
+    let linked = unsafe {
+        libc::linkat(
+            parent.as_raw_fd(),
+            temp.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            0,
+        )
+    };
+    let link_error = std::io::Error::last_os_error();
+    unlink_temp();
+    if linked == 0 {
+        return Ok(true);
     }
-    let existing = opened(unsafe {
+    if link_error.kind() == std::io::ErrorKind::AlreadyExists {
+        // Lost a race with a concurrent writer: compare what won.
+        return Ok(matches_existing(&parent, &name, expected)?.unwrap_or(false));
+    }
+    Err(format!("cannot publish reproducer: {link_error}"))
+}
+
+/// None: absent. Some(true): identical regular file. Some(false): different
+/// bytes. A symlink or nonregular entry under the name is an error.
+fn matches_existing(parent: &File, name: &CStr, expected: &[u8]) -> Result<Option<bool>, String> {
+    let fd = unsafe {
         openat(
             parent.as_raw_fd(),
             name.as_ptr(),
             O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
             0,
         )
-    })?;
+    };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(None);
+        }
+        return Err(format!("unsafe existing reproducer: {error}"));
+    }
+    let existing = opened(fd)?;
     let metadata = existing.metadata().map_err(|e| e.to_string())?;
-    if !metadata.is_file() || metadata.len() != expected.len() as u64 {
-        return Err("colliding reproducer is not the same bounded file".into());
+    if !metadata.is_file() {
+        return Err("existing reproducer is not a regular file".into());
+    }
+    if metadata.len() != expected.len() as u64 {
+        return Ok(Some(false));
     }
     let mut bytes = Vec::new();
     existing
         .take(expected.len() as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes != expected {
-        return Err("fuzz reproducer collision or hostile content".into());
-    }
-    Ok(())
+    Ok(Some(bytes == expected))
 }
 
 #[cfg(test)]
-pub fn create_or_match(root: &Path, relative: &Path, expected: &[u8]) -> Result<(), String> {
+pub fn create_or_match(root: &Path, relative: &Path, expected: &[u8]) -> Result<bool, String> {
     ProjectRoot::new(root)?.reproducer(relative, expected)
 }
 
@@ -506,9 +654,16 @@ mod tests {
         let root = tmp.path().join("project");
         std::fs::create_dir(&root).unwrap();
         let output = Path::new(".oreslang-test/failures/fuzz-01.bin");
-        create_or_match(&root, output, b"abc").unwrap();
-        create_or_match(&root, output, b"abc").unwrap();
-        assert!(create_or_match(&root, output, b"bad").is_err());
+        assert_eq!(create_or_match(&root, output, b"abc"), Ok(true));
+        assert_eq!(create_or_match(&root, output, b"abc"), Ok(true));
+        assert_eq!(create_or_match(&root, output, b"bad"), Ok(false));
+        assert_eq!(create_or_match(&root, output, b"abcd"), Ok(false));
+        // No temporary files are left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(root.join(".oreslang-test/failures"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("fuzz-01.bin")]);
         let outside = tmp.path().join("outside");
         std::fs::create_dir(&outside).unwrap();
         std::fs::rename(root.join(".oreslang-test"), root.join(".renamed")).unwrap();
@@ -654,12 +809,8 @@ mod tests {
         std::fs::write(root.join("large.bin"), b"long-data").unwrap();
         assert!(read_project_file(&root, Path::new("large.bin"), 3).is_err());
         let fifo = root.join("fifo");
-        use std::os::unix::ffi::OsStrExt;
-        unsafe extern "C" {
-            fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
-        }
         let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
-        assert_eq!(unsafe { mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         assert!(read_project_file(&root, Path::new("fifo"), 10).is_err());
     }
 }

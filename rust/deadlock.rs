@@ -4,7 +4,7 @@
 
 use crate::race_offline::{relative_trace, Parser};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 use std::io::Read;
 use std::path::Path;
 
@@ -516,13 +516,13 @@ pub fn analyze(contents: &str) -> Result<Report, String> {
 }
 
 pub fn offline(root: &Path, name: &str) -> Result<i32, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     relative_trace(root, name)?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let path = relative_trace(root, name)?;
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     let data = crate::fs_secure::read_project_file(root, Path::new(name), MAX_BYTES as usize)?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let data = {
         if path.metadata().map_err(|e| e.to_string())?.len() > MAX_BYTES {
             return Err("deadlock trace exceeds byte budget".into());

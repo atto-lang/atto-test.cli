@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
@@ -153,7 +153,7 @@ fn discover(root: &Path, explicit: &[String]) -> Result<Vec<String>, String> {
         }
         return Ok(selected.into_iter().collect());
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         let sources = crate::fs_secure::discover_sources(
             root,
@@ -177,7 +177,7 @@ fn discover(root: &Path, explicit: &[String]) -> Result<Vec<String>, String> {
         }
         return Ok(sources);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let skip = [
             ".git",
@@ -238,9 +238,9 @@ fn discover(root: &Path, explicit: &[String]) -> Result<Vec<String>, String> {
     }
 }
 fn read_source(root: &Path, name: &str) -> Result<String, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     let buf = crate::fs_secure::read_project_file(root, Path::new(name), MAX_FILE)?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let buf = {
         let path = root.join(name);
         let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;

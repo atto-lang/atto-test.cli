@@ -3,7 +3,7 @@
 //! traces never authorize runtime instrumentation completeness.
 
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 use std::io::Read;
 use std::path::{Component, Path};
 
@@ -520,13 +520,13 @@ pub(crate) fn relative_trace(root: &Path, name: &str) -> Result<std::path::PathB
 }
 
 pub fn offline(root: &Path, name: &str) -> Result<i32, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     relative_trace(root, name)?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let path = relative_trace(root, name)?;
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     let bytes = crate::fs_secure::read_project_file(root, Path::new(name), MAX_BYTES as usize)?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let bytes = {
         let meta = path.metadata().map_err(|e| e.to_string())?;
         if meta.len() > MAX_BYTES {

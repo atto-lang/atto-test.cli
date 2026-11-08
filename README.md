@@ -59,7 +59,12 @@ The Rust engine uses deterministic SplitMix64 mutation (byte flips, insertion,
 deletion, chunk duplication and splicing with another pool entry, so corpus
 inputs can grow, shrink and recombine) over deduplicated seed cases. It replays a failing case twice before minimization, then applies
 a bounded reduction while preserving the exit code. Reproduced failures are
-stored under .oreslang-test/failures. On Unix a crash signal (SIGSEGV,
+stored under .oreslang-test/failures, written to a temporary file and
+hard-linked into place, so a final name never holds a partial file. A name
+already holding different bytes gets a numbered sibling (`-1` .. `-15`). If
+the reproducer cannot be saved at all (read-only checkout, full disk,
+symlinked artifact directory), the confirmed defect is still reported (exit
+1) as `path=<unsaved> input_hex=...`; artifact I/O never hides a finding. On Unix a crash signal (SIGSEGV,
 SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP) is a reproducible defect and is
 minimized like a nonzero exit. A timeout, runaway output beyond the 4 MB
 capture budget, a non-crash signal (SIGKILL/SIGTERM from an OOM killer or CI
@@ -190,12 +195,14 @@ model's schedule or that its instrumentation covered all memory accesses.
   oversize shapes), constrained by the configured per-case maximum. A test
   target must demonstrate a reproducible violated property; the input's
   appearance alone is not a vulnerability finding. The `basic` profile is
-  the default. On Linux, effects and audit source discovery,
+  the default. On every Unix (Linux, macOS, BSD), effects and audit source discovery,
   source/config reads, advisory audit inputs, offline race/deadlock traces,
   logical models, corpus enumeration and reads, and fuzz-reproducer creation
   use root-anchored directory descriptors with `O_NOFOLLOW`;
-  input reads are size-bounded on the opened file, and `/proc/self/fd`
-  is required for secure enumeration. A single fuzz invocation additionally
+  input reads are size-bounded on the opened file, and directories are
+  enumerated from the opened descriptor (`fdopendir`/`readdir`, entry types
+  from `fstatat` without following symlinks), so procfs is not required.
+  A single fuzz invocation additionally
   retains one project-root FD across corpus loading and failure-artifact
   creation. It opens corpus files relative to the same pinned directory,
   checks device/inode across enumeration and open, and promptly closes
@@ -203,7 +210,7 @@ model's schedule or that its instrumentation covered all memory accesses.
   each fuzz guest execution and before reporting artifact paths.
   These are conservative detection checks, **not** atomic snapshot isolation
   or protection against concurrent writes to already-open regular files.
-  The non-Linux fallback still uses pathname-based preflight checks.
+  Only the Windows fallback still uses pathname-based preflight checks.
   On Unix, the launcher now also kills surviving members of the guest's
   isolated process group after normal parent exit (not only on timeout).
   This reduces late-writer leaks but does not contain descendants that

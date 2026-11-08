@@ -174,7 +174,16 @@ fn symlinked_corpus_ancestors_and_output_directories_are_rejected() {
     .unwrap();
     symlink(outside.path(), root.path().join(".oreslang-test")).unwrap();
     let unsafe_output = cli(root.path(), &["--fuzz", "--cases", "1"]);
-    assert_eq!(unsafe_output.status.code(), Some(2), "{unsafe_output:?}");
+    // The symlinked artifact directory is still refused (nothing is written
+    // outside the project), but the confirmed defect is reported with its
+    // input inline rather than hidden behind an inconclusive exit 2.
+    assert_eq!(unsafe_output.status.code(), Some(1), "{unsafe_output:?}");
+    let stdout = String::from_utf8_lossy(&unsafe_output.stdout);
+    assert!(
+        stdout.contains("FUZZ FAILURE") && stdout.contains("path=<unsaved>"),
+        "{stdout}"
+    );
+    assert!(String::from_utf8_lossy(&unsafe_output.stderr).contains("REPRODUCER NOT SAVED"));
     assert!(fs::read_dir(outside.path()).unwrap().next().is_none());
 }
 
@@ -485,15 +494,17 @@ fn fuzz_aborted_guest_is_a_finding_and_persists_reproducer() {
     let root = tempfile::tempdir().unwrap();
     fuzz_project(
         root.path(),
-        "#!/bin/sh\nn=$(wc -c < /dev/stdin | tr -d ' ')\nif [ \"$n\" -ge 1 ]; then ulimit -c 0; kill -ABRT $; fi\nexit 0\n",
+        "#!/bin/sh\nn=$(wc -c < /dev/stdin | tr -d ' ')\nif [ \"$n\" -ge 1 ]; then ulimit -c 0; kill -ABRT $$; fi\nexit 0\n",
         "",
     );
     let result = cli(root.path(), &["--fuzz", "--seed", "7", "--cases", "4"]);
     assert_eq!(result.status.code(), Some(1), "{result:?}");
     let out = String::from_utf8_lossy(&result.stdout);
     assert!(out.contains("finding=Signal(6)"), "{out}");
-    assert!(root.path().join(".oreslang-test/failures").is_dir(),
-            "reproducible abort must produce a finding receipt");
+    assert!(
+        root.path().join(".oreslang-test/failures").is_dir(),
+        "reproducible abort must produce a finding receipt"
+    );
 }
 
 // A reduced input that hangs must not erase an already-confirmed defect.
@@ -646,4 +657,42 @@ fn fuzz_recursion_through_a_spawning_wrapper_is_refused() {
     assert!(!root.path().join(".oreslang-test/failures").exists());
     // Exactly one wrapper level ran; the nested CLI refused immediately.
     assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 1);
+}
+
+// A confirmed defect must survive artifact I/O failure: read-only checkouts
+// and a truncated file left by an interrupted earlier run both used to turn
+// the finding into exit 2 with no FUZZ FAILURE line.
+#[cfg(unix)]
+#[test]
+fn confirmed_defect_is_reported_when_reproducer_cannot_be_saved_or_collides() {
+    use std::os::unix::fs::PermissionsExt;
+    let script = "#!/bin/sh\n[ -s /dev/stdin ] && exit 7\nexit 0\n";
+
+    let leftover = tempfile::tempdir().unwrap();
+    fuzz_project(leftover.path(), script, "");
+    let first = cli(leftover.path(), &["--fuzz", "--seed", "1", "--cases", "4"]);
+    assert_eq!(first.status.code(), Some(1), "{first:?}");
+    let failures = leftover.path().join(".oreslang-test/failures");
+    let saved: Vec<_> = fs::read_dir(&failures)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(saved.len(), 1);
+    fs::write(&saved[0], b"").unwrap(); // truncated by an interrupted run
+    let again = cli(leftover.path(), &["--fuzz", "--seed", "1", "--cases", "4"]);
+    assert_eq!(again.status.code(), Some(1), "{again:?}");
+    let out = String::from_utf8_lossy(&again.stdout);
+    assert!(
+        out.contains("FUZZ FAILURE") && out.contains("-1.bin"),
+        "{out}"
+    );
+
+    let readonly = tempfile::tempdir().unwrap();
+    fuzz_project(readonly.path(), script, "");
+    fs::set_permissions(readonly.path(), fs::Permissions::from_mode(0o555)).unwrap();
+    let blocked = cli(readonly.path(), &["--fuzz", "--seed", "1", "--cases", "4"]);
+    fs::set_permissions(readonly.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(blocked.status.code(), Some(1), "{blocked:?}");
+    let out = String::from_utf8_lossy(&blocked.stdout);
+    assert!(out.contains("path=<unsaved> input_hex="), "{out}");
 }
