@@ -311,6 +311,13 @@ pub fn analyze(text: &str) -> Result<Report, String> {
         if finished.contains(&task) {
             return Err("event after task completion".into());
         }
+        // A task blocked waiting for a held lock cannot execute memory
+        // accesses, send/receive messages or spawn children. Previously
+        // those events were admitted while pending_waits was set, allowing
+        // an impossible trace to obtain an OBSERVED-CLEAN verdict.
+        if pending_waits.contains_key(&task) && op != "unwait" {
+            return Err("blocked task executed before lock wait cancellation".into());
+        }
         // Take the clock out instead of cloning it on every event; it is
         // reinserted below. Checks against `clocks` must account for it.
         let mut clock = clocks.remove(&task).ok_or("event from unknown task")?;
