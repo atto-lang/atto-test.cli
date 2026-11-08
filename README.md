@@ -66,7 +66,9 @@ cancellation) or an incomplete run is inconclusive (exit 2) rather than a
 clean pass. During minimization such an outcome simply does not reproduce
 the confirmed defect; it cannot erase it. Targets may echo arbitrary bytes
 to stdout or stderr: captures are decoded lossily for fuzzing. A passing run
-reports `seeds=N mutated=M` so a run that executed no mutations is visible.
+reports `seeds=N mutated=M` and requires **at least one generated mutation**.
+If the requested case budget only replays the original seeds, the run is
+`FUZZ INCONCLUSIVE` (exit 2, `mutated=0`), never a vacuous green pass.
 This is black-box mutation fuzzing, not coverage-guided source fuzzing.
 For native fuzz adapters that reserve nonzero process exits for
 **inconclusive infrastructure conditions**, optionally declare
