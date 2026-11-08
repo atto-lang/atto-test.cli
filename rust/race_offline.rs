@@ -883,4 +883,61 @@ mod tests {
         assert_eq!(report.conflicts, 0);
     }
 
+
+    #[test]
+    fn unrelated_memory_location_does_not_change_existing_conflict_count() {
+        let base = [
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"access","task":"b","location":"x","mode":"R"}"#,
+        ];
+        let original = analyze(&receipt(&base)).unwrap();
+        assert_eq!(original.conflicts, 1);
+        let extra = [
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"unrelated","mode":"W"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"access","task":"b","location":"x","mode":"R"}"#,
+            r#"{"op":"access","task":"b","location":"unrelated2","mode":"R"}"#,
+        ];
+        let augmented = analyze(&receipt(&extra)).unwrap();
+        assert_eq!(augmented.conflicts, original.conflicts);
+        assert_eq!(augmented.accesses, original.accesses + 2);
+    }
+
+    #[test]
+    fn same_task_reads_and_writes_do_not_race_with_themselves() {
+        let mut events = vec![r#"{"op":"task","task":"a"}"#];
+        for i in 0..64 {
+            let mode = if i % 2 == 0 { "W" } else { "R" };
+            events.push(if mode == "W" {
+                r#"{"op":"access","task":"a","location":"x","mode":"W"}"#
+            } else {
+                r#"{"op":"access","task":"a","location":"x","mode":"R"}"#
+            });
+        }
+        let report = analyze(&receipt(&events)).unwrap();
+        assert_eq!(report.conflicts, 0);
+        assert_eq!(report.accesses, 64);
+    }
+
+    #[test]
+    fn terminal_receipt_mismatch_and_extra_json_fields_fail_closed() {
+        let valid = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"R"}"#,
+        ]);
+        assert_eq!(analyze(&valid).unwrap().events, 2);
+        for bad in [
+            valid.replace(r#""events":2"#, r#""events":3"#),
+            valid.replace(r#""run_id":"r""#, r#""run_id":"other""#),
+            valid.replace(r#""mode":"R""#, r#""mode":"R","ignored":true"#),
+            valid.replace(r#""version":1"#, r#""version":2"#),
+        ] {
+            assert!(analyze(&bad).is_err(), "accepted malformed trace: {bad}");
+        }
+    }
+
 }
