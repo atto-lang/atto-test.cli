@@ -478,6 +478,24 @@ fn fuzz_crash_signal_is_a_minimized_reproducible_defect() {
     assert!(out.contains("minimized=1"), "{out}");
 }
 
+// SIGABRT is a reproducible guest crash, not CI cancellation.
+#[cfg(unix)]
+#[test]
+fn fuzz_aborted_guest_is_a_finding_and_persists_reproducer() {
+    let root = tempfile::tempdir().unwrap();
+    fuzz_project(
+        root.path(),
+        "#!/bin/sh\nn=$(wc -c < /dev/stdin | tr -d ' ')\nif [ \"$n\" -ge 1 ]; then ulimit -c 0; kill -ABRT $; fi\nexit 0\n",
+        "",
+    );
+    let result = cli(root.path(), &["--fuzz", "--seed", "7", "--cases", "4"]);
+    assert_eq!(result.status.code(), Some(1), "{result:?}");
+    let out = String::from_utf8_lossy(&result.stdout);
+    assert!(out.contains("finding=Signal(6)"), "{out}");
+    assert!(root.path().join(".oreslang-test/failures").is_dir(),
+            "reproducible abort must produce a finding receipt");
+}
+
 // A reduced input that hangs must not erase an already-confirmed defect.
 #[cfg(unix)]
 #[test]
