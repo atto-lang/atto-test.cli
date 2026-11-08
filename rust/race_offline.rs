@@ -715,4 +715,116 @@ mod tests {
         let s = "{\"op\":\"begin\",\"version\":1,\"run_id\":\"id\",\"backend\":\"llvm\"}\n{\"op\":\"task\",\"task\":\"a\"}\n{\"op\":\"task\",\"task\":\"b\"}\n{\"op\":\"task\",\"task\":\"c\"}\n{\"op\":\"access\",\"task\":\"a\",\"location\":\"x\",\"mode\":\"W\"}\n{\"op\":\"access\",\"task\":\"b\",\"location\":\"x\",\"mode\":\"W\"}\n{\"op\":\"access\",\"task\":\"c\",\"location\":\"x\",\"mode\":\"R\"}\n{\"op\":\"end\",\"run_id\":\"id\",\"events\":6}\n";
         assert_eq!(analyze(s).unwrap().conflicts, 3);
     }
+
+    // These are deterministic, complete ORES_RACE_V1 traces. Their verdicts
+    // probe the scheduler's happens-before edges, not live guest execution.
+    fn receipt(events: &[&str]) -> String {
+        let mut lines = vec![
+            r#"{"op":"begin","version":1,"run_id":"r","backend":"llvm"}"#.to_owned(),
+        ];
+        lines.extend(events.iter().map(|event| (*event).to_owned()));
+        lines.push(format!(
+            r#"{{"op":"end","run_id":"r","events":{}}}"#,
+            events.len()
+        ));
+        return lines.join("\n") + "\n";
+    }
+
+    #[test]
+    fn read_read_across_tasks_is_not_a_race() {
+        let trace = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"R"}"#,
+            r#"{"op":"access","task":"b","location":"x","mode":"R"}"#,
+        ]);
+        let result = analyze(&trace).unwrap();
+        assert_eq!(result.accesses, 2);
+        assert_eq!(result.conflicts, 0);
+    }
+
+    #[test]
+    fn fork_join_transfers_child_write_to_parent_without_race() {
+        let trace = receipt(&[
+            r#"{"op":"task","task":"parent"}"#,
+            r#"{"op":"fork","task":"parent","child":"child"}"#,
+            r#"{"op":"access","task":"child","location":"x","mode":"W"}"#,
+            r#"{"op":"finish","task":"child"}"#,
+            r#"{"op":"join","task":"parent","child":"child"}"#,
+            r#"{"op":"access","task":"parent","location":"x","mode":"R"}"#,
+        ]);
+        let result = analyze(&trace).unwrap();
+        assert_eq!(result.accesses, 2);
+        assert_eq!(result.conflicts, 0);
+    }
+
+    #[test]
+    fn lock_release_acquire_orders_other_task_accesses() {
+        let ordered = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"lock","task":"a","name":"mu"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"unlock","task":"a","name":"mu"}"#,
+            r#"{"op":"lock","task":"b","name":"mu"}"#,
+            r#"{"op":"access","task":"b","location":"x","mode":"R"}"#,
+            r#"{"op":"unlock","task":"b","name":"mu"}"#,
+        ]);
+        assert_eq!(analyze(&ordered).unwrap().conflicts, 0);
+        let unordered = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"access","task":"b","location":"x","mode":"R"}"#,
+        ]);
+        assert_eq!(analyze(&unordered).unwrap().conflicts, 1);
+    }
+
+    #[test]
+    fn multihop_message_dependency_orders_transitive_accesses() {
+        let ordered = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"task","task":"c"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"send","task":"a","message":"m1"}"#,
+            r#"{"op":"recv","task":"b","message":"m1"}"#,
+            r#"{"op":"send","task":"b","message":"m2"}"#,
+            r#"{"op":"recv","task":"c","message":"m2"}"#,
+            r#"{"op":"access","task":"c","location":"x","mode":"W"}"#,
+        ]);
+        assert_eq!(analyze(&ordered).unwrap().conflicts, 0);
+    }
+
+    #[test]
+    fn replayed_message_identity_fails_even_after_consumption() {
+        let trace = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"send","task":"a","message":"m"}"#,
+            r#"{"op":"recv","task":"b","message":"m"}"#,
+            r#"{"op":"send","task":"a","message":"m"}"#,
+        ]);
+        assert!(analyze(&trace).unwrap_err().contains("reused message identity"));
+    }
+
+    #[test]
+    fn unexpected_join_or_post_completion_access_is_rejected() {
+        let invalid_join = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"R"}"#,
+            r#"{"op":"join","task":"a","child":"b"}"#,
+        ]);
+        assert!(analyze(&invalid_join).is_err());
+        let late_access = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"R"}"#,
+            r#"{"op":"finish","task":"a"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+        ]);
+        assert!(analyze(&late_access).is_err());
+    }
+
 }
