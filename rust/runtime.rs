@@ -28,6 +28,8 @@ impl ProjectRoot {
 }
 
 const MAX_OUTPUT: u64 = 4_000_000;
+const GUEST_MARKER: &str = "ATTO_TEST_GUEST";
+const NESTED_REFUSAL: &str = "nested `atto test` from inside a test guest refused";
 const MAX_CASES: usize = 1_000_000;
 const MAX_CORPUS_FILES: usize = 1024;
 const MAX_CORPUS_BYTES: usize = 4 * 1024 * 1024;
@@ -218,7 +220,22 @@ fn resolve_path_candidate(
             };
             directory.join(executable)
         })
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable_file(candidate))
+}
+
+// execvp skips PATH entries that are not executable regular files. The
+// recursion check must resolve the same candidate, or a non-executable
+// decoy earlier in PATH hides the wrapper that actually runs.
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    return std::fs::metadata(path)
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    return path.is_file();
 }
 
 fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
@@ -270,6 +287,11 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     }
     let mut c = Command::new(program);
     c.args(&cmd[1..]).current_dir(root).env_clear();
+    // Marks every guest. Path checks cannot see through wrappers that spawn
+    // this CLI (oreslang-cli's `atto test` dispatcher, shell scripts), and
+    // each level gets its own process group, so timeouts never reach a
+    // nested run. run() refuses guest-spawning modes when this is set.
+    c.env(GUEST_MARKER, "1");
     for key in [
         "PATH",
         "LANG",
@@ -308,6 +330,32 @@ fn kill_guest_group(leader: u32) {
             kill(-pid, 9);
         }
     }
+}
+
+/// Poll the guest leader. On Unix, detect exit with WNOWAIT so the zombie
+/// still pins its PID: killing the group *after* reaping could signal an
+/// unrelated process group that reused that number. Surviving group members
+/// are killed first, then the leader is reaped.
+#[cfg(unix)]
+fn leader_exited(child: &mut Child) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let pid = libc::id_t::try_from(child.id())
+        .map_err(|_| std::io::Error::other("child pid out of range"))?;
+    // SAFETY: zeroed siginfo_t is a valid out-parameter for waitid.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    if unsafe { libc::waitid(libc::P_PID, pid, &mut info, flags) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if info.si_signo == 0 {
+        return Ok(None); // still running
+    }
+    kill_guest_group(child.id());
+    return child.wait().map(Some);
+}
+
+#[cfg(not(unix))]
+fn leader_exited(child: &mut Child) -> std::io::Result<Option<std::process::ExitStatus>> {
+    return child.try_wait();
 }
 
 fn stop(child: &mut Child) {
@@ -374,6 +422,25 @@ fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
     return None;
 }
 
+/// ETXTBSY means another process still holds the executable open for
+/// writing: a build step finishing the compiler binary, or a concurrently
+/// forked process that inherited the writer's descriptor before exec. It
+/// clears within milliseconds, so retry briefly; every other error is final.
+fn spawn_retrying_busy(command: &mut Command) -> Result<Child, String> {
+    let mut delay = Duration::from_millis(5);
+    for attempt in 0.. {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 8 => {
+                thread::sleep(delay);
+                delay *= 2;
+            }
+            Err(e) => return Err(format!("cannot spawn test command: {e}")),
+        }
+    }
+    unreachable!()
+}
+
 fn invoke(
     mut command: Command,
     timeout: Duration,
@@ -411,9 +478,7 @@ fn invoke(
     } else {
         command.stderr(Stdio::null());
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("cannot spawn test command: {e}"))?;
+    let mut child = spawn_retrying_busy(&mut command)?;
     let start = Instant::now();
     let mut output_exceeded = false;
     let (code, signal, timed_out) = loop {
@@ -440,7 +505,7 @@ fn invoke(
                 break (None, None, false);
             }
         }
-        match child.try_wait() {
+        match leader_exited(&mut child) {
             Ok(Some(status)) => break (status.code(), exit_signal(&status), false),
             Ok(None) if start.elapsed() >= timeout => {
                 stop(&mut child);
@@ -455,12 +520,9 @@ fn invoke(
             }
         }
     };
-    // The parent process exiting does not mean its process-group descendants
-    // exited. Always terminate remaining group members before final reporting.
-    // This is best-effort containment, not an OS sandbox or complete setsid
-    // descendant tracking. On Windows this path needs a Job Object adapter.
-    #[cfg(unix)]
-    kill_guest_group(child.id());
+    // Remaining process-group members were killed before the leader was
+    // reaped (leader_exited / stop). Best-effort containment, not an OS
+    // sandbox or setsid() descendant tracking; Windows needs a Job Object.
     drop(stdin_file);
     let mut result = ProcessResult {
         code,
@@ -650,6 +712,11 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
         }
         if result.stderr.contains("FATAL: ThreadSanitizer:") {
             return Err("ThreadSanitizer initialization failed; native run inconclusive".into());
+        }
+        if result.stderr.contains(NESTED_REFUSAL) {
+            return Err(format!(
+                "{name}: native test compiler recursively invokes `atto test`"
+            ));
         }
         if result.timed_out || result.code != Some(0) || sanitizer_finding(&result.stderr).is_some()
         {
@@ -937,6 +1004,11 @@ fn classify(result: &ProcessResult) -> Result<Option<Failure>, String> {
     if result.output_exceeded {
         return Err("guest exceeded the 4 MB output capture budget".into());
     }
+    // The target is (a wrapper around) this CLI. That is a configuration
+    // error, not a defect in the code under test; never save a reproducer.
+    if result.stderr.contains(NESTED_REFUSAL) {
+        return Err("fuzz target recursively invokes `atto test`; fix [fuzz].command".into());
+    }
     if result.stderr.contains("FATAL: ThreadSanitizer:")
         || result
             .stderr
@@ -1075,6 +1147,56 @@ fn fuzz_inconclusive_exits(params: &toml::Table) -> Result<BTreeSet<i32>, String
     Ok(codes)
 }
 
+/// One deterministic mutation of `base`, never longer than `max_bytes`.
+/// In-place byte flips alone could never change a corpus input's length,
+/// so structured seeds could not grow, shrink or recombine.
+fn mutate(rng: &mut Rng, mut bytes: Vec<u8>, donor: &[u8], max_bytes: usize) -> Vec<u8> {
+    if bytes.is_empty() || rng.range(8) == 0 {
+        bytes = vec![0; rng.range(max_bytes + 1)];
+        for x in &mut bytes {
+            *x = rng.next() as u8;
+        }
+        return bytes;
+    }
+    for _ in 0..(1 + rng.range(4)) {
+        let len = bytes.len();
+        match rng.range(6) {
+            // Flip, insert, delete, duplicate a chunk, splice a donor tail.
+            0 | 1 if len > 0 => {
+                let at = rng.range(len);
+                bytes[at] ^= (rng.next() as u8) | 1;
+            }
+            2 => {
+                let at = rng.range(len + 1);
+                let count = 1 + rng.range(8);
+                let fresh: Vec<u8> = (0..count).map(|_| rng.next() as u8).collect();
+                bytes.splice(at..at, fresh);
+            }
+            3 if len > 0 => {
+                let at = rng.range(len);
+                let end = (at + 1 + rng.range(8)).min(len);
+                bytes.drain(at..end);
+            }
+            4 if len > 0 => {
+                let at = rng.range(len);
+                let end = (at + 1 + rng.range(16)).min(len);
+                let chunk = bytes[at..end].to_vec();
+                let to = rng.range(bytes.len() + 1);
+                bytes.splice(to..to, chunk);
+            }
+            5 if !donor.is_empty() => {
+                let cut = rng.range(bytes.len() + 1);
+                let from = rng.range(donor.len());
+                bytes.truncate(cut);
+                bytes.extend_from_slice(&donor[from..]);
+            }
+            _ => {}
+        }
+        bytes.truncate(max_bytes);
+    }
+    return bytes;
+}
+
 fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, String> {
     let params = section(config, "fuzz")?.ok_or("missing [fuzz] section")?;
     let cmd = commands(params, "command")?;
@@ -1132,21 +1254,10 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         let case = if i < seeds {
             samples[i].clone()
         } else {
-            let base = &samples[rng.range(samples.len())];
-            let mut bytes = base.clone();
-            if bytes.is_empty() || rng.range(4) == 0 {
-                bytes = vec![0; rng.range(max_bytes as usize + 1)];
-                for x in &mut bytes {
-                    *x = rng.next() as u8;
-                }
-            } else {
-                for _ in 0..(1 + rng.range(4)) {
-                    let idx = rng.range(bytes.len());
-                    bytes[idx] ^= rng.next() as u8;
-                }
-                bytes.truncate(max_bytes as usize);
-            }
-            ensure_distinct_mutation(base, &mut bytes, max_bytes as usize);
+            let base = samples[rng.range(samples.len())].clone();
+            let donor = &samples[rng.range(samples.len())];
+            let mut bytes = mutate(&mut rng, base.clone(), donor, max_bytes as usize);
+            ensure_distinct_mutation(&base, &mut bytes, max_bytes as usize);
             bytes
         };
         let code = match candidate(
@@ -1314,6 +1425,11 @@ pub fn run(args: &[OsString]) -> i32 {
                 return super::race_offline::offline(&root, path);
             }
             return Err("runtime --race is INCONCLUSIVE: trusted backend trace admission is not implemented; use --trace for explicitly offline Rust analysis".into());
+        }
+        if std::env::var_os(GUEST_MARKER).is_some() {
+            return Err(format!(
+                "{NESTED_REFUSAL} ({GUEST_MARKER} is set): guest-spawning modes would recurse without a bound"
+            ));
         }
         if settings.fuzz {
             fuzz(&root, &cfg, &settings)
@@ -1677,6 +1793,27 @@ mod tests {
     }
 
     #[test]
+    fn mutation_changes_length_respects_max_bytes_and_is_deterministic() {
+        let base = b"key=value;".to_vec();
+        let run = |seed| {
+            let mut rng = Rng::new(seed);
+            (0..2000)
+                .map(|_| mutate(&mut rng, base.clone(), b"donor-bytes", 16))
+                .collect::<Vec<_>>()
+        };
+        let outputs = run(9);
+        assert_eq!(outputs, run(9));
+        assert!(outputs.iter().all(|m| m.len() <= 16));
+        assert!(outputs.iter().any(|m| m.len() > base.len()));
+        assert!(outputs
+            .iter()
+            .any(|m| !m.is_empty() && m.len() < base.len()));
+        assert!(outputs.iter().any(|m| m.windows(5).any(|w| w == b"donor")));
+        let distinct: BTreeSet<_> = outputs.iter().collect();
+        assert!(distinct.len() > 1500, "{}", distinct.len());
+    }
+
+    #[test]
     fn stable_seed_reproducibility() {
         let mut a = Rng::new(42);
         let mut b = Rng::new(42);
@@ -1728,11 +1865,27 @@ mod tests {
         std::fs::create_dir_all(project.join("bin")).unwrap();
         let file = project.join("bin/oreslang-test");
         std::fs::write(&file, b"dummy").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let path = std::ffi::OsStr::new("bin");
         assert_eq!(
             resolve_path_candidate(Path::new("oreslang-test"), &project, path),
-            Some(file)
+            Some(file.clone())
         );
+        // A non-executable decoy earlier in PATH is skipped, as execvp does.
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(project.join("decoy")).unwrap();
+            std::fs::write(project.join("decoy/oreslang-test"), b"decoy").unwrap();
+            let search = std::env::join_paths(["decoy", "bin"]).unwrap();
+            assert_eq!(
+                resolve_path_candidate(Path::new("oreslang-test"), &project, &search),
+                Some(file)
+            );
+        }
     }
 
     #[test]

@@ -55,8 +55,9 @@ provenance and real compiler execution remain release blockers. See
 
 **Fuzzing:** [fuzz].command must be a TOML array of a real executable and
 argv. Corpus default tests/corpus; max_bytes defaults to 256 (range 1..65536).
-The Rust engine uses deterministic SplitMix64 byte mutation and deduplicated
-seed cases. It replays a failing case twice before minimization, then applies
+The Rust engine uses deterministic SplitMix64 mutation (byte flips, insertion,
+deletion, chunk duplication and splicing with another pool entry, so corpus
+inputs can grow, shrink and recombine) over deduplicated seed cases. It replays a failing case twice before minimization, then applies
 a bounded reduction while preserving the exit code. Reproduced failures are
 stored under .oreslang-test/failures. On Unix a crash signal (SIGSEGV,
 SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP) is a reproducible defect and is
@@ -87,7 +88,15 @@ for a reproduced guest-versus-oracle mismatch.
 
 
 Guest processes receive a minimal environment; unrelated CI secrets are not
-forwarded by default.
+forwarded by default. Every guest also receives `ATTO_TEST_GUEST=1`. A nested
+`atto test` that would spawn guests (`--fuzz` or native tests) refuses with
+exit 2, and the outer run reports the target as recursive (inconclusive)
+rather than saving a reproducer. This catches recursion through wrappers that
+spawn the CLI, such as `oreslang-cli`'s `atto test` dispatcher, which path
+checks cannot see through. Offline `--race --trace`/`--logical` stay allowed.
+On Unix the leader's exit is detected without reaping it (`waitid` with
+`WNOWAIT`), so surviving process-group members are killed while the group ID
+is still pinned, never after it could have been reused.
 
 The retained mutation pool is capped at 4096 cases and 16 MiB of case
 payload, including initial seeds and security-profile inputs. When the pool
@@ -203,7 +212,14 @@ model's schedule or that its instrumentation covered all memory accesses.
   cryptographic authenticity of guest test receipts remain open gates.
 - `--deadlock --trace file.jsonl` analyzes observed lock ordering and
   outstanding wait cycles in Rust. It is offline only and does not certify
-  liveness. `--race --deadlock --trace` combines the two findings on the
+  liveness. A lock-order cycle is reported only when the observed tasks could
+  deadlock on it (iGoodlock): each edge comes from a distinct task and the
+  tasks' held-lock sets are pairwise disjoint. One task taking A->B and later
+  B->A, or two tasks serialized by a common gate lock, is not reported. Search
+  is restricted to cyclic components of the lock graph and grouped by lock
+  shape, so consistently ordered programs cost nothing however many tasks
+  they have. Fork/join ordering between tasks is not yet considered, so a
+  reported cycle is still *potential*. `--race --deadlock --trace` combines the two findings on the
   same trace, but a missing memory access event makes the race half
   inconclusive rather than claiming a complete result.
 - The `oreslang_test::reactive::analyze` Rust host library replaces the

@@ -606,3 +606,26 @@ fn fuzz_go_style_panic_text_does_not_spoof_ubsan() {
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(stdout.contains("FUZZ PASS"), "{stdout}");
 }
+
+// A wrapper that *spawns* this CLI (like oreslang-cli's `atto test`
+// dispatcher) escapes path-based recursion checks; the guest marker must
+// stop it at the first nested level and the outer run must be inconclusive.
+#[cfg(unix)]
+#[test]
+fn fuzz_recursion_through_a_spawning_wrapper_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("levels");
+    let script = format!(
+        "#!/bin/sh\necho x >> '{}'\n'{}' --fuzz --cases 1\n",
+        marker.display(),
+        env!("CARGO_BIN_EXE_atto-test")
+    );
+    fuzz_project(root.path(), &script, "");
+    fs::remove_file(&marker).ok(); // the warm-up exec also appends
+    let result = cli(root.path(), &["--fuzz", "--cases", "1"]);
+    assert_eq!(result.status.code(), Some(2), "{result:?}");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("recursively invokes"));
+    assert!(!root.path().join(".oreslang-test/failures").exists());
+    // Exactly one wrapper level ran; the nested CLI refused immediately.
+    assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 1);
+}
