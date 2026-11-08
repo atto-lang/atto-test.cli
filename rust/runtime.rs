@@ -1021,6 +1021,20 @@ fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<Pa
 }
 // Retention is optional mutation feedback, not execution coverage. Once either
 // budget is full, keep executing cases without growing the retained pool.
+// A generated fuzz case must differ from its seed. Random XOR bytes can be
+// zero (or cancel each other), while the fresh-random branch can choose an
+// empty vector. Count actual changed payloads, not mutation attempts.
+fn ensure_distinct_mutation(base: &[u8], generated: &mut Vec<u8>, max_bytes: usize) {
+    if generated.as_slice() != base {
+        return;
+    }
+    if generated.len() < max_bytes {
+        generated.push(0xa5);
+    } else if let Some(first) = generated.first_mut() {
+        *first ^= 1;
+    }
+}
+
 fn retain_sample(samples: &mut Vec<Vec<u8>>, retained_bytes: &mut usize, case: Vec<u8>) -> bool {
     let Some(next) = retained_bytes.checked_add(case.len()) else {
         return false;
@@ -1129,6 +1143,7 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                 }
                 bytes.truncate(max_bytes as usize);
             }
+            ensure_distinct_mutation(base, &mut bytes, max_bytes as usize);
             bytes
         };
         let code = match candidate(
