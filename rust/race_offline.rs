@@ -834,4 +834,53 @@ mod tests {
         assert!(analyze(&late_access).is_err());
     }
 
+
+    #[test]
+    fn blocked_task_cannot_read_write_send_receive_or_spawn() {
+        let begin = [
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"lock","task":"a","name":"mu"}"#,
+            r#"{"op":"access","task":"a","location":"safe","mode":"R"}"#,
+            r#"{"op":"wait","task":"b","name":"mu"}"#,
+        ];
+        let forbidden = [
+            r#"{"op":"access","task":"b","location":"secret","mode":"R"}"#,
+            r#"{"op":"access","task":"b","location":"secret","mode":"W"}"#,
+            r#"{"op":"send","task":"b","message":"m"}"#,
+            r#"{"op":"recv","task":"b","message":"m"}"#,
+            r#"{"op":"fork","task":"b","child":"c"}"#,
+            r#"{"op":"finish","task":"b"}"#,
+        ];
+        for forbidden_event in forbidden {
+            let mut events = begin.to_vec();
+            events.push(forbidden_event);
+            events.push(r#"{"op":"unwait","task":"b","name":"mu"}"#);
+            events.push(r#"{"op":"unlock","task":"a","name":"mu"}"#);
+            let trace = receipt(&events);
+            let err = analyze(&trace).unwrap_err();
+            assert!(
+                err.contains("blocked task executed"),
+                "{forbidden_event}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_wait_can_resume_without_claiming_lock_ownership() {
+        let trace = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"lock","task":"a","name":"mu"}"#,
+            r#"{"op":"wait","task":"b","name":"mu"}"#,
+            r#"{"op":"unwait","task":"b","name":"mu"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"access","task":"b","location":"y","mode":"R"}"#,
+            r#"{"op":"unlock","task":"a","name":"mu"}"#,
+        ]);
+        let report = analyze(&trace).unwrap();
+        assert_eq!(report.accesses, 2);
+        assert_eq!(report.conflicts, 0);
+    }
+
 }
