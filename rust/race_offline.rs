@@ -932,7 +932,7 @@ mod tests {
         assert_eq!(analyze(&valid).unwrap().events, 2);
         for bad in [
             valid.replace(r#""events":2"#, r#""events":3"#),
-            valid.replace(r#""run_id":"r""#, r#""run_id":"other""#),
+            valid.replacen(r#""run_id":"r""#, r#""run_id":"other""#, 1),
             valid.replace(r#""mode":"R""#, r#""mode":"R","ignored":true"#),
             valid.replace(r#""version":1"#, r#""version":2"#),
         ] {
