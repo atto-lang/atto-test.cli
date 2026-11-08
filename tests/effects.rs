@@ -9,7 +9,8 @@ fn golden_direct_effect_diagnostics() {
         .iter()
         .map(|d| format!("{} [{}] {}\n", d.line, d.code, d.message))
         .collect::<String>();
-    assert_eq!(actual, include_str!("fixtures/effects-direct.txt"));
+    let expected = include_str!("fixtures/effects-direct.txt").replace("\r\n", "\n");
+    assert_eq!(actual, expected);
 }
 
 #[test]
