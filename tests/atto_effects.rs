@@ -10,10 +10,7 @@ fn canonical_atto_effects_and_legacy_alias_share_strict_exit_contract() {
         "fnc f() { raise new Error(); }",
     )
     .unwrap();
-    for binary in [
-        env!("CARGO_BIN_EXE_atto"),
-        env!("CARGO_BIN_EXE_oreslang"),
-    ] {
+    for binary in [env!("CARGO_BIN_EXE_atto"), env!("CARGO_BIN_EXE_oreslang")] {
         let output = Command::new(binary)
             .arg("test")
             .arg("--root")
@@ -25,7 +22,10 @@ fn canonical_atto_effects_and_legacy_alias_share_strict_exit_contract() {
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(text.contains("EFFECT WARNING sample.atto:"), "{text}");
         assert!(text.contains("ADVISORY inspected=1 warnings=1"), "{text}");
-        assert!(text.contains("no call-graph/catch/actor-runtime proof"), "{text}");
+        assert!(
+            text.contains("no call-graph/catch/actor-runtime proof"),
+            "{text}"
+        );
     }
 }
 
@@ -69,7 +69,10 @@ fn canonical_atto_explicit_aliases_are_deduplicated_before_effect_admission() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("inspected=1"), "{text}");
-    assert!(text.contains("no call-graph/catch/actor-runtime proof"), "{text}");
+    assert!(
+        text.contains("no call-graph/catch/actor-runtime proof"),
+        "{text}"
+    );
 }
 
 #[test]

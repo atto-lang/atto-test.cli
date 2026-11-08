@@ -502,7 +502,6 @@ fn fuzz_minimization_survives_hanging_reduced_inputs() {
     );
 }
 
-
 // End-to-end boundary checks prove that success cannot be reported merely
 // because a small run replayed its initial clean seeds.
 #[cfg(unix)]
@@ -552,11 +551,7 @@ fn fuzz_noncrash_signal_is_inconclusive_without_failure_artifact() {
 #[test]
 fn fuzz_runaway_output_is_inconclusive_not_a_reproducer() {
     let root = tempfile::tempdir().unwrap();
-    fuzz_project(
-        root.path(),
-        "#!/bin/sh\nhead -c 5000000 /dev/zero\n",
-        "",
-    );
+    fuzz_project(root.path(), "#!/bin/sh\nhead -c 5000000 /dev/zero\n", "");
     let run = cli(root.path(), &["--fuzz", "--seed", "9", "--cases", "1"]);
     assert_eq!(run.status.code(), Some(2), "{run:?}");
     let stdout = String::from_utf8_lossy(&run.stdout);

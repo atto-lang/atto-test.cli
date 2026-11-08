@@ -2,11 +2,11 @@
 //! No Python runner, subprocess shell, or guest-authored success receipt.
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-#[cfg(not(target_os = "linux"))]
-use std::fs::OpenOptions;
 #[cfg(any(test, not(target_os = "linux")))]
 use std::fs;
 use std::fs::File;
+#[cfg(not(target_os = "linux"))]
+use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -594,7 +594,10 @@ fn is_native_test_path(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or("");
     return path.starts_with("tests")
-        && matches!(path.extension().and_then(|ext| ext.to_str()), Some("atto" | "ores"))
+        && matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("atto" | "ores")
+        )
         && (base.starts_with("test_")
             || base.ends_with("_test.atto")
             || base.ends_with("_test.ores"));

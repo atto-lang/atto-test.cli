@@ -726,9 +726,8 @@ mod tests {
     // These are deterministic, complete ORES_RACE_V1 traces. Their verdicts
     // probe the scheduler's happens-before edges, not live guest execution.
     fn receipt(events: &[&str]) -> String {
-        let mut lines = vec![
-            r#"{"op":"begin","version":1,"run_id":"r","backend":"llvm"}"#.to_owned(),
-        ];
+        let mut lines =
+            vec![r#"{"op":"begin","version":1,"run_id":"r","backend":"llvm"}"#.to_owned()];
         lines.extend(events.iter().map(|event| (*event).to_owned()));
         lines.push(format!(
             r#"{{"op":"end","run_id":"r","events":{}}}"#,
@@ -813,7 +812,9 @@ mod tests {
             r#"{"op":"recv","task":"b","message":"m"}"#,
             r#"{"op":"send","task":"a","message":"m"}"#,
         ]);
-        assert!(analyze(&trace).unwrap_err().contains("reused message identity"));
+        assert!(analyze(&trace)
+            .unwrap_err()
+            .contains("reused message identity"));
     }
 
     #[test]
@@ -833,7 +834,6 @@ mod tests {
         ]);
         assert!(analyze(&late_access).is_err());
     }
-
 
     #[test]
     fn blocked_task_cannot_read_write_send_receive_or_spawn() {
@@ -882,7 +882,6 @@ mod tests {
         assert_eq!(report.accesses, 2);
         assert_eq!(report.conflicts, 0);
     }
-
 
     #[test]
     fn unrelated_memory_location_does_not_change_existing_conflict_count() {
@@ -939,5 +938,4 @@ mod tests {
             assert!(analyze(&bad).is_err(), "accepted malformed trace: {bad}");
         }
     }
-
 }
