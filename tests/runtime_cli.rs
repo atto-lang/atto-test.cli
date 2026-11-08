@@ -501,3 +501,105 @@ fn fuzz_minimization_survives_hanging_reduced_inputs() {
         "{out}"
     );
 }
+
+
+// End-to-end boundary checks prove that success cannot be reported merely
+// because a small run replayed its initial clean seeds.
+#[cfg(unix)]
+#[test]
+fn fuzz_pass_reports_zero_mutations_at_seed_boundary() {
+    for (cases, expected) in [
+        ("1", "seeds=1 mutated=0"),
+        ("3", "seeds=3 mutated=0"),
+        ("4", "seeds=3 mutated=1"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        fuzz_project(root.path(), "#!/bin/sh\ncat > /dev/null\nexit 0\n", "");
+        let run = cli(root.path(), &["--fuzz", "--seed", "123", "--cases", cases]);
+        assert_eq!(run.status.code(), Some(0), "{cases}: {run:?}");
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        assert!(stdout.contains(expected), "{cases}: {stdout}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_noncrash_signal_is_inconclusive_without_failure_artifact() {
+    let root = tempfile::tempdir().unwrap();
+    fuzz_project(
+        root.path(),
+        "#!/bin/sh\nif [ -s /dev/stdin ]; then kill -TERM $$; fi\nexit 0\n",
+        "",
+    );
+    let run = cli(root.path(), &["--fuzz", "--seed", "9", "--cases", "3"]);
+    assert_eq!(run.status.code(), Some(2), "{run:?}");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(!stdout.contains("FUZZ PASS"), "{stdout}");
+    assert!(stderr.contains("FUZZ INCONCLUSIVE"), "{stderr}");
+    assert!(!root.path().join(".oreslang-test/failures").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_runaway_output_is_inconclusive_not_a_reproducer() {
+    let root = tempfile::tempdir().unwrap();
+    fuzz_project(
+        root.path(),
+        "#!/bin/sh\nhead -c 5000000 /dev/zero\n",
+        "",
+    );
+    let run = cli(root.path(), &["--fuzz", "--seed", "9", "--cases", "1"]);
+    assert_eq!(run.status.code(), Some(2), "{run:?}");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(!stdout.contains("FUZZ PASS"), "{stdout}");
+    assert!(stderr.contains("FUZZ INCONCLUSIVE"), "{stderr}");
+    assert!(!root.path().join(".oreslang-test/failures").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_inconclusive_exit_code_does_not_create_failure_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    fuzz_project(
+        root.path(),
+        "#!/bin/sh\ncat >/dev/null\nexit 9\n",
+        "inconclusive_exits = [9]\n",
+    );
+    let run = cli(root.path(), &["--fuzz", "--seed", "11", "--cases", "1"]);
+    assert_eq!(run.status.code(), Some(2), "{run:?}");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains("FUZZ INCONCLUSIVE"), "{stderr}");
+    assert!(!root.path().join(".oreslang-test/failures").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_sanitizer_report_outweighs_configured_inconclusive_exit() {
+    let root = tempfile::tempdir().unwrap();
+    fuzz_project(
+        root.path(),
+        "#!/bin/sh\necho 'src/demo.c:2:3: runtime error: signed integer overflow' >&2\nexit 9\n",
+        "inconclusive_exits = [9]\n",
+    );
+    let run = cli(root.path(), &["--fuzz", "--seed", "11", "--cases", "1"]);
+    assert_eq!(run.status.code(), Some(1), "{run:?}");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("Sanitizer(\"UBSan\")"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn fuzz_go_style_panic_text_does_not_spoof_ubsan() {
+    let root = tempfile::tempdir().unwrap();
+    fuzz_project(
+        root.path(),
+        "#!/bin/sh\necho 'panic: runtime error: index out of range' >&2\ncat >/dev/null\nexit 0\n",
+        "",
+    );
+    let run = cli(root.path(), &["--fuzz", "--seed", "5", "--cases", "4"]);
+    assert_eq!(run.status.code(), Some(0), "{run:?}");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("FUZZ PASS"), "{stdout}");
+}
