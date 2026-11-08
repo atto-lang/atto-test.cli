@@ -1240,6 +1240,17 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         );
         return Ok(1);
     }
+    // A clean seed replay is not mutation fuzzing. A bounded run that never
+    // generated any input must not produce a green FUZZ PASS receipt.
+    if mutated == 0 {
+        eprintln!(
+            "FUZZ INCONCLUSIVE cases={} seeds={} mutated=0 seed={}: no generated mutations executed",
+            settings.cases,
+            seeds.min(settings.cases),
+            settings.seed
+        );
+        return Ok(2);
+    }
     println!(
         "FUZZ PASS cases={} seeds={} mutated={mutated} seed={} (observed inputs only)",
         settings.cases,
