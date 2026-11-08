@@ -507,18 +507,26 @@ fn fuzz_minimization_survives_hanging_reduced_inputs() {
 // because a small run replayed its initial clean seeds.
 #[cfg(unix)]
 #[test]
-fn fuzz_pass_reports_zero_mutations_at_seed_boundary() {
-    for (cases, expected) in [
-        ("1", "seeds=1 mutated=0"),
-        ("3", "seeds=3 mutated=0"),
-        ("4", "seeds=3 mutated=1"),
+fn fuzz_seed_only_runs_are_inconclusive_until_a_mutation_executes() {
+    for (cases, expected, exit) in [
+        ("1", "seeds=1 mutated=0", 2),
+        ("3", "seeds=3 mutated=0", 2),
+        ("4", "seeds=3 mutated=1", 0),
     ] {
         let root = tempfile::tempdir().unwrap();
         fuzz_project(root.path(), "#!/bin/sh\ncat > /dev/null\nexit 0\n", "");
         let run = cli(root.path(), &["--fuzz", "--seed", "123", "--cases", cases]);
-        assert_eq!(run.status.code(), Some(0), "{cases}: {run:?}");
+        assert_eq!(run.status.code(), Some(exit), "{cases}: {run:?}");
         let stdout = String::from_utf8_lossy(&run.stdout);
-        assert!(stdout.contains(expected), "{cases}: {stdout}");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        if exit == 2 {
+            assert!(stderr.contains("FUZZ INCONCLUSIVE"), "{cases}: {stderr}");
+            assert!(stderr.contains(expected), "{cases}: {stderr}");
+            assert!(!stdout.contains("FUZZ PASS"), "{cases}: {stdout}");
+        } else {
+            assert!(stdout.contains("FUZZ PASS"), "{cases}: {stdout}");
+            assert!(stdout.contains(expected), "{cases}: {stdout}");
+        }
     }
 }
 
