@@ -1492,8 +1492,8 @@ mod tests {
         let mut generated = seed.to_vec();
         ensure_distinct_mutation(&seed, &mut generated, seed.len());
         assert_eq!(generated.len(), seed.len());
-        assert_ne!(generated, seed);
-        assert_eq!(generated[1..], seed[1..]);
+        assert_ne!(generated.as_slice(), seed.as_slice());
+        assert_eq!(&generated[1..], &seed[1..]);
     }
 
     #[test]
