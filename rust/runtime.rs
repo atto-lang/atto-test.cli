@@ -1480,6 +1480,31 @@ mod tests {
     }
 
     #[test]
+    fn mutation_fallback_changes_empty_seed_without_exceeding_one_byte_budget() {
+        let mut generated = Vec::new();
+        ensure_distinct_mutation(&[], &mut generated, 1);
+        assert_eq!(generated, vec![0xa5]);
+    }
+
+    #[test]
+    fn mutation_fallback_changes_full_budget_seed_without_growing() {
+        let seed = [0u8, 1, 2, 3];
+        let mut generated = seed.to_vec();
+        ensure_distinct_mutation(&seed, &mut generated, seed.len());
+        assert_eq!(generated.len(), seed.len());
+        assert_ne!(generated, seed);
+        assert_eq!(generated[1..], seed[1..]);
+    }
+
+    #[test]
+    fn mutation_fallback_never_overwrites_an_existing_real_change() {
+        let seed = [3u8, 4, 5];
+        let mut generated = vec![3, 7, 5];
+        ensure_distinct_mutation(&seed, &mut generated, seed.len());
+        assert_eq!(generated, vec![3, 7, 5]);
+    }
+
+    #[test]
     fn retained_fuzz_payload_accepts_exact_byte_limit_then_stops_growing() {
         let mut samples = vec![vec![7; MAX_RETAINED_BYTES - 1]];
         let mut bytes = samples[0].len();
