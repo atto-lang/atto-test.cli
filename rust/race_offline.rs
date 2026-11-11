@@ -297,6 +297,11 @@ pub fn analyze(text: &str) -> Result<Report, String> {
             return Err("event after task completion".into());
         }
         let mut clock = clocks.get(&task).ok_or("event from unknown task")?.clone();
+        // A blocked task cannot execute memory or synchronization events.
+        // Accepting sends/receives here could fabricate happens-before edges.
+        if pending_waits.contains_key(&task) && op != "unwait" {
+            return Err("task executed an event while waiting on a lock".into());
+        }
         match op.as_str() {
             "fork" => {
                 let child = e.text("child")?.to_owned();
@@ -538,6 +543,32 @@ mod tests {
     #[test]
     fn respects_send_receive_order() {
         assert_eq!(analyze(&demo(false)).unwrap().conflicts, 0);
+    }
+    #[test]
+    fn waiting_tasks_cannot_execute_or_invent_synchronization() {
+        for event in [
+            r#"{"op":"access","task":"b","location":"x","mode":"R"}"#,
+            r#"{"op":"send","task":"b","message":"m"}"#,
+            r#"{"op":"fork","task":"b","child":"c"}"#,
+        ] {
+            let trace = format!(
+                concat!(
+                    "{{\"op\":\"begin\",\"version\":1,\"run_id\":\"r\",\"backend\":\"llvm\"}}\n",
+                    "{{\"op\":\"task\",\"task\":\"a\"}}\n",
+                    "{{\"op\":\"task\",\"task\":\"b\"}}\n",
+                    "{{\"op\":\"lock\",\"task\":\"a\",\"name\":\"l\"}}\n",
+                    "{{\"op\":\"wait\",\"task\":\"b\",\"name\":\"l\"}}\n",
+                    "{}\n",
+                    "{{\"op\":\"unwait\",\"task\":\"b\",\"name\":\"l\"}}\n",
+                    "{{\"op\":\"unlock\",\"task\":\"a\",\"name\":\"l\"}}\n",
+                    "{{\"op\":\"access\",\"task\":\"a\",\"location\":\"x\",\"mode\":\"R\"}}\n",
+                    "{{\"op\":\"end\",\"run_id\":\"r\",\"events\":8}}\n",
+                ),
+                event
+            );
+            let error = analyze(&trace).unwrap_err();
+            assert!(error.contains("while waiting"), "{event}: {error}");
+        }
     }
     #[test]
     fn fails_closed_on_duplicates_and_truncation() {

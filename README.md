@@ -88,6 +88,11 @@ case buffers, allocator overhead and guest memory are separate. High-budget
 runs may generate different inputs than earlier versions after retention
 stops, so reproductions must record the CLI revision as well as the seed.
 
+Only the initial corpus length determines the seed replay phase. Successful
+inputs retained as feedback do not extend that phase: subsequent cases use
+seeded mutation. The CLI regression captures all target stdin bytes and checks
+both mutation beyond the initial seeds and repeatability for the same seed.
+
 Corpus ingestion limits each opened stream to max_bytes plus one overflow
 sentinel byte, rejecting oversized reads and accounting aggregate corpus
 bytes from the data actually read. Preflight sizes alone are insufficient
@@ -109,7 +114,9 @@ project-relative ORES_RACE_V1 JSONL file in Rust. It validates the JSONL
 structure, strict event fields, task lifecycle, fork/finish/join ordering,
 mutex ownership, single-use message IDs, and memory-access happens-before
 relations using vector clocks. It reports observed conflicts and rejects
-incomplete/ambiguous traces. A clean observed trace is **never** a
+incomplete/ambiguous traces. A task waiting on a lock may only cancel its wait
+with `unwait`; memory accesses, sends, receives and forks while blocked are
+invalid trace evidence. A clean observed trace is **never** a
 runtime race-freedom certificate.
 
 **Unsupported/pending:** --race without --trace or --logical --model returns exit 2 because

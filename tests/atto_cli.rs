@@ -48,6 +48,49 @@ fn guest(root: &Path, name: &str, body: &str) -> std::path::PathBuf {
 }
 
 #[cfg(unix)]
+#[test]
+fn fuzz_mutates_after_initial_corpus_and_replays_the_same_seed() {
+    let root = tempfile::tempdir().unwrap();
+    let target = guest(
+        root.path(),
+        "capture",
+        r#"#!/bin/sh
+od -An -tx1 | tr -d ' \n' >> inputs
+printf '\n' >> inputs
+"#,
+    );
+    fs::write(
+        root.path().join("atto-test.toml"),
+        format!("[fuzz]\ncommand=['{}']\nmax_bytes=8\n", target.display()),
+    )
+    .unwrap();
+    let mut previous = None;
+    for _ in 0..2 {
+        fs::write(root.path().join("inputs"), "").unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_atto"))
+            .args(["test", "--fuzz", "--cases", "20", "--seed", "7", "--root"])
+            .arg(root.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let inputs = fs::read_to_string(root.path().join("inputs")).unwrap();
+        assert_eq!(inputs.lines().count(), 20);
+        let distinct: std::collections::BTreeSet<_> = inputs.lines().collect();
+        assert!(
+            distinct.len() > 3,
+            "only replayed initial corpus: {inputs:?}"
+        );
+        if let Some(prior) = previous {
+            assert_eq!(
+                inputs, prior,
+                "seed must reproduce the complete input sequence"
+            );
+        }
+        previous = Some(inputs);
+    }
+}
+
+#[cfg(unix)]
 fn native(root: &Path, compiler: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_atto-test"))
         .arg("--root")
@@ -169,7 +212,6 @@ exit 66
     assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
 
-
 #[cfg(unix)]
 #[test]
 fn llvm_native_adapter_inconclusive_exit_never_becomes_a_fuzz_defect() {
@@ -282,7 +324,10 @@ fn fuzz_shrinking_does_not_erase_a_confirmed_defect_when_reduced_input_is_inconc
     assert!(stdout.contains("FUZZ FAILURE"), "{report:?}");
     assert!(stdout.contains("finding=Exit(77)"), "{report:?}");
     let failures = root.path().join(".oreslang-test/failures");
-    assert!(failures.is_dir(), "confirmed defect must retain a reproducer");
+    assert!(
+        failures.is_dir(),
+        "confirmed defect must retain a reproducer"
+    );
     let saved: Vec<_> = fs::read_dir(&failures)
         .unwrap()
         .map(|entry| entry.unwrap().path())

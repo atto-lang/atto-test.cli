@@ -535,7 +535,10 @@ fn is_native_test_path(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or("");
     return path.starts_with("tests")
-        && matches!(path.extension().and_then(|ext| ext.to_str()), Some("atto" | "ores"))
+        && matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("atto" | "ores")
+        )
         && (base.starts_with("test_")
             || base.ends_with("_test.atto")
             || base.ends_with("_test.ores"));
@@ -583,9 +586,7 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
         if result.stderr.contains("FATAL: ThreadSanitizer:") {
             return Err("ThreadSanitizer initialization failed; native run inconclusive".into());
         }
-        if result.timed_out
-            || result.code != Some(0)
-            || sanitizer_finding(&result.stderr).is_some()
+        if result.timed_out || result.code != Some(0) || sanitizer_finding(&result.stderr).is_some()
         {
             failures += 1;
             eprintln!(
@@ -823,7 +824,9 @@ fn classify(result: &ProcessResult) -> Result<Option<Failure>, String> {
         return Err("guest timed out; cannot classify fuzz failure".into());
     }
     if result.stderr.contains("FATAL: ThreadSanitizer:")
-        || result.stderr.contains("ThreadSanitizer: unexpected memory mapping")
+        || result
+            .stderr
+            .contains("ThreadSanitizer: unexpected memory mapping")
     {
         return Err("ThreadSanitizer failed to initialize; no race result is available".into());
     }
@@ -987,8 +990,11 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         return Err("initial fuzz pool exceeds retention budgets".into());
     }
     let mut rng = Rng::new(settings.seed);
+    // Feedback extends the mutation pool, never the initial replay phase.
+    // Using samples.len() here would replay appended clean cases forever.
+    let initial_samples = samples.len();
     for i in 0..settings.cases {
-        let case = if i < samples.len() {
+        let case = if i < initial_samples {
             samples[i].clone()
         } else {
             let base = &samples[rng.range(samples.len())];

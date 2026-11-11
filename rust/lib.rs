@@ -76,10 +76,14 @@ fn source_path(root: &Path, name: &str) -> Result<PathBuf, String> {
             return Err(format!("source symlink refused: {name}"));
         }
     }
-    if !matches!(current.extension().and_then(|ext| ext.to_str()), Some("atto" | "ores"))
-        || !current.is_file()
+    if !matches!(
+        current.extension().and_then(|ext| ext.to_str()),
+        Some("atto" | "ores")
+    ) || !current.is_file()
     {
-        return Err(format!("expected regular .atto or legacy .ores source file: {name}"));
+        return Err(format!(
+            "expected regular .atto or legacy .ores source file: {name}"
+        ));
     }
     return Ok(current);
 }
@@ -161,7 +165,10 @@ fn test_manifest_name(root: &Path) -> Result<Option<&'static str>, String> {
             Err(e) => Err(format!("{name}: {e}")),
         }
     }
-    match (present(root, "atto-test.toml")?, present(root, "oreslang-test.toml")?) {
+    match (
+        present(root, "atto-test.toml")?,
+        present(root, "oreslang-test.toml")?,
+    ) {
         (true, true) => Err(
             "ambiguous test manifests: remove one of atto-test.toml or oreslang-test.toml".into(),
         ),
