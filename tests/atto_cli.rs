@@ -169,7 +169,6 @@ exit 66
     assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
 
-
 #[cfg(unix)]
 #[test]
 fn llvm_native_adapter_inconclusive_exit_never_becomes_a_fuzz_defect() {
@@ -282,7 +281,10 @@ fn fuzz_shrinking_does_not_erase_a_confirmed_defect_when_reduced_input_is_inconc
     assert!(stdout.contains("FUZZ FAILURE"), "{report:?}");
     assert!(stdout.contains("finding=Exit(77)"), "{report:?}");
     let failures = root.path().join(".oreslang-test/failures");
-    assert!(failures.is_dir(), "confirmed defect must retain a reproducer");
+    assert!(
+        failures.is_dir(),
+        "confirmed defect must retain a reproducer"
+    );
     let saved: Vec<_> = fs::read_dir(&failures)
         .unwrap()
         .map(|entry| entry.unwrap().path())

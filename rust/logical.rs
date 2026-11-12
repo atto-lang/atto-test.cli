@@ -4,7 +4,7 @@
 
 use crate::race_offline::relative_trace;
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 use std::io::Read;
 use std::path::Path;
 
@@ -558,9 +558,9 @@ pub fn offline(root: &Path, name: &str, max_schedules: u64) -> Result<i32, Strin
     if path.extension().is_none_or(|ext| ext != "json") {
         return Err("logical model requires .json".into());
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     let bytes = crate::fs_secure::read_project_file(root, Path::new(name), MAX_SOURCE as usize)?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let bytes = {
         if path.metadata().map_err(|e| e.to_string())?.len() > MAX_SOURCE {
             return Err("model exceeds 2 MB".into());
