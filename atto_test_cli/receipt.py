@@ -51,7 +51,7 @@ def assess_receipt(report):
             raise ReceiptError("invalid or duplicate case id")
         ids.add(name)
         status, execution = case["status"], case["execution"]
-        if status not in _VALID_STATUS or execution not in _VALID_EXECUTION:
+        if type(status) is not str or type(execution) is not str or status not in _VALID_STATUS or execution not in _VALID_EXECUTION:
             raise ReceiptError("unknown status or execution")
         if status in ("passed", "failed") and execution == "none":
             raise ReceiptError("an unexecuted case cannot pass or fail")
