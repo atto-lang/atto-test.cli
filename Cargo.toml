@@ -1,0 +1,37 @@
+[package]
+name = "oreslang-test"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Oreslang test launcher and conservative exceptional-effect diagnostics"
+publish = false
+
+[dependencies]
+toml = "0.8"
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[[bin]]
+name = "oreslang"
+path = "rust/bin/oreslang.rs"
+
+[[bin]]
+name = "oreslang-test"
+path = "rust/bin/oreslang-test.rs"
+
+[[bin]]
+name = "atto"
+path = "rust/bin/atto.rs"
+
+[[bin]]
+name = "atto-test"
+path = "rust/bin/atto-test.rs"
+
+[lib]
+path = "rust/lib.rs"
+
+# Workspace style requires explicit returns in named functions.
+[lints.clippy]
+needless_return = "allow"
