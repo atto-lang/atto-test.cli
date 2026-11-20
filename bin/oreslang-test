@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec cargo run --quiet --manifest-path "$repo/Cargo.toml" --bin oreslang-test -- "$@"

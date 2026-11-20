@@ -1,0 +1,73 @@
+name: Rust Oreslang test CLI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # verified v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Prove exact source revision before Cargo execution
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$EXPECTED_SOURCE_SHA"
+          printf 'EXACT_SOURCE_SHA=%s\n' "$actual"
+          git rev-parse 'HEAD^{tree}'
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch pin 2026-10-21
+        with:
+          components: rustfmt, clippy
+      - name: Rust unit and integration tests
+        run: cargo test --locked
+      - name: Build both Rust entrypoints
+        run: cargo build --locked --bins
+      - name: Rust lints
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Rust formatting
+        run: cargo fmt --all --check
+      - name: Offline observed ordered trace
+        run: cargo run --locked --bin oreslang -- test --root . --race --trace tests/traces/ordered.jsonl
+      - name: Observed data race must exit 1
+        shell: bash
+        run: |
+          set +e
+          cargo run --locked --quiet --bin oreslang -- test --root . --race --trace tests/traces/racy.jsonl
+          code=$?
+          test "$code" -eq 1
+      - name: Runtime race without attestation must exit 2
+        shell: bash
+        run: |
+          set +e
+          cargo run --locked --quiet --bin oreslang -- test --root . --race
+          code=$?
+          test "$code" -eq 2
+      - name: Bounded Rust logical model atomic fixture
+        run: cargo run --locked --bin oreslang -- test --root . --race --logical --model tests/models/atomic-update.json
+      - name: Rust logical model counterexample exits 1
+        shell: bash
+        run: |
+          set +e
+          cargo run --locked --quiet --bin oreslang -- test --root . --race --logical --model tests/models/lost-update.json
+          code=$?
+          test "$code" -eq 1
+      - name: Truncated Rust model exploration is inconclusive
+        shell: bash
+        run: |
+          set +e
+          cargo run --locked --quiet --bin oreslang -- test --root . --race --logical --model tests/models/atomic-update.json --max-schedules 1
+          code=$?
+          test "$code" -eq 2
