@@ -594,11 +594,11 @@ fn native_command(cfg: &toml::Value, default_core: &str, source: &Path) -> Resul
         if uses > 1 {
             return Err("[native].command must reference {source} exactly once".into());
         }
-        let substituted = arg.replace("{source}", source);
-        if substituted.contains('{') || substituted.contains('}') {
+        let template_remainder = arg.replace("{source}", "");
+        if template_remainder.contains('{') || template_remainder.contains('}') {
             return Err("[native].command contains an unsupported template placeholder".into());
         }
-        expanded.push(substituted);
+        expanded.push(arg.replace("{source}", source));
     }
     if uses != 1 {
         return Err("[native].command must reference {source} exactly once".into());
@@ -612,6 +612,11 @@ fn native(
     timeout: f64,
     allow_project_command: bool,
 ) -> Result<u8> {
+    if let Some(native) = cfg.get("native") {
+        if !native.is_table() {
+            return Err("[native] must be a TOML table".into());
+        }
+    }
     if let Some(files) = cfg.get("native").and_then(|value| value.get("files")) {
         if !files.is_array() {
             return Err("[native].files must be an array of relative source paths".into());
