@@ -1,7 +1,8 @@
 # These examples are synthetic, not real guest traces.
 # Configure a real native executable and/or an instrumented runtime target:
 # [native]
-# files = ["tests/test_suite.ores"]
+# files = ["tests/test_suite.atto"]
+# Legacy .ores sources can be listed explicitly, but are not auto-discovered.
 # [fuzz]
 # command = ["/path/to/real/oreslang", "tests/fuzz_property.ores"]
 # corpus = "tests/corpus"
