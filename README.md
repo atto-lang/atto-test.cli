@@ -32,6 +32,39 @@ oreslang test
 
 `oreslang-test` accepts exactly the same test arguments without the `oreslang test` prefix. `--root` selects the project root (default `.`).
 
+## AttoLang native .atto tests (candidate)
+
+Automatic native test discovery now selects canonical **.atto** source files
+under tests/ with names test_*.atto or *_test.atto. A project may explicitly
+list files using [native].files in oreslang-test.toml, including a legacy .ores
+file during migration. Do not automatically select a legacy .ores twin merely
+because a .atto file is available. The configured ORESLANG_BIN or default
+compiler command must truly compile and execute each selected source; an
+unrecognized extension or unavailable backend must fail, not silently skip.
+
+Example:
+
+```toml
+[native]
+files = ["tests/test_math.atto", "tests/test_collections.atto"]
+```
+
+The native runner checks one final ORES_TEST|SUMMARY record, observed
+PASS/FAIL/SKIP counts, positive executed coverage, unique case identities,
+canonical escaped fields and no extra output after the summary. Duplicates,
+truncated output, nonzero process status, malformed records, false aggregate
+counts, timeouts and empty/all-skipped/all-filtered suites fail closed.
+This is **strict receipt shape validation**, not cryptographic authentication:
+a compromised guest can print forged stdout. CI must independently pin its
+exact source tree, compiler binary/runtime, trusted runner, expected test
+inventory and nonzero executed steps. The stdlib's summary_is_valid checks
+only local counter consistency and cannot authenticate provenance.
+
+Canonical .atto syntax-only and type-check selection is also supported, but
+the command remains inconclusive (exit 2) unless a pinned compiler emits
+the exact source-bound no-codegen proof required below. Native Rust unit
+tests for receipt validation are not AttoLang guest execution evidence.
+
 ## Syntax-only and type checks
 
 The Rust CLI **does not invent an Oreslang grammar**. It invokes the canonical language frontend configured under `[check].command`, adding `--syntax-only <file>` or `--check-types <file>`. The backend must return success *and* emit a source-bound no-codegen receipt:
