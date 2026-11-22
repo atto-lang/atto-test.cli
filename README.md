@@ -37,7 +37,11 @@ oreslang test
 From a checkout with `bin/` on `PATH`, run `atto test --root .` or invoke
 `atto-test --root .` directly. Both are thin executable launchers for the
 same existing Rust test binary; the legacy `oreslang test` entrypoint remains
-available for compatibility. The Rust binary must be built first.
+available for compatibility. The Rust binary must be built first. Set
+`ATTO_BIN=/absolute/path/to/your/atto-compiler` for the native test compiler;
+`ORESLANG_BIN` remains the compatibility fallback. Neither environment
+variable is a trust attestation: the test execution environment must still
+admit and pin the intended compiler independently.
 
 Automatic native test discovery now selects canonical **.atto** source files
 under tests/ with names test_*.atto or *_test.atto. A project may explicitly
