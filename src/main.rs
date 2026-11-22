@@ -698,15 +698,20 @@ fn run(o: Opt) -> Result<u8> {
     }
     let canonical_manifest = root.join("atto-test.toml");
     let compatibility_manifest = root.join("oreslang-test.toml");
-    if canonical_manifest.exists() && compatibility_manifest.exists() {
+    // symlink_metadata also detects dangling links that Path::exists hides.
+    // All present manifest candidates must be opened via bounded_read's
+    // no-follow, regular-file policy.
+    let canonical_present = canonical_manifest.symlink_metadata().is_ok();
+    let compatibility_present = compatibility_manifest.symlink_metadata().is_ok();
+    if canonical_present && compatibility_present {
         return Err("both atto-test.toml and oreslang-test.toml exist; select exactly one".into());
     }
-    let manifest = if canonical_manifest.exists() {
+    let manifest = if canonical_present {
         canonical_manifest
     } else {
         compatibility_manifest
     };
-    let cfg: toml::Value = if manifest.exists() {
+    let cfg: toml::Value = if canonical_present || compatibility_present {
         let raw = common::bounded_read(&manifest, 1_048_576)?;
         let raw = std::str::from_utf8(&raw).map_err(|e| e.to_string())?;
         toml::from_str(raw).map_err(|e| e.to_string())?
@@ -803,6 +808,52 @@ mod check_compiler_trust_tests {
     }
 }
 
+
+#[cfg(test)]
+mod native_command_template_tests {
+    use super::*;
+
+    fn config(text: &str) -> toml::Value {
+        toml::from_str(text).expect("valid TOML")
+    }
+
+    #[test]
+    fn substitutes_one_source_as_one_arg_without_shell_interpolation() {
+        let cfg = config("[native]\ncommand = [\"mvn\", \"-q\", \"exec:java\", \"-Dexec.args={source}\"]\n");
+        let src = Path::new("/test/project/tests/test one;echo unsafe.atto");
+        let argv = native_command(&cfg, "ignored-compiler", src).expect("command admitted");
+        assert_eq!(argv, vec![
+            "mvn",
+            "-q",
+            "exec:java",
+            "-Dexec.args=/test/project/tests/test one;echo unsafe.atto",
+        ]);
+    }
+
+    #[test]
+    fn rejects_ambiguous_non_array_and_unbounded_templates() {
+        for input in [
+            "[native]\ncommand = [\"compiler\", \"--no-source\"]\n",
+            "[native]\ncommand = [\"compiler\", \"{source}\", \"{source}\"]\n",
+            "[native]\ncommand = [\"compiler\", \"{source}{source}\"]\n",
+            "[native]\ncommand = [\"compiler\", \"{unknown}\", \"{source}\"]\n",
+            "[native]\ncommand = []\n",
+            "[native]\ncommand = \"compiler\"\n",
+            "[native]\ncommand = [42, \"{source}\"]\n",
+        ] {
+            assert!(native_command(&config(input), "compiler", Path::new("/path/test.atto")).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn keeps_compiler_override_fallback_when_native_command_is_unset() {
+        let cfg = config("[native]\nfiles = [\"tests/test_math.atto\"]\n");
+        assert_eq!(
+            native_command(&cfg, "atto-compiler", Path::new("/tmp/test.atto")).unwrap(),
+            vec!["atto-compiler", "/tmp/test.atto"]
+        );
+    }
+}
 
 #[cfg(test)]
 mod native_receipt_contract_tests {
