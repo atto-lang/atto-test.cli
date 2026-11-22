@@ -606,8 +606,18 @@ fn native_command(cfg: &toml::Value, default_core: &str, source: &Path) -> Resul
     Ok(expanded)
 }
 
-fn native(root: &Path, cfg: &toml::Value, timeout: f64, allow_project_command: bool) -> Result<u8> {
-    let files = if let Some(arr) = cfg
+fn native(
+    root: &Path,
+    cfg: &toml::Value,
+    timeout: f64,
+    allow_project_command: bool,
+) -> Result<u8> {
+    if let Some(files) = cfg.get("native").and_then(|value| value.get("files")) {
+        if !files.is_array() {
+            return Err("[native].files must be an array of relative source paths".into());
+        }
+    }
+    let mut files = if let Some(arr) = cfg
         .get("native")
         .and_then(|v| v.get("files"))
         .and_then(|v| v.as_array())
@@ -652,8 +662,20 @@ fn native(root: &Path, cfg: &toml::Value, timeout: f64, allow_project_command: b
             })
             .collect()
     };
+    if cfg.get("native").and_then(|value| value.get("files")).is_none() {
+        files.sort(); // stable automatic discovery, unlike filesystem iteration order
+    }
     if files.is_empty() {
         return Err("no native test sources discovered".into());
+    }
+    if files.len() > 4096 {
+        return Err("native test selection exceeds 4096 sources".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for name in &files {
+        if name.is_empty() || name.len() > 4096 || !seen.insert(name) {
+            return Err("native test list contains an empty, oversized or duplicate source".into());
+        }
     }
     if cfg.get("native").and_then(|value| value.get("command")).is_some()
         && !allow_project_command
