@@ -307,6 +307,28 @@ fn native_auto_discovers_atto_and_does_not_auto_choose_legacy_twin() {
     assert!(!stdout.contains("UNEXPECTED_LEGACY_TEST_EXECUTION"));
 }
 
+#[cfg(unix)]
+#[test]
+fn canonical_atto_test_launcher_delegates_to_rust_cli() {
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("tests")).unwrap();
+    write(
+        &project.path().join("tests/test_dispatch.atto"),
+        "echo 'ORES_TEST|PASS|suite/one|'\necho 'ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0'\n",
+    );
+    let launcher = Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/atto");
+    let output = Command::new(launcher)
+        .arg("test")
+        .arg("--root")
+        .arg(project.path())
+        .env("ORESLANG_TEST_BIN", binary())
+        .env("ORESLANG_BIN", "sh")
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 0, "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("PASS tests/test_dispatch.atto:"));
+}
+
 #[test]
 fn native_rejects_duplicate_receipts_even_with_matching_summary() {
     let project = tempfile::tempdir().unwrap();
