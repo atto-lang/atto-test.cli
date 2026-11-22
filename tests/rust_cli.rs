@@ -280,6 +280,52 @@ fn config_symlink_cannot_be_used_to_influence_runner() {
     );
 }
 
+// A host-only runner-discovery test: shell prints test-shaped output but
+// does NOT compile or execute an AttoLang guest. No guest support is certified.
+#[test]
+fn native_auto_discovers_atto_and_does_not_auto_choose_legacy_twin() {
+    let project = tempfile::tempdir().unwrap();
+    let dir = project.path().join("tests");
+    fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir.join("test_math.atto"),
+        "echo 'ORES_TEST|PASS|math/add|'\necho 'ORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0'\n",
+    );
+    write(
+        &dir.join("test_math.ores"),
+        "echo 'UNEXPECTED_LEGACY_TEST_EXECUTION'\nexit 9\n",
+    );
+    let output = Command::new(binary())
+        .arg("--root")
+        .arg(project.path())
+        .env("ORESLANG_BIN", "sh")
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 0, "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("PASS tests/test_math.atto:"));
+    assert!(!stdout.contains("UNEXPECTED_LEGACY_TEST_EXECUTION"));
+}
+
+#[test]
+fn native_rejects_duplicate_receipts_even_with_matching_summary() {
+    let project = tempfile::tempdir().unwrap();
+    let dir = project.path().join("tests");
+    fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir.join("test_dup.atto"),
+        "echo 'ORES_TEST|PASS|suite/same|'\necho 'ORES_TEST|PASS|suite/same|'\necho 'ORES_TEST|SUMMARY|total=2|passed=2|failed=0|skipped=0|filtered=0'\n",
+    );
+    let output = Command::new(binary())
+        .arg("--root")
+        .arg(project.path())
+        .env("ORESLANG_BIN", "sh")
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 1);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate test case identity"));
+}
+
 #[test]
 fn native_summary_integer_overflow_fails_without_panicking() {
     let dir = tempfile::tempdir().unwrap();
