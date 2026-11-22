@@ -227,8 +227,8 @@ fn check(
     }
     let mut files = Vec::new();
     if selected.is_file() {
-        if selected.extension().is_none_or(|v| v != "ores") {
-            return Err("--check needs a .ores source file".into());
+        if selected.extension().is_none_or(|v| v != "atto" && v != "ores") {
+            return Err("--check needs an .atto source file (or an explicit legacy .ores file)".into());
         }
         files.push(selected);
     } else if selected.is_dir() {
@@ -245,7 +245,8 @@ fn check(
             if entry.file_type().is_symlink() {
                 return Err("source tree contains symbolic link".into());
             }
-            if entry.file_type().is_file() && entry.path().extension().is_some_and(|s| s == "ores")
+            if entry.file_type().is_file()
+                && entry.path().extension().is_some_and(|s| s == "atto" || s == "ores")
             {
                 files.push(entry.into_path());
                 if files.len() > 10000 {
@@ -258,7 +259,7 @@ fn check(
     }
     files.sort();
     if files.is_empty() {
-        return Err("no .ores source files found; no check performed".into());
+        return Err("no .atto or legacy .ores source files found; no check performed".into());
     }
     for file in &files {
         let bytes = common::bounded_read(file, 4_000_000)?;
@@ -754,7 +755,7 @@ mod native_receipt_contract_tests {
     #[test]
     fn accepts_genuine_shape_and_separately_counts_filtered() {
         assert!(admit_native_receipts(GOOD).is_ok());
-        assert!(admit_native_receipts("debug\nORES_TEST|PASS|a|\\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n").is_ok());
+        assert!(admit_native_receipts("debug\nORES_TEST|PASS|a|\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n").is_ok());
     }
 
     #[test]
