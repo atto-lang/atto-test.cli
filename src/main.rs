@@ -557,6 +557,51 @@ fn admit_native_receipts(stdout: &str) -> Result<String> {
     summary.ok_or_else(|| "missing guest test summary".into())
 }
 
+// Explicit command arrays support hosted/compiler-specific adapters without
+// invoking a shell. A reviewed project manifest is executable code, not a
+// sandbox or authorization. Exactly one {source} token must be supplied.
+// Never split substituted argv on spaces; paths remain one argument.
+fn native_command(cfg: &toml::Value, default_core: &str, source: &Path) -> Result<Vec<String>> {
+    let source = source
+        .to_str()
+        .ok_or("native test source path is not valid UTF-8")?;
+    let Some(native) = cfg.get("native") else {
+        return Ok(vec![default_core.to_owned(), source.to_owned()]);
+    };
+    let Some(template) = native.get("command") else {
+        return Ok(vec![default_core.to_owned(), source.to_owned()]);
+    };
+    let argv = template
+        .as_array()
+        .ok_or("[native].command must be an argv array")?;
+    if argv.is_empty() || argv.len() > 64 {
+        return Err("[native].command requires 1..64 argv entries".into());
+    }
+    let mut uses = 0usize;
+    let mut expanded = Vec::with_capacity(argv.len());
+    for arg in argv {
+        let arg = arg
+            .as_str()
+            .ok_or("[native].command argv entries must be strings")?;
+        if arg.is_empty() || arg.len() > 8192 || arg.contains('\0') {
+            return Err("[native].command contains an empty or invalid argv entry".into());
+        }
+        uses += arg.matches("{source}").count();
+        if uses > 1 {
+            return Err("[native].command must reference {source} exactly once".into());
+        }
+        let substituted = arg.replace("{source}", source);
+        if substituted.contains('{') || substituted.contains('}') {
+            return Err("[native].command contains an unsupported template placeholder".into());
+        }
+        expanded.push(substituted);
+    }
+    if uses != 1 {
+        return Err("[native].command must reference {source} exactly once".into());
+    }
+    Ok(expanded)
+}
+
 fn native(root: &Path, cfg: &toml::Value, timeout: f64) -> Result<u8> {
     let files = if let Some(arr) = cfg
         .get("native")
@@ -622,7 +667,7 @@ fn native(root: &Path, cfg: &toml::Value, timeout: f64) -> Result<u8> {
         if !file.is_file() || file.extension().is_none_or(|x| x != "atto" && x != "ores") {
             return Err(format!("not a native test source: {name}"));
         }
-        let args = vec![core.clone(), file.to_string_lossy().into_owned()];
+        let args = native_command(cfg, &core, &file)?;
         let outcome = runner::run(&args, root, timeout, None, &[])?;
         let Some(out) = outcome else {
             eprintln!("TIMEOUT {name}");
@@ -651,7 +696,16 @@ fn run(o: Opt) -> Result<u8> {
     if !root.is_dir() {
         return Err("project root must be directory".into());
     }
-    let manifest = root.join("oreslang-test.toml");
+    let canonical_manifest = root.join("atto-test.toml");
+    let compatibility_manifest = root.join("oreslang-test.toml");
+    if canonical_manifest.exists() && compatibility_manifest.exists() {
+        return Err("both atto-test.toml and oreslang-test.toml exist; select exactly one".into());
+    }
+    let manifest = if canonical_manifest.exists() {
+        canonical_manifest
+    } else {
+        compatibility_manifest
+    };
     let cfg: toml::Value = if manifest.exists() {
         let raw = common::bounded_read(&manifest, 1_048_576)?;
         let raw = std::str::from_utf8(&raw).map_err(|e| e.to_string())?;
