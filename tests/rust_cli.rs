@@ -379,6 +379,28 @@ fn ambiguous_canonical_and_legacy_manifests_fail_closed() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("select exactly one"));
 }
 
+#[test]
+fn native_file_list_rejects_bad_types_and_duplicate_names() {
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("tests")).unwrap();
+    write(&project.path().join("tests/test_one.atto"), "// source placeholder\n");
+
+    for manifest in [
+        "[native]\nfiles = \"tests/test_one.atto\"\n",
+        "[native]\nfiles = [\"tests/test_one.atto\", \"tests/test_one.atto\"]\n",
+    ] {
+        write(&project.path().join("atto-test.toml"), manifest);
+        let output = invoke(project.path(), &[]);
+        assert_eq!(code(&output), 2, "{}", String::from_utf8_lossy(&output.stderr));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("[native].files must be an array")
+                || stderr.contains("duplicate source"),
+            "{stderr}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn canonical_manifest_symlink_does_not_bypass_native_admission() {
