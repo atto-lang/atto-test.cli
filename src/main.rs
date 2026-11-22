@@ -708,10 +708,17 @@ fn run(o: Opt) -> Result<u8> {
     let canonical_manifest = root.join("atto-test.toml");
     let compatibility_manifest = root.join("oreslang-test.toml");
     // symlink_metadata also detects dangling links that Path::exists hides.
-    // All present manifest candidates must be opened via bounded_read's
-    // no-follow, regular-file policy.
-    let canonical_present = canonical_manifest.symlink_metadata().is_ok();
-    let compatibility_present = compatibility_manifest.symlink_metadata().is_ok();
+    // Permission errors and other metadata failures must not silently cause
+    // a fallback to the compatibility manifest.
+    fn manifest_present(path: &Path) -> Result<bool> {
+        match path.symlink_metadata() {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(format!("cannot inspect test manifest {}: {error}", path.display())),
+        }
+    }
+    let canonical_present = manifest_present(&canonical_manifest)?;
+    let compatibility_present = manifest_present(&compatibility_manifest)?;
     if canonical_present && compatibility_present {
         return Err("both atto-test.toml and oreslang-test.toml exist; select exactly one".into());
     }
