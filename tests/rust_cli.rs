@@ -322,7 +322,7 @@ fn canonical_atto_test_launcher_delegates_to_rust_cli() {
         .arg("--root")
         .arg(project.path())
         .env("ORESLANG_TEST_BIN", binary())
-        .env("ORESLANG_BIN", "sh")
+        .env("ATTO_BIN", "sh")
         .output()
         .unwrap();
     assert_eq!(code(&output), 0, "{}", String::from_utf8_lossy(&output.stderr));
