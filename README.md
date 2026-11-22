@@ -76,7 +76,10 @@ This example is intended for a Java compiler checkout containing the
 Maven entry point. Its actual success requires JDK 25, Maven, the matching
 Java compiler branch, and a compiled guest run. The source cannot claim
 support merely because the manifest can construct the command.
-Project-controlled `[native].command` **executes arbitrary host code**:
+Project-controlled `[native].command` **executes arbitrary host code**. The CLI
+refuses it by default; pass `--allow-project-command` only after reviewing
+and trusting the checkout and its compiler command. For the Java adapter above,
+run `atto test --root . --allow-project-command`. The opt-in is not a sandbox:
 never run an untrusted checkout with ambient secrets or filesystem/network
 privileges. The same warning applies to a configured `ATTO_BIN` executable.
 
