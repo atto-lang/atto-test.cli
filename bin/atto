@@ -1,0 +1,6 @@
+#!/bin/sh
+# Canonical AttoLang entrypoint, reusing the existing Rust test dispatcher.
+# Other compiler subcommands remain delegated by the compatibility dispatcher.
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$here/oreslang" "$@"
