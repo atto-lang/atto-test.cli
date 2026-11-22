@@ -34,6 +34,11 @@ oreslang test
 
 ## AttoLang native .atto tests (candidate)
 
+From a checkout with `bin/` on `PATH`, run `atto test --root .` or invoke
+`atto-test --root .` directly. Both are thin executable launchers for the
+same existing Rust test binary; the legacy `oreslang test` entrypoint remains
+available for compatibility. The Rust binary must be built first.
+
 Automatic native test discovery now selects canonical **.atto** source files
 under tests/ with names test_*.atto or *_test.atto. A project may explicitly
 list files using [native].files in oreslang-test.toml, including a legacy .ores
