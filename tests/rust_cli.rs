@@ -388,6 +388,7 @@ fn native_file_list_rejects_bad_types_and_duplicate_names() {
     for manifest in [
         "[native]\nfiles = \"tests/test_one.atto\"\n",
         "[native]\nfiles = [\"tests/test_one.atto\", \"tests/test_one.atto\"]\n",
+        "native = \"not-a-table\"\n",
     ] {
         write(&project.path().join("atto-test.toml"), manifest);
         let output = invoke(project.path(), &[]);
@@ -395,7 +396,8 @@ fn native_file_list_rejects_bad_types_and_duplicate_names() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("[native].files must be an array")
-                || stderr.contains("duplicate source"),
+                || stderr.contains("duplicate source")
+                || stderr.contains("[native] must be a TOML table"),
             "{stderr}"
         );
     }
