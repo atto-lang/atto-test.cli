@@ -1,0 +1,5 @@
+#!/bin/sh
+# Canonical AttoLang testing entrypoint. Implementation remains native Rust.
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$here/oreslang-test" "$@"
