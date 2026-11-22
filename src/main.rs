@@ -863,13 +863,13 @@ mod native_command_template_tests {
     #[test]
     fn substitutes_one_source_as_one_arg_without_shell_interpolation() {
         let cfg = config("[native]\ncommand = [\"mvn\", \"-q\", \"exec:java\", \"-Dexec.args={source}\"]\n");
-        let src = Path::new("/test/project/tests/test one;echo unsafe.atto");
+        let src = Path::new("/test/project/tests/test {literal};echo unsafe.atto");
         let argv = native_command(&cfg, "ignored-compiler", src).expect("command admitted");
         assert_eq!(argv, vec![
             "mvn",
             "-q",
             "exec:java",
-            "-Dexec.args=/test/project/tests/test one;echo unsafe.atto",
+            "-Dexec.args=/test/project/tests/test {literal};echo unsafe.atto",
         ]);
     }
 
