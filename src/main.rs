@@ -458,6 +458,104 @@ fn do_deadlock(root: &Path, cfg: &toml::Value, o: &Opt) -> Result<u8> {
         Ok(0)
     }
 }
+
+ // ORES_TEST is a guest-produced event format, NOT a cryptographic
+ // attestation. Require well-formed, complete, nonreplayed case identities.
+ // The CI coordinator still must pin compiler, source tree, runner and job.
+ fn machine_field_valid(field: &str, allow_empty: bool) -> bool {
+     if field.len() > 1024 || (!allow_empty && field.is_empty()) {
+         return false;
+     }
+     let mut chars = field.chars();
+     while let Some(c) = chars.next() {
+         if c == '\\' {
+             match chars.next() {
+                 Some('\\' | 'n' | 'r' | 't') => {}
+                 Some('u') => {
+                     let code: String = chars.by_ref().take(4).collect();
+                     if code != "007c" && code != "0000" {
+                         return false;
+                     }
+                 }
+                 _ => return false,
+             }
+         } else if c.is_control() || c == '|' {
+             return false;
+         }
+     }
+     true
+ }
+ 
+ // The summary must be the last emitted record. It is unsafe to count merely
+ // lines with matching prefixes: duplicates and unknown records can fake a
+ // passing aggregate even if the integer totals appear consistent.
+ fn admit_native_receipts(stdout: &str) -> Result<String> {
+     let mut case_ids = std::collections::HashSet::new();
+     let mut counts = [0usize; 3];
+     let mut summary = None;
+     for line in stdout.split_terminator('\n') {
+         if summary.is_some() {
+             return Err("test output continued after the final summary".into());
+         }
+         if !line.starts_with("ORES_TEST|") {
+             continue;
+         }
+         let parts: Vec<_> = line.split('|').collect();
+         if parts.len() == 4 && parts[0] == "ORES_TEST" {
+             let status = match parts[1] {
+                 "PASS" => 0,
+                 "FAIL" => 1,
+                 "SKIP" => 2,
+                 _ => return Err("unknown test record status".into()),
+             };
+             if !machine_field_valid(parts[2], false)
+                 || !machine_field_valid(parts[3], true)
+                 || (status == 0 && !parts[3].is_empty())
+             {
+                 return Err("invalid or noncanonical case record".into());
+             }
+             if !case_ids.insert(parts[2].to_owned()) {
+                 return Err("duplicate test case identity".into());
+             }
+             counts[status] = counts[status]
+                 .checked_add(1)
+                 .ok_or("test case counter overflow")?;
+             continue;
+         }
+         if parts.len() == 7 && parts[0] == "ORES_TEST" && parts[1] == "SUMMARY" {
+             let mut values = [0usize; 5];
+             for (index, label) in ["total", "passed", "failed", "skipped", "filtered"]
+                 .iter()
+                 .enumerate()
+             {
+                 let number = parts[index + 2]
+                     .strip_prefix(label)
+                     .and_then(|rest| rest.strip_prefix('='))
+                     .ok_or("invalid summary field name/order")?;
+                 if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+                     return Err("invalid test counter".into());
+                 }
+                 values[index] = number.parse().map_err(|_| "test counter out of range")?;
+             }
+             let accounted = values[1]
+                 .checked_add(values[2])
+                 .and_then(|n| n.checked_add(values[3]))
+                 .ok_or("summary counter overflow")?;
+             if values[0] != accounted
+                 || counts != [values[1], values[2], values[3]]
+                 || values[1] == 0
+                 || values[2] != 0
+             {
+                 return Err("test summary is inconsistent, failed or vacuous".into());
+             }
+             summary = Some(line.to_owned());
+             continue;
+         }
+         return Err("unknown or malformed ORES_TEST event".into());
+     }
+     summary.ok_or_else(|| "missing guest test summary".into())
+ }
+ 
 fn native(root: &Path, cfg: &toml::Value, timeout: f64) -> Result<u8> {
     let files = if let Some(arr) = cfg
         .get("native")
@@ -491,9 +589,9 @@ fn native(root: &Path, cfg: &toml::Value, timeout: f64) -> Result<u8> {
             .into_iter()
             .filter(|e| {
                 e.file_type().is_file()
-                    && e.path().extension().is_some_and(|x| x == "ores")
+                    && e.path().extension().is_some_and(|x| x == "atto")
                     && (e.file_name().to_string_lossy().starts_with("test_")
-                        || e.file_name().to_string_lossy().ends_with("_test.ores"))
+                        || e.file_name().to_string_lossy().ends_with("_test.atto"))
             })
             .map(|e| {
                 e.path()
@@ -516,7 +614,7 @@ fn native(root: &Path, cfg: &toml::Value, timeout: f64) -> Result<u8> {
     let mut failures = 0;
     for name in &files {
         let file = safe_path(root, name)?;
-        if !file.is_file() || file.extension().is_none_or(|x| x != "ores") {
+        if !file.is_file() || file.extension().is_none_or(|x| x != "atto" && x != "ores") {
             return Err(format!("not a native test source: {name}"));
         }
         let args = vec![core.clone(), file.to_string_lossy().into_owned()];
@@ -526,49 +624,18 @@ fn native(root: &Path, cfg: &toml::Value, timeout: f64) -> Result<u8> {
             failures += 1;
             continue;
         };
-        let mut counts = [0usize; 3];
-        let mut summary = None;
-        for line in out.stdout.lines() {
-            if let Some(i) = ["ORES_TEST|PASS|", "ORES_TEST|FAIL|", "ORES_TEST|SKIP|"]
-                .iter()
-                .position(|p| line.starts_with(p))
-            {
-                counts[i] += 1;
-            }
-            if line.starts_with("ORES_TEST|SUMMARY|") {
-                if summary.is_some() {
-                    summary = Some(String::new());
-                    break;
-                }
-                summary = Some(line.to_owned());
-            }
-        }
-        let valid = summary
-            .as_ref()
-            .and_then(|line| {
-                let rest = line.strip_prefix("ORES_TEST|SUMMARY|")?;
-                let props: Vec<_> = rest.split('|').collect();
-                if props.len() != 5 {
-                    return None;
-                }
-                let values: Option<Vec<usize>> =
-                    ["total", "passed", "failed", "skipped", "filtered"]
-                        .iter()
-                        .zip(props.iter())
-                        .map(|(key, p)| p.strip_prefix(&format!("{key}="))?.parse().ok())
-                        .collect();
-                let v = values?;
-                let accounted = v[1].checked_add(v[2])?.checked_add(v[3])?;
-                Some(v[0] == accounted && v[1] > 0 && v[2] == 0 && counts == [v[1], v[2], v[3]])
-            })
-            .unwrap_or(false);
+        let receipt = admit_native_receipts(&out.stdout);
+        let valid = receipt.is_ok();
         if out.code != 0 || !valid {
             failures += 1;
             eprintln!("FAIL {name}: exit={} valid_summary={valid}", out.code);
+            if let Err(reason) = &receipt {
+                eprintln!("RECEIPT REJECTED {name}: {reason}");
+            }
             eprintln!("{}", out.stdout.chars().take(8000).collect::<String>());
             eprintln!("{}", out.stderr.chars().take(8000).collect::<String>());
         } else {
-            println!("PASS {name}: {}", summary.unwrap());
+            println!("PASS {name}: {}", receipt.unwrap());
         }
     }
     Ok((failures > 0) as u8)
@@ -674,5 +741,59 @@ mod check_compiler_trust_tests {
         symlink(&target, &alias).unwrap();
         let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         assert!(digest_trusted_compiler(&[alias.to_str().unwrap().to_owned()], expected).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod native_receipt_contract_tests {
+    use super::admit_native_receipts;
+
+    const GOOD: &str = "ORES_TEST|PASS|math/add|\nORES_TEST|PASS|math/sub|\nORES_TEST|SKIP|math/slow|disabled\nORES_TEST|SUMMARY|total=3|passed=2|failed=0|skipped=1|filtered=4\n";
+
+    #[test]
+    fn accepts_genuine_shape_and_separately_counts_filtered() {
+        assert!(admit_native_receipts(GOOD).is_ok());
+        assert!(admit_native_receipts("debug\nORES_TEST|PASS|a|\\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n").is_ok());
+    }
+
+    #[test]
+    fn rejects_duplicate_or_replayed_case_ids_and_count_forgery() {
+        for source in [
+            "ORES_TEST|PASS|same|\nORES_TEST|PASS|same|\nORES_TEST|SUMMARY|total=2|passed=2|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PASS|a|\nORES_TEST|SKIP|a|reason\nORES_TEST|SUMMARY|total=2|passed=1|failed=0|skipped=1|filtered=0\n",
+            "ORES_TEST|PASS|a|\nORES_TEST|SUMMARY|total=2|passed=2|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PASS|a|\nORES_TEST|SUMMARY|total=0|passed=0|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|FAIL|a|failed\nORES_TEST|SUMMARY|total=1|passed=0|failed=1|skipped=0|filtered=0\n",
+            "ORES_TEST|SKIP|a|reason\nORES_TEST|SUMMARY|total=1|passed=0|failed=0|skipped=1|filtered=0\n",
+        ] {
+            assert!(admit_native_receipts(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn rejects_injected_extra_records_invalid_machine_fields_and_trailing_output() {
+        for source in [
+            "ORES_TEST|PASS|a|\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\nORES_TEST|PASS|b|\n",
+            "ORES_TEST|PASS|a|\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\nUNEXPECTED_SUCCESS\n",
+            "ORES_TEST|PASS|a|\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PASS|a|unexpected\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PASS|a|b|\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PASS|a\\q|\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PASS|a\\u007d|\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PASS|a\rb|\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PENDING|a|\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PASS|a|\nORES_TEST|SUMMARY|total=1|passed=+1|failed=0|skipped=0|filtered=0\n",
+            "ORES_TEST|PASS|a|\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0|extra=0\n",
+            "ORES_TEST|PASS|a|\n",
+        ] {
+            assert!(admit_native_receipts(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn escaped_machine_ids_are_injective_and_valid() {
+        let good = "ORES_TEST|PASS|a\\u007cb|\nORES_TEST|PASS|a\\\\u007cb|\nORES_TEST|PASS|a\\n|\nORES_TEST|SUMMARY|total=3|passed=3|failed=0|skipped=0|filtered=0\n";
+        assert!(admit_native_receipts(good).is_ok());
     }
 }
