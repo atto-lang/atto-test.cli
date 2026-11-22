@@ -348,6 +348,46 @@ fn native_rejects_duplicate_receipts_even_with_matching_summary() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate test case identity"));
 }
 
+// Host-level process invocation evidence, not real Atto compiler execution.
+#[test]
+fn canonical_atto_manifest_invokes_explicit_host_adapter() {
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("tests")).unwrap();
+    write(
+        &project.path().join("tests/test_adapter.atto"),
+        "// guest source placeholder; a real backend must compile this\n",
+    );
+    write(
+        &project.path().join("atto-test.toml"),
+        "[native]\nfiles = [\"tests/test_adapter.atto\"]\ncommand = [\"sh\", \"-c\", \"test -f \\\"$1\\\" || exit 9; printf 'ORES_TEST|PASS|adapter/case|\\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\\n'\", \"adapter\", \"{source}\"]\n",
+    );
+    let output = invoke(project.path(), &[]);
+    assert_eq!(code(&output), 0, "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("PASS tests/test_adapter.atto:"));
+}
+
+#[test]
+fn ambiguous_canonical_and_legacy_manifests_fail_closed() {
+    let project = tempfile::tempdir().unwrap();
+    write(&project.path().join("atto-test.toml"), "[native]\nfiles=[]\n");
+    write(&project.path().join("oreslang-test.toml"), "[native]\nfiles=[]\n");
+    let result = invoke(project.path(), &[]);
+    assert_eq!(code(&result), 2);
+    assert!(String::from_utf8_lossy(&result.stderr).contains("select exactly one"));
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_manifest_symlink_does_not_bypass_native_admission() {
+    use std::os::unix::fs::symlink;
+    let project = tempfile::tempdir().unwrap();
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    fs::write(outside.path(), "[native]\nfiles=[]\n").unwrap();
+    symlink(outside.path(), project.path().join("atto-test.toml")).unwrap();
+    let result = invoke(project.path(), &[]);
+    assert_eq!(code(&result), 2);
+}
+
 #[test]
 fn native_summary_integer_overflow_fails_without_panicking() {
     let dir = tempfile::tempdir().unwrap();
