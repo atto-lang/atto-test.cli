@@ -58,6 +58,28 @@ Example:
 files = ["tests/test_math.atto", "tests/test_collections.atto"]
 ```
 
+A hosted compiler (for example the Java/GraalVM backend) can use an
+**explicit argv template** in a trusted project-root `atto-test.toml`.
+Exactly one `{source}` placeholder is required, and the runner replaces it
+inside one argument with the compiler-admitted absolute `.atto` path.
+No shell splitting, environment interpolation, or implicit `sh -c` occurs.
+Use `atto-test.toml` for new projects; `oreslang-test.toml` is the
+legacy fallback. If both are present the runner fails closed.
+
+```toml
+[native]
+files = ["examples/native-testing-regressions-40.atto"]
+command = ["mvn", "-q", "-B", "-ntp", "-DskipTests", "compile", "exec:java", "-Dexec.args={source}"]
+```
+
+This example is intended for a Java compiler checkout containing the
+Maven entry point. Its actual success requires JDK 25, Maven, the matching
+Java compiler branch, and a compiled guest run. The source cannot claim
+support merely because the manifest can construct the command.
+Project-controlled `[native].command` **executes arbitrary host code**:
+never run an untrusted checkout with ambient secrets or filesystem/network
+privileges. The same warning applies to a configured `ATTO_BIN` executable.
+
 The native runner checks one final ORES_TEST|SUMMARY record, observed
 PASS/FAIL/SKIP counts, positive executed coverage, unique case identities,
 canonical escaped fields and no extra output after the summary. Duplicates,
