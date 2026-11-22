@@ -606,7 +606,11 @@ fn native(root: &Path, cfg: &toml::Value, timeout: f64) -> Result<u8> {
     if files.is_empty() {
         return Err("no native test sources discovered".into());
     }
-    let core = std::env::var("ORESLANG_BIN").unwrap_or_else(|_| "oreslang-core".into());
+    // Canonical Atto compiler override wins; keep the historical name
+    // until compiler launchers and packaging complete their migration.
+    let core = std::env::var("ATTO_BIN")
+        .or_else(|_| std::env::var("ORESLANG_BIN"))
+        .unwrap_or_else(|_| "oreslang-core".into());
     if let Ok(real) = std::fs::canonicalize(&core) {
         if std::env::current_exe().is_ok_and(|self_exe| self_exe == real) {
             return Err("ORESLANG_BIN points back to the test runner".into());
