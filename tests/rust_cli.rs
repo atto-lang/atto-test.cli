@@ -361,7 +361,10 @@ fn canonical_atto_manifest_invokes_explicit_host_adapter() {
         &project.path().join("atto-test.toml"),
         "[native]\nfiles = [\"tests/test_adapter.atto\"]\ncommand = [\"sh\", \"-c\", \"test -f \\\"$1\\\" || exit 9; printf 'ORES_TEST|PASS|adapter/case|\\nORES_TEST|SUMMARY|total=1|passed=1|failed=0|skipped=0|filtered=0\\n'\", \"adapter\", \"{source}\"]\n",
     );
-    let output = invoke(project.path(), &[]);
+    let refused = invoke(project.path(), &[]);
+    assert_eq!(code(&refused), 2);
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("--allow-project-command"));
+    let output = invoke(project.path(), &["--allow-project-command"]);
     assert_eq!(code(&output), 0, "{}", String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("PASS tests/test_adapter.atto:"));
 }
