@@ -61,6 +61,10 @@ struct Opt {
     cases: usize,
     #[arg(long, default_value_t = 5.0)]
     timeout: f64,
+    // Project manifests are untrusted; explicit opt-in is required before
+    // the CLI executes a project-selected [native].command argv template.
+    #[arg(long)]
+    allow_project_command: bool,
     #[arg(long, default_value_t = 10000)]
     max_schedules: usize,
     /// Project-relative source file/directory to syntax-check
@@ -602,7 +606,7 @@ fn native_command(cfg: &toml::Value, default_core: &str, source: &Path) -> Resul
     Ok(expanded)
 }
 
-fn native(root: &Path, cfg: &toml::Value, timeout: f64) -> Result<u8> {
+fn native(root: &Path, cfg: &toml::Value, timeout: f64, allow_project_command: bool) -> Result<u8> {
     let files = if let Some(arr) = cfg
         .get("native")
         .and_then(|v| v.get("files"))
@@ -650,6 +654,11 @@ fn native(root: &Path, cfg: &toml::Value, timeout: f64) -> Result<u8> {
     };
     if files.is_empty() {
         return Err("no native test sources discovered".into());
+    }
+    if cfg.get("native").and_then(|value| value.get("command")).is_some()
+        && !allow_project_command
+    {
+        return Err("[native].command requires explicit --allow-project-command; project manifests execute host code".into());
     }
     // Canonical Atto compiler override wins; keep the historical name
     // until compiler launchers and packaging complete their migration.
@@ -751,7 +760,7 @@ fn run(o: Opt) -> Result<u8> {
     if o.race || o.deadlock {
         return Ok(result);
     }
-    native(&root, &cfg, o.timeout)
+    native(&root, &cfg, o.timeout, o.allow_project_command)
 }
 fn main() {
     let cli = Opt::parse();
