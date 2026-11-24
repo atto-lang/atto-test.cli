@@ -43,3 +43,9 @@ This README documents intended scope; current conformance must be established fr
 AttoLang is the canonical project name; new source, examples and documentation use `.atto` and the `atto-lang` repository organization. This README defines scope, not feature readiness.
 
 **Acceptance:** name the exact source SHA/tree, runtime/toolchain, positive and negative checks and execution receipt before claiming support. Host-only tests and empty CI steps do not prove guest execution.
+
+## Source-free execution receipt gate (host-side prototype)
+
+`python3 -m atto_test_cli.receipt path/to/receipt.json` validates v1 receipt metadata and emits `{"gate_pass":false,"host_only":0,"passed_guest":0,"total":0}`-shaped JSON. Exit codes: 0 only when **all** cases report a successful guest execution with exact source SHA, command, runtime, case exit and evidence digest; 1 for a well-formed non-passing receipt; 2 for invalid input. Duplicate JSON keys, skipped/pending surrogate claims, missing digests and zero-case receipts are rejected. Run `python3 -m unittest discover -s tests -v` to exercise positive and adversarial host tests.
+
+This is a **metadata validator, not cryptographic attestation or guest execution**. A fabricated digest is not evidence of real runtime execution. A trusted verifier must independently bind recorded digests to executed artifacts, guest identity and exact commit before accepting parity or release claims.
