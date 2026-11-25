@@ -3,7 +3,7 @@
 //! traces never authorize runtime instrumentation completeness.
 
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 use std::io::Read;
 use std::path::{Component, Path};
 
@@ -209,6 +209,9 @@ impl<'a> Parser<'a> {
         Ok(Event { fields })
     }
 }
+/// Full vector-clock comparison. Retained as the test oracle for the epoch
+/// check used by `analyze`.
+#[cfg(test)]
 fn ordered(earlier: &Clock, later: &Clock) -> bool {
     earlier
         .iter()
@@ -222,10 +225,22 @@ fn merge(target: &mut Clock, source: &Clock) {
             .or_insert(*v);
     }
 }
+/// Last access per task, stored as an epoch: that task's own clock component
+/// at the access. Every event increments its task's component, so access e
+/// by task p happens-before a later event f iff `V_e[p] <= V_f[p]` (the
+/// FastTrack epoch property). Comparing full clocks gave identical verdicts
+/// but cost O(tasks) per prior access: a 5.5 MB in-budget trace (256 tasks,
+/// ~99k unsynchronized writes) took 54 s of CPU.
 #[derive(Default)]
 struct MemoryHistory {
-    reads: BTreeMap<String, Clock>,
-    writes: BTreeMap<String, Clock>,
+    reads: BTreeMap<String, u64>,
+    writes: BTreeMap<String, u64>,
+    #[cfg(test)]
+    full: BTreeMap<(bool, String), Clock>,
+}
+
+fn happens_before(prior_task: &str, epoch: u64, current: &Clock) -> bool {
+    return epoch <= current.get(prior_task).copied().unwrap_or(0);
 }
 #[derive(Debug, PartialEq, Eq)]
 pub struct Report {
@@ -296,11 +311,20 @@ pub fn analyze(text: &str) -> Result<Report, String> {
         if finished.contains(&task) {
             return Err("event after task completion".into());
         }
-        let mut clock = clocks.get(&task).ok_or("event from unknown task")?.clone();
+        // A task blocked waiting for a held lock cannot execute memory
+        // accesses, send/receive messages or spawn children. Previously
+        // those events were admitted while pending_waits was set, allowing
+        // an impossible trace to obtain an OBSERVED-CLEAN verdict.
+        if pending_waits.contains_key(&task) && op != "unwait" {
+            return Err("blocked task executed before lock wait cancellation".into());
+        }
+        // Take the clock out instead of cloning it on every event; it is
+        // reinserted below. Checks against `clocks` must account for it.
+        let mut clock = clocks.remove(&task).ok_or("event from unknown task")?;
         match op.as_str() {
             "fork" => {
                 let child = e.text("child")?.to_owned();
-                if clocks.len() >= MAX_TASKS || clocks.contains_key(&child) {
+                if clocks.len() + 1 >= MAX_TASKS || child == task || clocks.contains_key(&child) {
                     return Err("duplicate/over-budget fork child".into());
                 }
                 let mut child_clock = clock.clone();
@@ -397,8 +421,22 @@ pub fn analyze(text: &str) -> Result<Report, String> {
                 }
                 accesses += 1;
                 let past = history.entry(location.clone()).or_default();
+                #[cfg(test)]
+                for ((was_write, prior_task), prior) in &past.full {
+                    let epoch = if *was_write {
+                        past.writes[prior_task]
+                    } else {
+                        past.reads[prior_task]
+                    };
+                    assert_eq!(
+                        happens_before(prior_task, epoch, &clock),
+                        ordered(prior, &clock),
+                        "epoch verdict diverged from vector clock at event {}",
+                        index + 2
+                    );
+                }
                 for (prior_task, prior) in &past.writes {
-                    if prior_task != &task && !ordered(prior, &clock) {
+                    if prior_task != &task && !happens_before(prior_task, *prior, &clock) {
                         conflicts = conflicts.checked_add(1).ok_or("race counter overflow")?;
                         if examples.len() < MAX_REPORTED {
                             examples.push(format!("location={location} first={prior_task} second={task} first=W second={mode} event={}", index+2));
@@ -407,16 +445,21 @@ pub fn analyze(text: &str) -> Result<Report, String> {
                 }
                 if mode == "W" {
                     for (prior_task, prior) in &past.reads {
-                        if prior_task != &task && !ordered(prior, &clock) {
+                        if prior_task != &task && !happens_before(prior_task, *prior, &clock) {
                             conflicts = conflicts.checked_add(1).ok_or("race counter overflow")?;
                             if examples.len() < MAX_REPORTED {
                                 examples.push(format!("location={location} first={prior_task} second={task} first=R second=W event={}", index+2));
                             }
                         }
                     }
-                    past.writes.insert(task.clone(), clock.clone());
+                }
+                let epoch = clock.get(&task).copied().unwrap_or(0);
+                #[cfg(test)]
+                past.full.insert((mode == "W", task.clone()), clock.clone());
+                if mode == "W" {
+                    past.writes.insert(task.clone(), epoch);
                 } else {
-                    past.reads.insert(task.clone(), clock.clone());
+                    past.reads.insert(task.clone(), epoch);
                 }
             }
             _ => unreachable!(),
@@ -477,13 +520,13 @@ pub(crate) fn relative_trace(root: &Path, name: &str) -> Result<std::path::PathB
 }
 
 pub fn offline(root: &Path, name: &str) -> Result<i32, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     relative_trace(root, name)?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let path = relative_trace(root, name)?;
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     let bytes = crate::fs_secure::read_project_file(root, Path::new(name), MAX_BYTES as usize)?;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let bytes = {
         let meta = path.metadata().map_err(|e| e.to_string())?;
         if meta.len() > MAX_BYTES {
@@ -578,8 +621,321 @@ mod tests {
         assert!(analyze(detached_child).is_err());
     }
     #[test]
+    fn fork_to_self_is_rejected() {
+        let s = concat!(
+            "{\"op\":\"begin\",\"version\":1,\"run_id\":\"r\",\"backend\":\"llvm\"}\n",
+            "{\"op\":\"task\",\"task\":\"a\"}\n",
+            "{\"op\":\"fork\",\"task\":\"a\",\"child\":\"a\"}\n",
+            "{\"op\":\"access\",\"task\":\"a\",\"location\":\"x\",\"mode\":\"W\"}\n",
+            "{\"op\":\"end\",\"run_id\":\"r\",\"events\":3}\n",
+        );
+        assert!(analyze(s).is_err());
+    }
+
+    /// Random well-formed traces. `analyze` asserts (under cfg(test)) that
+    /// every epoch verdict equals the full vector-clock comparison.
+    #[test]
+    fn epoch_happens_before_matches_full_vector_clocks_on_random_traces() {
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        let mut total_conflicts = 0;
+        for trace in 0..300 {
+            let roots = 2 + next(3);
+            let mut ev: Vec<String> = (0..roots)
+                .map(|t| format!("{{\"op\":\"task\",\"task\":\"t{t}\"}}"))
+                .collect();
+            let mut live: Vec<String> = (0..roots).map(|t| format!("t{t}")).collect();
+            let mut children: Vec<(String, String)> = Vec::new();
+            let mut pending: Vec<String> = Vec::new();
+            let (mut msg, mut kid) = (0, 0);
+            for _ in 0..(10 + next(60)) {
+                let t = live[next(live.len() as u64) as usize].clone();
+                match next(6) {
+                    0 | 1 => ev.push(format!(
+                        "{{\"op\":\"access\",\"task\":\"{t}\",\"location\":\"l{}\",\"mode\":\"{}\"}}",
+                        next(3),
+                        if next(2) == 0 { "R" } else { "W" }
+                    )),
+                    2 => {
+                        msg += 1;
+                        ev.push(format!("{{\"op\":\"send\",\"task\":\"{t}\",\"message\":\"m{msg}\"}}"));
+                        pending.push(format!("m{msg}"));
+                    }
+                    3 if !pending.is_empty() => {
+                        let m = pending.remove(next(pending.len() as u64) as usize);
+                        ev.push(format!("{{\"op\":\"recv\",\"task\":\"{t}\",\"message\":\"{m}\"}}"));
+                    }
+                    4 => {
+                        ev.push(format!("{{\"op\":\"lock\",\"task\":\"{t}\",\"name\":\"mu\"}}"));
+                        ev.push(format!(
+                            "{{\"op\":\"access\",\"task\":\"{t}\",\"location\":\"l{}\",\"mode\":\"W\"}}",
+                            next(3)
+                        ));
+                        ev.push(format!("{{\"op\":\"unlock\",\"task\":\"{t}\",\"name\":\"mu\"}}"));
+                    }
+                    5 if live.len() < 8 => {
+                        kid += 1;
+                        let c = format!("c{kid}");
+                        ev.push(format!("{{\"op\":\"fork\",\"task\":\"{t}\",\"child\":\"{c}\"}}"));
+                        live.push(c.clone());
+                        children.push((t, c));
+                    }
+                    _ => {}
+                }
+            }
+            ev.push(format!(
+                "{{\"op\":\"access\",\"task\":\"{}\",\"location\":\"l0\",\"mode\":\"R\"}}",
+                live[0]
+            ));
+            for m in pending.drain(..) {
+                ev.push(format!(
+                    "{{\"op\":\"recv\",\"task\":\"{}\",\"message\":\"{m}\"}}",
+                    live[0]
+                ));
+            }
+            // Finish and join children innermost-first so parents are live.
+            for (parent, child) in children.iter().rev() {
+                ev.push(format!("{{\"op\":\"finish\",\"task\":\"{child}\"}}"));
+                ev.push(format!(
+                    "{{\"op\":\"join\",\"task\":\"{parent}\",\"child\":\"{child}\"}}"
+                ));
+            }
+            let text = format!(
+                "{{\"op\":\"begin\",\"version\":1,\"run_id\":\"r\",\"backend\":\"x\"}}\n{}\n{{\"op\":\"end\",\"run_id\":\"r\",\"events\":{}}}\n",
+                ev.join("\n"),
+                ev.len()
+            );
+            let report = analyze(&text).unwrap_or_else(|e| panic!("trace {trace}: {e}\n{text}"));
+            total_conflicts += report.conflicts;
+        }
+        // Both racy and ordered comparisons must actually be exercised.
+        assert!(total_conflicts > 0);
+    }
+
+    #[test]
     fn cross_task_history_is_not_erased() {
         let s = "{\"op\":\"begin\",\"version\":1,\"run_id\":\"id\",\"backend\":\"llvm\"}\n{\"op\":\"task\",\"task\":\"a\"}\n{\"op\":\"task\",\"task\":\"b\"}\n{\"op\":\"task\",\"task\":\"c\"}\n{\"op\":\"access\",\"task\":\"a\",\"location\":\"x\",\"mode\":\"W\"}\n{\"op\":\"access\",\"task\":\"b\",\"location\":\"x\",\"mode\":\"W\"}\n{\"op\":\"access\",\"task\":\"c\",\"location\":\"x\",\"mode\":\"R\"}\n{\"op\":\"end\",\"run_id\":\"id\",\"events\":6}\n";
         assert_eq!(analyze(s).unwrap().conflicts, 3);
+    }
+
+    // These are deterministic, complete ORES_RACE_V1 traces. Their verdicts
+    // probe the scheduler's happens-before edges, not live guest execution.
+    fn receipt(events: &[&str]) -> String {
+        let mut lines =
+            vec![r#"{"op":"begin","version":1,"run_id":"r","backend":"llvm"}"#.to_owned()];
+        lines.extend(events.iter().map(|event| (*event).to_owned()));
+        lines.push(format!(
+            r#"{{"op":"end","run_id":"r","events":{}}}"#,
+            events.len()
+        ));
+        return lines.join("\n") + "\n";
+    }
+
+    #[test]
+    fn read_read_across_tasks_is_not_a_race() {
+        let trace = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"R"}"#,
+            r#"{"op":"access","task":"b","location":"x","mode":"R"}"#,
+        ]);
+        let result = analyze(&trace).unwrap();
+        assert_eq!(result.accesses, 2);
+        assert_eq!(result.conflicts, 0);
+    }
+
+    #[test]
+    fn fork_join_transfers_child_write_to_parent_without_race() {
+        let trace = receipt(&[
+            r#"{"op":"task","task":"parent"}"#,
+            r#"{"op":"fork","task":"parent","child":"child"}"#,
+            r#"{"op":"access","task":"child","location":"x","mode":"W"}"#,
+            r#"{"op":"finish","task":"child"}"#,
+            r#"{"op":"join","task":"parent","child":"child"}"#,
+            r#"{"op":"access","task":"parent","location":"x","mode":"R"}"#,
+        ]);
+        let result = analyze(&trace).unwrap();
+        assert_eq!(result.accesses, 2);
+        assert_eq!(result.conflicts, 0);
+    }
+
+    #[test]
+    fn lock_release_acquire_orders_other_task_accesses() {
+        let ordered = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"lock","task":"a","name":"mu"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"unlock","task":"a","name":"mu"}"#,
+            r#"{"op":"lock","task":"b","name":"mu"}"#,
+            r#"{"op":"access","task":"b","location":"x","mode":"R"}"#,
+            r#"{"op":"unlock","task":"b","name":"mu"}"#,
+        ]);
+        assert_eq!(analyze(&ordered).unwrap().conflicts, 0);
+        let unordered = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"access","task":"b","location":"x","mode":"R"}"#,
+        ]);
+        assert_eq!(analyze(&unordered).unwrap().conflicts, 1);
+    }
+
+    #[test]
+    fn multihop_message_dependency_orders_transitive_accesses() {
+        let ordered = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"task","task":"c"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"send","task":"a","message":"m1"}"#,
+            r#"{"op":"recv","task":"b","message":"m1"}"#,
+            r#"{"op":"send","task":"b","message":"m2"}"#,
+            r#"{"op":"recv","task":"c","message":"m2"}"#,
+            r#"{"op":"access","task":"c","location":"x","mode":"W"}"#,
+        ]);
+        assert_eq!(analyze(&ordered).unwrap().conflicts, 0);
+    }
+
+    #[test]
+    fn replayed_message_identity_fails_even_after_consumption() {
+        let trace = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"send","task":"a","message":"m"}"#,
+            r#"{"op":"recv","task":"b","message":"m"}"#,
+            r#"{"op":"send","task":"a","message":"m"}"#,
+        ]);
+        assert!(analyze(&trace)
+            .unwrap_err()
+            .contains("reused message identity"));
+    }
+
+    #[test]
+    fn unexpected_join_or_post_completion_access_is_rejected() {
+        let invalid_join = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"R"}"#,
+            r#"{"op":"join","task":"a","child":"b"}"#,
+        ]);
+        assert!(analyze(&invalid_join).is_err());
+        let late_access = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"R"}"#,
+            r#"{"op":"finish","task":"a"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+        ]);
+        assert!(analyze(&late_access).is_err());
+    }
+
+    #[test]
+    fn blocked_task_cannot_read_write_send_receive_or_spawn() {
+        let begin = [
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"lock","task":"a","name":"mu"}"#,
+            r#"{"op":"access","task":"a","location":"safe","mode":"R"}"#,
+            r#"{"op":"wait","task":"b","name":"mu"}"#,
+        ];
+        let forbidden = [
+            r#"{"op":"access","task":"b","location":"secret","mode":"R"}"#,
+            r#"{"op":"access","task":"b","location":"secret","mode":"W"}"#,
+            r#"{"op":"send","task":"b","message":"m"}"#,
+            r#"{"op":"recv","task":"b","message":"m"}"#,
+            r#"{"op":"fork","task":"b","child":"c"}"#,
+            r#"{"op":"finish","task":"b"}"#,
+        ];
+        for forbidden_event in forbidden {
+            let mut events = begin.to_vec();
+            events.push(forbidden_event);
+            events.push(r#"{"op":"unwait","task":"b","name":"mu"}"#);
+            events.push(r#"{"op":"unlock","task":"a","name":"mu"}"#);
+            let trace = receipt(&events);
+            let err = analyze(&trace).unwrap_err();
+            assert!(
+                err.contains("blocked task executed"),
+                "{forbidden_event}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_wait_can_resume_without_claiming_lock_ownership() {
+        let trace = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"lock","task":"a","name":"mu"}"#,
+            r#"{"op":"wait","task":"b","name":"mu"}"#,
+            r#"{"op":"unwait","task":"b","name":"mu"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"access","task":"b","location":"y","mode":"R"}"#,
+            r#"{"op":"unlock","task":"a","name":"mu"}"#,
+        ]);
+        let report = analyze(&trace).unwrap();
+        assert_eq!(report.accesses, 2);
+        assert_eq!(report.conflicts, 0);
+    }
+
+    #[test]
+    fn unrelated_memory_location_does_not_change_existing_conflict_count() {
+        let base = [
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"access","task":"b","location":"x","mode":"R"}"#,
+        ];
+        let original = analyze(&receipt(&base)).unwrap();
+        assert_eq!(original.conflicts, 1);
+        let extra = [
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"task","task":"b"}"#,
+            r#"{"op":"access","task":"a","location":"unrelated","mode":"W"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"W"}"#,
+            r#"{"op":"access","task":"b","location":"x","mode":"R"}"#,
+            r#"{"op":"access","task":"b","location":"unrelated2","mode":"R"}"#,
+        ];
+        let augmented = analyze(&receipt(&extra)).unwrap();
+        assert_eq!(augmented.conflicts, original.conflicts);
+        assert_eq!(augmented.accesses, original.accesses + 2);
+    }
+
+    #[test]
+    fn same_task_reads_and_writes_do_not_race_with_themselves() {
+        let mut events = vec![r#"{"op":"task","task":"a"}"#];
+        for i in 0..64 {
+            let mode = if i % 2 == 0 { "W" } else { "R" };
+            events.push(if mode == "W" {
+                r#"{"op":"access","task":"a","location":"x","mode":"W"}"#
+            } else {
+                r#"{"op":"access","task":"a","location":"x","mode":"R"}"#
+            });
+        }
+        let report = analyze(&receipt(&events)).unwrap();
+        assert_eq!(report.conflicts, 0);
+        assert_eq!(report.accesses, 64);
+    }
+
+    #[test]
+    fn terminal_receipt_mismatch_and_extra_json_fields_fail_closed() {
+        let valid = receipt(&[
+            r#"{"op":"task","task":"a"}"#,
+            r#"{"op":"access","task":"a","location":"x","mode":"R"}"#,
+        ]);
+        assert_eq!(analyze(&valid).unwrap().events, 2);
+        for bad in [
+            valid.replace(r#""events":2"#, r#""events":3"#),
+            valid.replacen(r#""run_id":"r""#, r#""run_id":"other""#, 1),
+            valid.replace(r#""mode":"R""#, r#""mode":"R","ignored":true"#),
+            valid.replace(r#""version":1"#, r#""version":2"#),
+        ] {
+            assert!(analyze(&bad).is_err(), "accepted malformed trace: {bad}");
+        }
     }
 }

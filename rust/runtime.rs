@@ -2,20 +2,22 @@
 //! No Python runner, subprocess shell, or guest-authored success receipt.
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(test, not(unix)))]
+use std::fs;
+use std::fs::File;
+#[cfg(not(unix))]
 use std::fs::OpenOptions;
-use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use super::fs_secure::ProjectRoot;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 struct ProjectRoot;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 impl ProjectRoot {
     fn new(_root: &Path) -> Result<Self, String> {
         Ok(Self)
@@ -26,6 +28,8 @@ impl ProjectRoot {
 }
 
 const MAX_OUTPUT: u64 = 4_000_000;
+const GUEST_MARKER: &str = "ATTO_TEST_GUEST";
+const NESTED_REFUSAL: &str = "nested `atto test` from inside a test guest refused";
 const MAX_CASES: usize = 1_000_000;
 const MAX_CORPUS_FILES: usize = 1024;
 const MAX_CORPUS_BYTES: usize = 4 * 1024 * 1024;
@@ -68,11 +72,16 @@ fn parse(args: &[OsString]) -> Result<Settings, String> {
         timeout: Duration::from_secs(5),
     };
     let mut i = 0;
+    let mut seen = BTreeSet::new();
     while i < args.len() {
         let word = args[i].to_str().ok_or("non-UTF-8 CLI argument")?;
         let (key, inline) = word
             .split_once('=')
             .map_or((word, None), |(k, v)| (k, Some(v)));
+        // Last-wins silently discarded e.g. `--trace a.jsonl --trace b.jsonl`.
+        if key.starts_with("--") && !seen.insert(key.to_owned()) {
+            return Err(format!("duplicate test option: {key}"));
+        }
         match key {
             "--fuzz" if inline.is_none() => out.fuzz = true,
             "--race" if inline.is_none() => out.race = true,
@@ -211,15 +220,30 @@ fn resolve_path_candidate(
             };
             directory.join(executable)
         })
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable_file(candidate))
+}
+
+// execvp skips PATH entries that are not executable regular files. The
+// recursion check must resolve the same candidate, or a non-executable
+// decoy earlier in PATH hides the wrapper that actually runs.
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    return std::fs::metadata(path)
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    return path.is_file();
 }
 
 fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     let first = cmd.first().ok_or("empty command")?;
-    let wrapper = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
+    // Best effort: on Linux current_exe() reads /proc/self/exe, which may be
+    // absent in minimal containers. The ATTO_TEST_GUEST marker is the
+    // authoritative recursion guard, so an unknown own path is not fatal.
+    let wrapper = std::env::current_exe().and_then(|p| p.canonicalize()).ok();
     let program = if Path::new(first).components().count() > 1 {
         // Explicit relative executables stay inside the project root.
         if Path::new(first).is_absolute() {
@@ -244,7 +268,7 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
         Some(program.clone())
     };
     let forbidden = [
-        wrapper,
+        wrapper.unwrap_or_default(),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang"),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/oreslang-test"),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("bin/atto"),
@@ -263,6 +287,11 @@ fn sanitize_command(cmd: &[String], root: &Path) -> Result<Command, String> {
     }
     let mut c = Command::new(program);
     c.args(&cmd[1..]).current_dir(root).env_clear();
+    // Marks every guest. Path checks cannot see through wrappers that spawn
+    // this CLI (oreslang-cli's `atto test` dispatcher, shell scripts), and
+    // each level gets its own process group, so timeouts never reach a
+    // nested run. run() refuses guest-spawning modes when this is set.
+    c.env(GUEST_MARKER, "1");
     for key in [
         "PATH",
         "LANG",
@@ -303,6 +332,32 @@ fn kill_guest_group(leader: u32) {
     }
 }
 
+/// Poll the guest leader. On Unix, detect exit with WNOWAIT so the zombie
+/// still pins its PID: killing the group *after* reaping could signal an
+/// unrelated process group that reused that number. Surviving group members
+/// are killed first, then the leader is reaped.
+#[cfg(unix)]
+fn leader_exited(child: &mut Child) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let pid = libc::id_t::try_from(child.id())
+        .map_err(|_| std::io::Error::other("child pid out of range"))?;
+    // SAFETY: zeroed siginfo_t is a valid out-parameter for waitid.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    if unsafe { libc::waitid(libc::P_PID, pid, &mut info, flags) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if info.si_signo == 0 {
+        return Ok(None); // still running
+    }
+    kill_guest_group(child.id());
+    return child.wait().map(Some);
+}
+
+#[cfg(not(unix))]
+fn leader_exited(child: &mut Child) -> std::io::Result<Option<std::process::ExitStatus>> {
+    return child.try_wait();
+}
+
 fn stop(child: &mut Child) {
     #[cfg(unix)]
     kill_guest_group(child.id());
@@ -310,24 +365,80 @@ fn stop(child: &mut Child) {
     let _ = child.wait();
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ProcessResult {
     code: Option<i32>,
+    /// Terminating signal on Unix when the child did not exit normally.
+    signal: Option<i32>,
     timed_out: bool,
+    /// A capture exceeded MAX_OUTPUT; the guest was stopped and the
+    /// captured text is truncated. Never a classifiable verdict.
+    output_exceeded: bool,
     output: String,
+    /// False when stdout was not UTF-8. `output` is then lossy and must not
+    /// be trusted as a machine receipt. stderr is always lossily decoded:
+    /// fuzz targets routinely echo arbitrary bytes, and treating those as an
+    /// infrastructure error aborted whole fuzz runs.
+    output_utf8: bool,
     stderr: String,
 }
 
-fn read_small(mut file: File) -> Result<String, String> {
+struct Capture {
+    text: String,
+    utf8: bool,
+    exceeded: bool,
+}
+
+fn read_small(mut file: File) -> Result<Capture, String> {
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     file.take(MAX_OUTPUT + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_OUTPUT {
-        return Err("test subprocess output limit exceeded".into());
+    let exceeded = bytes.len() as u64 > MAX_OUTPUT;
+    bytes.truncate(MAX_OUTPUT as usize);
+    return Ok(match String::from_utf8(bytes) {
+        Ok(text) => Capture {
+            text,
+            utf8: true,
+            exceeded,
+        },
+        Err(e) => Capture {
+            text: String::from_utf8_lossy(e.as_bytes()).into_owned(),
+            utf8: false,
+            exceeded,
+        },
+    });
+}
+
+#[cfg(unix)]
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt;
+    return status.signal();
+}
+
+#[cfg(not(unix))]
+fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    return None;
+}
+
+/// ETXTBSY means another process still holds the executable open for
+/// writing: a build step finishing the compiler binary, or a concurrently
+/// forked process that inherited the writer's descriptor before exec. It
+/// clears within milliseconds, so retry briefly; every other error is final.
+fn spawn_retrying_busy(command: &mut Command) -> Result<Child, String> {
+    let mut delay = Duration::from_millis(5);
+    for attempt in 0.. {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 8 => {
+                thread::sleep(delay);
+                delay *= 2;
+            }
+            Err(e) => return Err(format!("cannot spawn test command: {e}")),
+        }
     }
-    String::from_utf8(bytes).map_err(|_| "test subprocess capture is not valid UTF-8".into())
+    unreachable!()
 }
 
 fn invoke(
@@ -367,19 +478,20 @@ fn invoke(
     } else {
         command.stderr(Stdio::null());
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("cannot spawn test command: {e}"))?;
+    let mut child = spawn_retrying_busy(&mut command)?;
     let start = Instant::now();
-    let (code, timed_out) = loop {
+    let mut output_exceeded = false;
+    let (code, signal, timed_out) = loop {
         if capture {
             // A missing/unreadable capture must not silently disable the
             // output budget while the child continues executing.
             for output in [stdout.as_ref(), stderr.as_ref()].into_iter().flatten() {
                 match output.metadata() {
                     Ok(meta) if meta.len() > MAX_OUTPUT => {
-                        stop(&mut child);
-                        return Err("test subprocess output limit exceeded".into());
+                        // Input-dependent runaway output is reported to the
+                        // caller, which decides whether that is an error
+                        // (native receipts) or unclassifiable (fuzz).
+                        output_exceeded = true;
                     }
                     Err(e) => {
                         stop(&mut child);
@@ -388,12 +500,16 @@ fn invoke(
                     Ok(_) => {}
                 }
             }
+            if output_exceeded {
+                stop(&mut child);
+                break (None, None, false);
+            }
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break (status.code(), false),
+        match leader_exited(&mut child) {
+            Ok(Some(status)) => break (status.code(), exit_signal(&status), false),
             Ok(None) if start.elapsed() >= timeout => {
                 stop(&mut child);
-                break (None, true);
+                break (None, None, true);
             }
             Ok(None) => thread::sleep(Duration::from_millis(5)),
             Err(e) => {
@@ -404,25 +520,30 @@ fn invoke(
             }
         }
     };
-    // The parent process exiting does not mean its process-group descendants
-    // exited. Always terminate remaining group members before final reporting.
-    // This is best-effort containment, not an OS sandbox or complete setsid
-    // descendant tracking. On Windows this path needs a Job Object adapter.
-    #[cfg(unix)]
-    kill_guest_group(child.id());
+    // Remaining process-group members were killed before the leader was
+    // reaped (leader_exited / stop). Best-effort containment, not an OS
+    // sandbox or setsid() descendant tracking; Windows needs a Job Object.
     drop(stdin_file);
-    Ok(ProcessResult {
+    let mut result = ProcessResult {
         code,
+        signal,
         timed_out,
-        output: match stdout.take() {
-            Some(f) => read_small(f)?,
-            None => String::new(),
-        },
-        stderr: match stderr.take() {
-            Some(f) => read_small(f)?,
-            None => String::new(),
-        },
-    })
+        output_exceeded,
+        output_utf8: true,
+        ..ProcessResult::default()
+    };
+    if let Some(f) = stdout.take() {
+        let c = read_small(f)?;
+        result.output = c.text;
+        result.output_utf8 = c.utf8;
+        result.output_exceeded |= c.exceeded;
+    }
+    if let Some(f) = stderr.take() {
+        let c = read_small(f)?;
+        result.stderr = c.text;
+        result.output_exceeded |= c.exceeded;
+    }
+    return Ok(result);
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -535,7 +656,10 @@ fn is_native_test_path(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .unwrap_or("");
     return path.starts_with("tests")
-        && matches!(path.extension().and_then(|ext| ext.to_str()), Some("atto" | "ores"))
+        && matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("atto" | "ores")
+        )
         && (base.starts_with("test_")
             || base.ends_with("_test.atto")
             || base.ends_with("_test.ores"));
@@ -580,12 +704,21 @@ fn native(root: &Path, config: &toml::Table, timeout: Duration) -> Result<i32, S
         let path = super::source_path(root, &name)?;
         let args = vec![core.clone(), path.to_string_lossy().into_owned()];
         let result = invoke(sanitize_command(&args, root)?, timeout, None, true)?;
+        if result.output_exceeded {
+            return Err("test subprocess output limit exceeded".into());
+        }
+        if !result.output_utf8 {
+            return Err("test subprocess capture is not valid UTF-8".into());
+        }
         if result.stderr.contains("FATAL: ThreadSanitizer:") {
             return Err("ThreadSanitizer initialization failed; native run inconclusive".into());
         }
-        if result.timed_out
-            || result.code != Some(0)
-            || sanitizer_finding(&result.stderr).is_some()
+        if result.stderr.contains(NESTED_REFUSAL) {
+            return Err(format!(
+                "{name}: native test compiler recursively invokes `atto test`"
+            ));
+        }
+        if result.timed_out || result.code != Some(0) || sanitizer_finding(&result.stderr).is_some()
         {
             failures += 1;
             eprintln!(
@@ -650,7 +783,7 @@ impl Rng {
 /// Reject path escapes and symlinked ancestors before accessing project-owned
 /// input/output. This is a preflight boundary check, not an atomic openat2
 /// guarantee against a concurrently malicious local filesystem writer.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     let relative = Path::new(name);
     if relative.as_os_str().is_empty()
@@ -684,7 +817,7 @@ fn checked_project_path(root: &Path, name: &str) -> Result<PathBuf, String> {
 
 // Bound bytes read from the opened stream as well as preflight file sizes.
 // This limits allocation if a regular corpus file grows during ingestion.
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(any(test, not(unix)))]
 fn read_corpus_case(input: impl Read, max_bytes: usize) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     input
@@ -700,13 +833,13 @@ fn read_corpus_case(input: impl Read, max_bytes: usize) -> Result<Vec<u8>, Strin
 /// Bound reads using the *opened file descriptor*. Linux also denies a final
 /// symlink and avoids FIFO blocking, even if a path changes after listing.
 /// Ancestor components still require descriptor-relative openat/openat2.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn read_case_bounded(root: &Path, relative: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         return super::fs_secure::read_project_file(root, relative, max_bytes);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let path = root.join(relative);
         let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -729,10 +862,10 @@ fn corpus(
         .map(|v| v.as_str().ok_or("fuzz.corpus must be a relative path"))
         .transpose()?
         .unwrap_or("tests/corpus");
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     let path = checked_project_path(_root, name)?;
     let mut cases = vec![vec![], vec![0], vec![255]];
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     match fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(cases),
         Err(e) => return Err(e.to_string()),
@@ -741,7 +874,7 @@ fn corpus(
         }
         _ => {}
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         // Reuse the same project-_root descriptor as the future failure
         // artifact write. Absent optional corpora remain empty without a
@@ -753,7 +886,7 @@ fn corpus(
             MAX_CORPUS_BYTES,
         )?);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let mut files = Vec::new();
         for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
@@ -788,14 +921,61 @@ fn corpus(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Failure {
     Exit(i32),
+    /// Unix crash signal (SIGSEGV, SIGABRT, ...) with no sanitizer report.
+    Signal(i32),
     Sanitizer(&'static str),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CandidateOutcome {
     Clean,
     Failure(Failure),
+    /// Configured `[fuzz].inconclusive_exits` status.
     Inconclusive(i32),
+    /// Timeout, output budget, non-crash signal or sanitizer runtime
+    /// failure. Input-dependent, so it is never a defect, and during
+    /// minimization it simply does not reproduce the confirmed one.
+    Unclassifiable(String),
+}
+
+// Signals that mean the guest itself faulted or aborted. SIGKILL/SIGTERM/
+// SIGXCPU and friends come from the OOM killer, CI cancellation or resource
+// limits; those stay inconclusive rather than becoming saved reproducers.
+#[cfg(unix)]
+fn crash_signal(signal: i32) -> bool {
+    const SIGBUS: i32 = if cfg!(any(target_os = "linux", target_os = "android")) {
+        7
+    } else {
+        10
+    };
+    // SIGILL, SIGTRAP, SIGABRT, SIGFPE, SIGSEGV share numbers on Linux/BSD/macOS.
+    return matches!(signal, 4 | 5 | 6 | 8 | 11) || signal == SIGBUS;
+}
+
+#[cfg(not(unix))]
+fn crash_signal(_signal: i32) -> bool {
+    return false;
+}
+
+// UBSan prints `path:line:col: runtime error: ...` or `<unknown>: runtime
+// error: ...`. A bare substring also matched Go panics ("panic: runtime
+// error: index out of range") and ordinary guest error text.
+fn ubsan_runtime_error(stderr: &str) -> bool {
+    return stderr.lines().any(|line| {
+        let Some(at) = line.find(": runtime error: ") else {
+            return false;
+        };
+        let location = &line[..at];
+        if location.ends_with("<unknown>") {
+            return true;
+        }
+        let mut parts = location.rsplitn(3, ':');
+        let column = parts.next().unwrap_or("");
+        let row = parts.next().unwrap_or("");
+        let path = parts.next().unwrap_or("");
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        !path.is_empty() && digits(row) && digits(column)
+    });
 }
 
 fn sanitizer_finding(stderr: &str) -> Option<&'static str> {
@@ -809,8 +989,7 @@ fn sanitizer_finding(stderr: &str) -> Option<&'static str> {
         || stderr.contains("SUMMARY: ThreadSanitizer:")
     {
         Some("TSan")
-    } else if stderr.contains("SUMMARY: UndefinedBehaviorSanitizer:")
-        || stderr.contains("runtime error:")
+    } else if stderr.contains("SUMMARY: UndefinedBehaviorSanitizer:") || ubsan_runtime_error(stderr)
     {
         Some("UBSan")
     } else {
@@ -822,8 +1001,18 @@ fn classify(result: &ProcessResult) -> Result<Option<Failure>, String> {
     if result.timed_out {
         return Err("guest timed out; cannot classify fuzz failure".into());
     }
+    if result.output_exceeded {
+        return Err("guest exceeded the 4 MB output capture budget".into());
+    }
+    // The target is (a wrapper around) this CLI. That is a configuration
+    // error, not a defect in the code under test; never save a reproducer.
+    if result.stderr.contains(NESTED_REFUSAL) {
+        return Err("fuzz target recursively invokes `atto test`; fix [fuzz].command".into());
+    }
     if result.stderr.contains("FATAL: ThreadSanitizer:")
-        || result.stderr.contains("ThreadSanitizer: unexpected memory mapping")
+        || result
+            .stderr
+            .contains("ThreadSanitizer: unexpected memory mapping")
     {
         return Err("ThreadSanitizer failed to initialize; no race result is available".into());
     }
@@ -831,10 +1020,14 @@ fn classify(result: &ProcessResult) -> Result<Option<Failure>, String> {
     if let Some(kind) = sanitizer_finding(&result.stderr) {
         return Ok(Some(Failure::Sanitizer(kind)));
     }
-    match result.code {
-        Some(0) => Ok(None),
-        Some(code) => Ok(Some(Failure::Exit(code))),
-        None => Err("guest terminated abnormally without a sanitizer diagnostic".into()),
+    match (result.code, result.signal) {
+        (Some(0), _) => Ok(None),
+        (Some(code), _) => Ok(Some(Failure::Exit(code))),
+        (None, Some(signal)) if crash_signal(signal) => Ok(Some(Failure::Signal(signal))),
+        (None, Some(signal)) => Err(format!(
+            "guest killed by non-crash signal {signal} (resource limit, OOM killer or external cancellation)"
+        )),
+        (None, None) => Err("guest terminated abnormally without a sanitizer diagnostic".into()),
     }
 }
 
@@ -849,12 +1042,13 @@ fn candidate(
     project.verify_path(root)?;
     let result = invoke(sanitize_command(cmd, root)?, timeout, Some(bytes), true)?;
     project.verify_path(root)?;
-    match classify(&result)? {
-        Some(Failure::Exit(code)) if inconclusive_exits.contains(&code) => {
+    match classify(&result) {
+        Err(reason) => Ok(CandidateOutcome::Unclassifiable(reason)),
+        Ok(Some(Failure::Exit(code))) if inconclusive_exits.contains(&code) => {
             Ok(CandidateOutcome::Inconclusive(code))
         }
-        Some(failure) => Ok(CandidateOutcome::Failure(failure)),
-        None => Ok(CandidateOutcome::Clean),
+        Ok(Some(failure)) => Ok(CandidateOutcome::Failure(failure)),
+        Ok(None) => Ok(CandidateOutcome::Clean),
     }
 }
 
@@ -864,44 +1058,89 @@ fn write_failure(root: &Path, bytes: &[u8], _project: &ProjectRoot) -> Result<Pa
     let hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
     });
-    let relative =
-        Path::new(".oreslang-test/failures").join(format!("fuzz-{hash:016x}-{}.bin", bytes.len()));
-    #[cfg(target_os = "linux")]
-    {
-        _project.verify_path(root)?;
-        _project.reproducer(&relative, bytes)?;
-        // Do not return a path that might now refer to a replaced root,
-        // even though the write itself was anchored safely to our FD.
-        _project.verify_path(root)?;
-        return Ok(root.join(relative));
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let folder = checked_project_path(root, ".oreslang-test/failures")?;
-        fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
-        checked_project_path(root, ".oreslang-test/failures")?;
-        let path = root.join(&relative);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(bytes).map_err(|e| e.to_string())?;
-                Ok(path)
+    // A name already holding different bytes (an FNV collision, or a file
+    // left by an older CLI) gets a numbered sibling instead of failing.
+    for attempt in 0..16 {
+        let suffix = if attempt == 0 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
+        let relative = Path::new(".oreslang-test/failures")
+            .join(format!("fuzz-{hash:016x}-{}{suffix}.bin", bytes.len()));
+        #[cfg(unix)]
+        {
+            _project.verify_path(root)?;
+            let stored = _project.reproducer(&relative, bytes)?;
+            // Do not return a path that might now refer to a replaced root,
+            // even though the write itself was anchored safely to our FD.
+            _project.verify_path(root)?;
+            if stored {
+                return Ok(root.join(relative));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
-                if !meta.is_file()
-                    || meta.file_type().is_symlink()
-                    || read_case_bounded(root, &relative, bytes.len())? != bytes
-                {
-                    return Err("unsafe or colliding failure artifact".into());
-                }
-                Ok(path)
+        }
+        #[cfg(not(unix))]
+        {
+            if write_failure_by_path(root, &relative, bytes)? {
+                return Ok(root.join(relative));
             }
-            Err(e) => Err(e.to_string()),
         }
     }
+    Err("every reproducer name is taken by different bytes".into())
 }
+
+/// Path-based fallback (no openat): publish via a temporary file and a
+/// non-replacing hard link so the final name is never partially written.
+#[cfg(not(unix))]
+fn write_failure_by_path(root: &Path, relative: &Path, bytes: &[u8]) -> Result<bool, String> {
+    let folder = checked_project_path(root, ".oreslang-test/failures")?;
+    fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    checked_project_path(root, ".oreslang-test/failures")?;
+    let path = root.join(relative);
+    let existing = |path: &Path| -> Result<bool, String> {
+        let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            return Err("unsafe existing failure artifact".into());
+        }
+        Ok(meta.len() == bytes.len() as u64
+            && read_case_bounded(root, relative, bytes.len())? == bytes)
+    };
+    if path.exists() {
+        return existing(&path);
+    }
+    let temp = folder.join(format!(".tmp-{}-{}", std::process::id(), bytes.len()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|e| e.to_string())?;
+    let written = file.write_all(bytes).and_then(|_| file.sync_all());
+    drop(file);
+    let linked = written.and_then(|_| fs::hard_link(&temp, &path));
+    let _ = fs::remove_file(&temp);
+    match linked {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => existing(&path),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 // Retention is optional mutation feedback, not execution coverage. Once either
 // budget is full, keep executing cases without growing the retained pool.
+// A generated fuzz case must differ from its seed. Random XOR bytes can be
+// zero (or cancel each other), while the fresh-random branch can choose an
+// empty vector. Count actual changed payloads, not mutation attempts.
+fn ensure_distinct_mutation(base: &[u8], generated: &mut Vec<u8>, max_bytes: usize) {
+    if generated.as_slice() != base {
+        return;
+    }
+    if generated.len() < max_bytes {
+        generated.push(0xa5);
+    } else if let Some(first) = generated.first_mut() {
+        *first ^= 1;
+    }
+}
+
 fn retain_sample(samples: &mut Vec<Vec<u8>>, retained_bytes: &mut usize, case: Vec<u8>) -> bool {
     let Some(next) = retained_bytes.checked_add(case.len()) else {
         return false;
@@ -937,6 +1176,70 @@ fn fuzz_inconclusive_exits(params: &toml::Table) -> Result<BTreeSet<i32>, String
         }
     }
     Ok(codes)
+}
+
+/// Lowercase hex of an unsaved reproducer, capped so a 64 KiB input cannot
+/// flood the log. A truncated preview says so; the seed still replays it.
+fn hex_preview(bytes: &[u8]) -> String {
+    const CAP: usize = 4096;
+    let mut out: String = bytes.iter().take(CAP).map(|b| format!("{b:02x}")).collect();
+    if bytes.len() > CAP {
+        out.push_str(&format!("...(truncated; {} bytes total)", bytes.len()));
+    }
+    if out.is_empty() {
+        out.push_str("<empty>");
+    }
+    out
+}
+
+/// One deterministic mutation of `base`, never longer than `max_bytes`.
+/// In-place byte flips alone could never change a corpus input's length,
+/// so structured seeds could not grow, shrink or recombine.
+fn mutate(rng: &mut Rng, mut bytes: Vec<u8>, donor: &[u8], max_bytes: usize) -> Vec<u8> {
+    if bytes.is_empty() || rng.range(8) == 0 {
+        bytes = vec![0; rng.range(max_bytes + 1)];
+        for x in &mut bytes {
+            *x = rng.next() as u8;
+        }
+        return bytes;
+    }
+    for _ in 0..(1 + rng.range(4)) {
+        let len = bytes.len();
+        match rng.range(6) {
+            // Flip, insert, delete, duplicate a chunk, splice a donor tail.
+            0 | 1 if len > 0 => {
+                let at = rng.range(len);
+                bytes[at] ^= (rng.next() as u8) | 1;
+            }
+            2 => {
+                let at = rng.range(len + 1);
+                let count = 1 + rng.range(8);
+                let fresh: Vec<u8> = (0..count).map(|_| rng.next() as u8).collect();
+                bytes.splice(at..at, fresh);
+            }
+            3 if len > 0 => {
+                let at = rng.range(len);
+                let end = (at + 1 + rng.range(8)).min(len);
+                bytes.drain(at..end);
+            }
+            4 if len > 0 => {
+                let at = rng.range(len);
+                let end = (at + 1 + rng.range(16)).min(len);
+                let chunk = bytes[at..end].to_vec();
+                let to = rng.range(bytes.len() + 1);
+                bytes.splice(to..to, chunk);
+            }
+            5 if !donor.is_empty() => {
+                let cut = rng.range(bytes.len() + 1);
+                let from = rng.range(donor.len());
+                bytes.truncate(cut);
+                bytes.extend_from_slice(&donor[from..]);
+            }
+            _ => {}
+        }
+        bytes.truncate(max_bytes);
+    }
+    return bytes;
 }
 
 fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, String> {
@@ -987,24 +1290,19 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
         return Err("initial fuzz pool exceeds retention budgets".into());
     }
     let mut rng = Rng::new(settings.seed);
+    // Freeze the seed count. Comparing against samples.len() let every clean
+    // seed re-enter the pool, so the loop replayed the seeds forever and no
+    // mutated input was ever executed.
+    let seeds = samples.len();
+    let mut mutated = 0usize;
     for i in 0..settings.cases {
-        let case = if i < samples.len() {
+        let case = if i < seeds {
             samples[i].clone()
         } else {
-            let base = &samples[rng.range(samples.len())];
-            let mut bytes = base.clone();
-            if bytes.is_empty() || rng.range(4) == 0 {
-                bytes = vec![0; rng.range(max_bytes as usize + 1)];
-                for x in &mut bytes {
-                    *x = rng.next() as u8;
-                }
-            } else {
-                for _ in 0..(1 + rng.range(4)) {
-                    let idx = rng.range(bytes.len());
-                    bytes[idx] ^= rng.next() as u8;
-                }
-                bytes.truncate(max_bytes as usize);
-            }
+            let base = samples[rng.range(samples.len())].clone();
+            let donor = &samples[rng.range(samples.len())];
+            let mut bytes = mutate(&mut rng, base.clone(), donor, max_bytes as usize);
+            ensure_distinct_mutation(&base, &mut bytes, max_bytes as usize);
             bytes
         };
         let code = match candidate(
@@ -1016,13 +1314,24 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
             &inconclusive_exits,
         )? {
             CandidateOutcome::Clean => {
-                retain_sample(&mut samples, &mut retained_bytes, case);
+                if i >= seeds {
+                    mutated += 1;
+                    retain_sample(&mut samples, &mut retained_bytes, case);
+                }
                 continue;
             }
             CandidateOutcome::Inconclusive(status) => {
                 eprintln!(
                     "FUZZ INCONCLUSIVE seed={} iteration={i}: target exit {status} is inconclusive",
                     settings.seed
+                );
+                return Ok(2);
+            }
+            CandidateOutcome::Unclassifiable(reason) => {
+                eprintln!(
+                    "FUZZ INCONCLUSIVE seed={} iteration={i} bytes={}: {reason}",
+                    settings.seed,
+                    case.len()
                 );
                 return Ok(2);
             }
@@ -1095,19 +1404,41 @@ fn fuzz(root: &Path, config: &toml::Table, settings: &Settings) -> Result<i32, S
                 break;
             }
         }
-        let saved = write_failure(root, &shrunk, &project)?;
+        // The defect is confirmed. Failing to persist it (read-only checkout,
+        // full disk, hostile artifact directory) must not turn the run into
+        // an inconclusive exit 2 that hides the finding: report it with the
+        // minimized input inline instead.
+        let location = match write_failure(root, &shrunk, &project) {
+            Ok(saved) => format!("path={}", saved.display()),
+            Err(reason) => {
+                eprintln!("FUZZ REPRODUCER NOT SAVED: {reason}");
+                format!("path=<unsaved> input_hex={}", hex_preview(&shrunk))
+            }
+        };
         println!(
-            "FUZZ FAILURE seed={} iteration={i} finding={code:?} initial={} minimized={} path={}",
+            "FUZZ FAILURE seed={} iteration={i} finding={code:?} initial={} minimized={} {location}",
             settings.seed,
             case.len(),
             shrunk.len(),
-            saved.display()
         );
         return Ok(1);
     }
+    // A clean seed replay is not mutation fuzzing. A bounded run that never
+    // generated any input must not produce a green FUZZ PASS receipt.
+    if mutated == 0 {
+        eprintln!(
+            "FUZZ INCONCLUSIVE cases={} seeds={} mutated=0 seed={}: no generated mutations executed",
+            settings.cases,
+            seeds.min(settings.cases),
+            settings.seed
+        );
+        return Ok(2);
+    }
     println!(
-        "FUZZ PASS cases={} seed={} (observed inputs only)",
-        settings.cases, settings.seed
+        "FUZZ PASS cases={} seeds={} mutated={mutated} seed={} (observed inputs only)",
+        settings.cases,
+        seeds.min(settings.cases),
+        settings.seed
     );
     Ok(0)
 }
@@ -1149,6 +1480,11 @@ pub fn run(args: &[OsString]) -> i32 {
             }
             return Err("runtime --race is INCONCLUSIVE: trusted backend trace admission is not implemented; use --trace for explicitly offline Rust analysis".into());
         }
+        if std::env::var_os(GUEST_MARKER).is_some() {
+            return Err(format!(
+                "{NESTED_REFUSAL} ({GUEST_MARKER} is set): guest-spawning modes would recurse without a bound"
+            ));
+        }
         if settings.fuzz {
             fuzz(&root, &cfg, &settings)
         } else {
@@ -1171,27 +1507,86 @@ mod tests {
     #[test]
     fn sanitizer_verdicts_survive_signal_abort_and_reduction_cannot_change_failure_kind() {
         let output = ProcessResult {
-            code: None,
-            timed_out: false,
-            output: String::new(),
             stderr: "ERROR: AddressSanitizer: heap-use-after-free".into(),
+            ..ProcessResult::default()
         };
         assert_eq!(classify(&output), Ok(Some(Failure::Sanitizer("ASan"))));
         let exit = ProcessResult {
             code: Some(86),
-            timed_out: false,
-            output: String::new(),
-            stderr: String::new(),
+            ..ProcessResult::default()
         };
         assert_eq!(classify(&exit), Ok(Some(Failure::Exit(86))));
         assert_ne!(classify(&output), classify(&exit));
         let init = ProcessResult {
             code: Some(66),
-            timed_out: false,
-            output: String::new(),
             stderr: "FATAL: ThreadSanitizer: unexpected memory mapping".into(),
+            ..ProcessResult::default()
         };
         assert!(classify(&init).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crash_signals_are_defects_but_kill_and_output_budget_are_unclassifiable() {
+        for signal in [4, 6, 8, 11] {
+            let crashed = ProcessResult {
+                signal: Some(signal),
+                ..ProcessResult::default()
+            };
+            assert_eq!(classify(&crashed), Ok(Some(Failure::Signal(signal))));
+        }
+        // SIGKILL (OOM killer, CI cancellation) and SIGTERM stay inconclusive.
+        for signal in [9, 15] {
+            let killed = ProcessResult {
+                signal: Some(signal),
+                ..ProcessResult::default()
+            };
+            assert!(classify(&killed).is_err());
+        }
+        let noisy = ProcessResult {
+            output_exceeded: true,
+            ..ProcessResult::default()
+        };
+        assert!(classify(&noisy).is_err());
+        // A sanitizer report still outranks the signal that ended the run.
+        let asan_abort = ProcessResult {
+            signal: Some(6),
+            stderr: "==1==ERROR: AddressSanitizer: heap-buffer-overflow".into(),
+            ..ProcessResult::default()
+        };
+        assert_eq!(classify(&asan_abort), Ok(Some(Failure::Sanitizer("ASan"))));
+    }
+
+    #[test]
+    fn ubsan_detection_requires_sanitizer_location_shape() {
+        for real in [
+            "src/a.c:10:5: runtime error: signed integer overflow",
+            "/abs/path/x.cpp:1:1: runtime error: load of misaligned address",
+            "<unknown>: runtime error: call through invalid function pointer",
+            "noise\nlib.c:7:3: runtime error: shift exponent 40 is too large\n",
+        ] {
+            assert_eq!(sanitizer_finding(real), Some("UBSan"), "{real}");
+        }
+        for benign in [
+            "panic: runtime error: index out of range [5] with length 3",
+            "runtime error: index 5 out of bounds",
+            "error: runtime error: nested",
+            "file.c:x:5: runtime error: not a line number",
+        ] {
+            assert_eq!(sanitizer_finding(benign), None, "{benign}");
+        }
+    }
+
+    #[test]
+    fn duplicate_options_are_rejected_instead_of_last_wins() {
+        for args in [
+            &["--race", "--trace", "a.jsonl", "--trace", "b.jsonl"][..],
+            &["--fuzz", "--seed", "1", "--seed=2"][..],
+            &["--fuzz", "--fuzz"][..],
+        ] {
+            let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+            assert!(parse(&args).unwrap_err().contains("duplicate"), "{args:?}");
+        }
     }
 
     #[test]
@@ -1255,6 +1650,31 @@ mod tests {
                 filtered: 2,
             })
         );
+    }
+
+    #[test]
+    fn mutation_fallback_changes_empty_seed_without_exceeding_one_byte_budget() {
+        let mut generated = Vec::new();
+        ensure_distinct_mutation(&[], &mut generated, 1);
+        assert_eq!(generated, vec![0xa5]);
+    }
+
+    #[test]
+    fn mutation_fallback_changes_full_budget_seed_without_growing() {
+        let seed = [0u8, 1, 2, 3];
+        let mut generated = seed.to_vec();
+        ensure_distinct_mutation(&seed, &mut generated, seed.len());
+        assert_eq!(generated.len(), seed.len());
+        assert_ne!(generated.as_slice(), seed.as_slice());
+        assert_eq!(&generated[1..], &seed[1..]);
+    }
+
+    #[test]
+    fn mutation_fallback_never_overwrites_an_existing_real_change() {
+        let seed = [3u8, 4, 5];
+        let mut generated = vec![3, 7, 5];
+        ensure_distinct_mutation(&seed, &mut generated, seed.len());
+        assert_eq!(generated, vec![3, 7, 5]);
     }
 
     #[test]
@@ -1382,7 +1802,7 @@ mod tests {
         }
         let mut params = toml::Table::new();
         params.insert("corpus".into(), toml::Value::String("seeds".into()));
-        let expected = if cfg!(target_os = "linux") {
+        let expected = if cfg!(unix) {
             "corpus aggregate budget exhausted"
         } else {
             "corpus byte budget exceeded"
@@ -1427,6 +1847,27 @@ mod tests {
     }
 
     #[test]
+    fn mutation_changes_length_respects_max_bytes_and_is_deterministic() {
+        let base = b"key=value;".to_vec();
+        let run = |seed| {
+            let mut rng = Rng::new(seed);
+            (0..2000)
+                .map(|_| mutate(&mut rng, base.clone(), b"donor-bytes", 16))
+                .collect::<Vec<_>>()
+        };
+        let outputs = run(9);
+        assert_eq!(outputs, run(9));
+        assert!(outputs.iter().all(|m| m.len() <= 16));
+        assert!(outputs.iter().any(|m| m.len() > base.len()));
+        assert!(outputs
+            .iter()
+            .any(|m| !m.is_empty() && m.len() < base.len()));
+        assert!(outputs.iter().any(|m| m.windows(5).any(|w| w == b"donor")));
+        let distinct: BTreeSet<_> = outputs.iter().collect();
+        assert!(distinct.len() > 1500, "{}", distinct.len());
+    }
+
+    #[test]
     fn stable_seed_reproducibility() {
         let mut a = Rng::new(42);
         let mut b = Rng::new(42);
@@ -1435,7 +1876,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn opened_corpus_descriptor_denies_symlinks_and_oversize() {
         use std::os::unix::fs::symlink;
@@ -1452,7 +1893,7 @@ mod tests {
         symlink(&source, &alias).unwrap();
         assert!(crate::fs_secure::read_project_file(dir.path(), Path::new("alias"), 3).is_err());
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn fuzz_failure_artifact_collision_denies_symlink_alias() {
         use std::os::unix::fs::symlink;
@@ -1478,11 +1919,27 @@ mod tests {
         std::fs::create_dir_all(project.join("bin")).unwrap();
         let file = project.join("bin/oreslang-test");
         std::fs::write(&file, b"dummy").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let path = std::ffi::OsStr::new("bin");
         assert_eq!(
             resolve_path_candidate(Path::new("oreslang-test"), &project, path),
-            Some(file)
+            Some(file.clone())
         );
+        // A non-executable decoy earlier in PATH is skipped, as execvp does.
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(project.join("decoy")).unwrap();
+            std::fs::write(project.join("decoy/oreslang-test"), b"decoy").unwrap();
+            let search = std::env::join_paths(["decoy", "bin"]).unwrap();
+            assert_eq!(
+                resolve_path_candidate(Path::new("oreslang-test"), &project, &search),
+                Some(file)
+            );
+        }
     }
 
     #[test]
